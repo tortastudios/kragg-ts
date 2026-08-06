@@ -10,32 +10,78 @@ allowed, it is not. Open an issue instead.**
 
 ## The rules
 
-### 1. Zero runtime dependencies
+### 1. Exactly one runtime dependency
 
-`dependencies` is `{}` and stays `{}`. Anything shipped to a user's machine is
-written here or comes from `node:`. Node 20+ has a good standard library —
-`node:util`'s `parseArgs`, `node:test`, `node:child_process`,
-`node:fs`, `node:path` — and it is enough for a CLI.
+`dependencies` is `{"typescript": "6.0.3"}` and stays that. Everything else
+shipped to a user's machine is written here or comes from `node:`. Node 20+
+has a good standard library — `node:util`'s `parseArgs`, `node:test`,
+`node:child_process`, `node:fs`, `node:path` — and it is enough for a CLI.
+
+**Why `typescript` is a runtime dependency and not a build-time one.** This
+started as a zero-runtime-dependency project, and the earlier revision of this
+file said so. It is no longer true, for a reason that does not generalize: kragg
+analyzes TypeScript source, and **you cannot parse TypeScript without the
+TypeScript compiler.** Every gate that reads an AST — `complexity`,
+`halstead`, `type-complexity`, `structure`, `boundaries`, `forbidden-calls`,
+`nullable-default`, `secret-default`, `criticality`, the test-depth gates —
+goes through `ts.createSourceFile` or a `ts.Program`. Hand-rolling a
+TypeScript parser to preserve a dependency count would be the worst trade in
+the repository: thousands of lines of the hardest code here, wrong on syntax
+the language adds every six months, producing confident findings about a
+grammar it misread.
+
+This does not weaken the posture, and the specifics are the argument:
+
+- **Zero transitive dependencies.** `typescript@6.0.3` pulls nothing. Adding it
+  added exactly one node to the tree.
+- **No install scripts**, so `ignoreScripts: true` (rule 5) still means a
+  compromised version cannot execute anything by being installed.
+- **Microsoft-maintained**, with an enormous number of eyes on it, and it is a
+  package every TypeScript project already has anyway — kragg is not asking a
+  user to trust a party they did not already trust.
+- **The project's own copy is preferred at runtime.**
+  `resolveTypeScript` in [`src/analysis/compiler.ts`](../src/analysis/compiler.ts)
+  resolves `typescript` from the *target project's* root first, exactly as the
+  project's own code would resolve it, and only falls back to the bundled copy
+  with a note that every report surfaces. So the bundled version is a floor,
+  not the thing doing the analysis. Analyzing a TypeScript 5 project with a
+  TypeScript 6 compiler would produce confident results about a language the
+  project is not written in; that is the same refusal `environment.py` makes in
+  the Python sibling when it will not run pytest on kragg's interpreter.
+
+That combination — unavoidable, transitively empty, script-free, and preferred
+from the project rather than from us — is the *only* reason it clears a bar
+that almost nothing else does. **It is not a precedent.**
 
 ### 2. Minimal dev surface
 
-`devDependencies` is exactly two packages:
+`devDependencies` is exactly one package:
 
 | Package | Version | Why |
 | --- | --- | --- |
-| `typescript` | `6.0.3` | The build (`tsc`) and the typecheck. |
 | `@types/node` | `24.12.4` | Types for the `node:` builtins. |
 
-`typescript` is the one large trusted dependency in this project. It is
-maintained by Microsoft, has an enormous number of eyes on it, ships no
-install scripts, and has no dependencies of its own. That is the *only*
-reason it clears a bar that almost nothing else does. It is not a precedent.
+It pulls one transitive package, `undici-types`, from DefinitelyTyped. Types
+only — no runtime code.
 
-`@types/node` pulls one transitive package, `undici-types`, from
-DefinitelyTyped. Types only — no runtime code.
+**The whole installed tree is three packages.** `pnpm list --depth Infinity`,
+which agrees with the three entries in `pnpm-lock.yaml`'s `packages:` block:
 
-No bundler. No test framework. No linter. No formatter.
-`node:test` is the test runner and `tsc` is the build.
+```
+kragg@0.0.0
+│   dependencies:
+├── typescript@6.0.3
+│   devDependencies:
+└─┬ @types/node@24.12.4
+  └── undici-types@7.16.0
+
+3 packages
+```
+
+No bundler. No test framework. No linter. No formatter. `node:test` is the
+test runner and `tsc` is the build — and `tsc` comes from the runtime
+dependency above, so the build needs nothing the shipped package does not
+already have.
 
 ### 3. Pin every version exactly
 
@@ -126,8 +172,27 @@ on every contributor's machine and in CI. Read it.
 
 ## Deliberately deferred candidates
 
-These are the dependencies we can foresee wanting. None is adopted. Each is
-listed with what it would buy and what must be vetted first.
+These were the four dependencies this project expected to want. **None was
+adopted, and — now that the tool is complete — none turned out to be needed.**
+
+That is the strongest available evidence that this policy is workable rather
+than merely austere. The whole of `kragg check` (18 gates, 165 modules under
+`src/`) was built with `typescript` and the Node standard library:
+
+- the AST work that `oxc-parser` and `ts-morph` were for is done through the
+  TypeScript compiler API — the cheap `ts.createSourceFile` tier in
+  `src/analysis/sourceFile.ts` and the one shared `ts.Program` in
+  `src/analysis/program.ts` (see [architecture.md](architecture.md));
+- the graph work `graphology` was for is **Brandes' betweenness implemented
+  directly**, in `src/analysis/betweenness.ts` — 385 lines, the majority of
+  them the comment recording which networkx conventions it matches and why
+  (endpoints excluded, `1 / ((n-1)(n-2))` normalization), because criticality
+  is a *threshold* on that float and a different convention silently moves
+  functions across it;
+- `node:test` never fell short of what `vitest` would have given us.
+
+The entries are kept because the reasoning is the reusable part, and because
+a future need would face the same vetting.
 
 ### `oxc-parser` — fast syntax-only parsing
 
@@ -151,6 +216,15 @@ compiler for this.
 **Alternative if it does not clear the bar:** use the TypeScript compiler's
 own scanner/parser. Slower, but it is a dependency we already have.
 
+**Outcome: the alternative was taken and is sufficient.**
+`ts.createSourceFile` is the syntax tier (`src/analysis/sourceFile.ts`), and it
+is cheap — the expensive thing in TypeScript is not parsing, it is building a
+`ts.Program` with a type checker. Splitting those two tiers, rather than
+speeding up the parser, is what made the inner loop fast. Nothing here needs a
+native addon, and `resolveTypeScript` gets a further property no third-party
+parser could give us: the syntax tier parses with the *project's own*
+compiler, so it agrees with the project's `tsc` about what is valid syntax.
+
 ### `ts-morph`, or the raw TypeScript compiler API — type-aware gates
 
 **For:** anything needing real type information — the `typing-strictness`
@@ -159,8 +233,17 @@ gate, `any` detection, unsafe-cast detection, public API surface extraction.
 **Vet before adopting:** prefer the **raw compiler API**, which is already in
 `typescript` and adds no new package. `ts-morph` is a convenience wrapper: it
 is a real additional dependency and a real additional maintainer to trust, so
-adopt it only if the ergonomics savings are measured and large. Whichever we
-pick, program construction is slow — it belongs strictly in the SLOW tier.
+adopt it only if the ergonomics savings are measured and large.
+
+**Outcome: raw compiler API, and `ts-morph` was never needed.**
+`forbidden-calls`, `nullable-default` and `criticality` all resolve through
+`ts.TypeChecker` directly. One correction to the note above, which said program
+construction "belongs strictly in the SLOW tier": that turned out to be the
+wrong lever. Program construction is expensive *once*, not per gate, so the
+answer was **one lazily-built program shared across the run**
+(`src/analysis/program.ts`, `src/catalog/context.ts`) — which lets type-aware
+gates sit in the FAST tier where they belong, while a run that reaches none of
+them still pays nothing.
 
 ### `graphology` — call-graph betweenness centrality
 
@@ -173,6 +256,16 @@ is split across many small packages (`graphology-metrics`, `graphology-types`,
 well-specified algorithm (Brandes'); implementing it directly is on the order
 of a hundred lines and may well be cheaper than the trust cost.
 
+**Outcome: implemented directly, in `src/analysis/betweenness.ts`.** The trust
+argument held, and a second one appeared that settles it permanently: the
+Python sibling uses networkx, and criticality is a *threshold* on the resulting
+float (`betweenness >= 0.1 || fanIn >= 3`). Adopting any third-party
+implementation would mean adopting its normalization conventions too, and a
+convention mismatch does not produce slightly different numbers — it silently
+moves functions across the threshold and the two siblings start disagreeing
+about what is critical. Writing it ourselves is what let us match networkx's
+conventions deliberately and record the verification.
+
 ### `vitest` — test framework
 
 **For:** nothing yet. `node:test` covers what we need.
@@ -181,3 +274,9 @@ of a hundred lines and may well be cheaper than the trust cost.
 triggers are coverage reporting or snapshot ergonomics). Vitest brings a large
 transitive tree including a bundler. Measure the gap first; do not adopt it
 because it is familiar.
+
+**Outcome: `node:test` never fell short.** Neither predicted trigger fired.
+Coverage reporting was not a gap because kragg *consumes* coverage reports
+rather than producing them — `src/coverage/` normalizes istanbul JSON (vitest)
+and lcov (`node --test`, `bun test`) into one line model, so the tool has to
+read every runner's format regardless of which one it is tested with.

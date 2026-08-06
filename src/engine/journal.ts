@@ -49,11 +49,18 @@ export function journalPath(root: string): string {
 
 export interface AppendRunOptions {
   /**
-   * Whether the working tree had uncommitted changes. Passed in rather than
-   * computed here: the Python version reads it from its `changes` module, and
-   * this port has no git integration yet.
-   * TODO(git): replace with a `changes.ts` port once `kragg check --changed`
-   * lands, so callers cannot forget it and silently record `false`.
+   * Whether the working tree had uncommitted changes.
+   *
+   * Passed in rather than computed here, matching the Python version, which
+   * reads it from its `changes` module. Both call sites supply a real
+   * `await gitDirty(root)`; the option stays optional so journaling never
+   * becomes a reason for this module to touch git.
+   *
+   * It is load-bearing for `kragg flaky`: passive flake detection only trusts
+   * a pass/fail flip on a CLEAN tree, because a dirty tree explains the flip
+   * legitimately. An omitted value records `false`, which reads as "clean" —
+   * so a caller that genuinely cannot determine it is claiming more than it
+   * knows, and should not journal rather than guess.
    */
   readonly gitDirty?: boolean;
 }

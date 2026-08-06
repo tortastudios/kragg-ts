@@ -2,10 +2,10 @@
  * Betweenness centrality for directed graphs — Brandes' algorithm, BFS form.
  *
  * WHY THIS FILE IS A PORT AND NOT AN IMPLEMENTATION. The Python sibling calls
- * `networkx.betweenness_centrality(graph, normalized=True)`. kragg-ts has a
- * zero-runtime-dependency policy, so there is no networkx here — but the two
- * tools must classify the same codebase identically, because criticality is a
- * THRESHOLD on this float:
+ * `networkx.betweenness_centrality(graph, normalized=True)`. There is no
+ * networkx here, and reaching for a JS graph library would not have solved the
+ * problem anyway: the two tools must classify the same codebase identically,
+ * because criticality is a THRESHOLD on this float:
  *
  *     isCritical = betweenness >= 0.1 || fanIn >= 3
  *
