@@ -1,0 +1,87 @@
+name: CI
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+  workflow_dispatch:
+
+# Least privilege. Nothing here needs to write to the repo.
+permissions:
+  contents: read
+
+# A superseded run tells you nothing useful. Cancel it.
+concurrency:
+  group: ci-${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  check:
+    name: typecheck / build / test
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+
+    # Dependency lifecycle scripts must not run anywhere in this job.
+    # See docs/dependency-policy.md.
+    env:
+      npm_config_ignore_scripts: "true"
+
+    steps:
+      # TODO(pin): these are major-version tags, which are MUTABLE — the tag
+      # is repointed by the action's maintainer at will, so `@v5` is a
+      # standing authorization to run whatever they publish next. Pin each to
+      # a full 40-character commit SHA, with the version in a trailing
+      # comment, e.g.:
+      #   uses: actions/checkout@<sha>  # v5.0.0
+      # These SHAs were NOT verified when this workflow was scaffolded and
+      # are deliberately not guessed: a wrong-but-plausible SHA is worse than
+      # an honest tag. Look them up before the first real CI run.
+      - name: Checkout
+        uses: actions/checkout@v5
+        with:
+          persist-credentials: false
+
+      # Reads packageManager from package.json, so the pinned pnpm version
+      # and its integrity hash are the single source of truth.
+      - name: Enable corepack
+        run: corepack enable
+
+      - name: Setup Node
+        uses: actions/setup-node@v5
+        with:
+          node-version-file: .node-version
+          cache: pnpm
+
+      # --frozen-lockfile: fail if package.json and the lockfile disagree,
+      #   rather than silently resolving something new in CI.
+      # --ignore-scripts: belt and braces. `ignoreScripts: true` in
+      #   pnpm-workspace.yaml already covers this; the flag makes the
+      #   guarantee visible at the call site and survives a config edit.
+      - name: Install dependencies
+        run: pnpm install --frozen-lockfile --ignore-scripts
+
+      # Fail loudly if anything ever gets added to the build allowlist.
+      # `allowBuilds` must remain empty; see docs/dependency-policy.md.
+      - name: Assert no dependency is allowed to run build scripts
+        run: |
+          if grep -Eq '^allowBuilds:[[:space:]]*\{\}[[:space:]]*$' pnpm-workspace.yaml; then
+            echo "OK: allowBuilds is empty"
+          else
+            echo "::error::allowBuilds is no longer empty. This re-enables"
+            echo "::error::arbitrary code execution at install time."
+            exit 1
+          fi
+
+      - name: Typecheck
+        run: pnpm run typecheck
+
+      - name: Build
+        run: pnpm run build
+
+      - name: Test
+        run: pnpm run test
+
+  # TODO(spec): add a conformance job once `tortastudios/crag` grows its
+  # `spec/` directory. It must clone that repo at a PINNED spec tag — never
+  # `main` — run `spec/fixtures/` through this implementation, and diff the
+  # JSON output. See docs/spec-conformance.md.

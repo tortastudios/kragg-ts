@@ -1,0 +1,249 @@
+/**
+ * Tests for `kragg brief`.
+ *
+ * The load-bearing assertion is the FIRST one: outside a git repository
+ * `buildBrief` returns `null`, never an empty document. `git/changes.ts`
+ * keeps `null` and `[]` apart precisely so a caller cannot report "0 files
+ * changed" for a directory git was never able to answer about, and a brief
+ * that lost the distinction would print a confident, wrong review of nothing.
+ * `runBrief` turns that `null` into `EXIT_ENVIRONMENT` and the specific
+ * message `cmd_brief` prints.
+ *
+ * After that: the three sections, the area split (tests win ties), the fan-in
+ * ranking and its cap, and the two states of the gate section.
+ *
+ * Each fixture is a real, throwaway git repository — `changedFiles` shells out
+ * to git, so a mocked one would test the mock. `commit` gives the tests a base
+ * to diff against, which is what makes "changed" mean anything.
+ */
+
+import assert from "node:assert/strict";
+import { execFileSync } from "node:child_process";
+import { mkdirSync, mkdtempSync, rmSync, writeFileSync } from "node:fs";
+import { tmpdir } from "node:os";
+import { dirname, join } from "node:path";
+import { after, describe, it } from "node:test";
+
+import ts from "typescript";
+
+import { buildBrief, NOT_A_REPOSITORY_MESSAGE } from "../src/commands/brief.ts";
+import { DEFAULT_POLICY, type KraggPolicy } from "../src/policy/policy.ts";
+
+const roots: string[] = [];
+
+after(() => {
+  for (const root of roots) {
+    rmSync(root, { recursive: true, force: true });
+  }
+});
+
+const POLICY: KraggPolicy = {
+  ...DEFAULT_POLICY,
+  sourcePaths: ["src"],
+  testPaths: ["test"],
+};
+
+function scratch(files: Readonly<Record<string, string>>): string {
+  const root = mkdtempSync(join(tmpdir(), "kragg-brief-"));
+  roots.push(root);
+  write(root, files);
+  return root;
+}
+
+function write(root: string, files: Readonly<Record<string, string>>): void {
+  for (const [name, contents] of Object.entries(files)) {
+    const path = join(root, name);
+    mkdirSync(dirname(path), { recursive: true });
+    writeFileSync(path, contents);
+  }
+}
+
+function git(root: string, args: readonly string[]): void {
+  // `brief` reads real git history, so this test drives a real repository.
+  // Routing it through `runCommand` would make the fixture setup async for no
+  // benefit and couple the test to the thing it is testing around.
+  execFileSync("git", [...args], { cwd: root, stdio: "ignore" }); // kragg: ignore
+}
+
+/** A repository with one commit, so `HEAD` is a usable diff base. */
+function repository(files: Readonly<Record<string, string>>): string {
+  const root = scratch({ ".gitkeep": "" });
+  git(root, ["init", "--initial-branch=main"]);
+  git(root, ["config", "user.email", "test@example.com"]);
+  git(root, ["config", "user.name", "test"]);
+  git(root, ["add", "-A"]);
+  git(root, ["commit", "-m", "base"]);
+  write(root, files);
+  return root;
+}
+
+async function brief(root: string): Promise<string> {
+  const text = await buildBrief({ root, since: null, policy: POLICY, api: ts });
+  assert.ok(text !== null, "expected a brief");
+  return text;
+}
+
+describe("brief: not a repository is not an empty change set", () => {
+  it("returns null outside a git repository", async () => {
+    const text = await buildBrief({
+      root: scratch({ "src/a.ts": "export const a = 1;\n" }),
+      since: null,
+      policy: POLICY,
+      api: ts,
+    });
+    assert.equal(text, null);
+  });
+
+  it("names the failure the way cmd_brief does", () => {
+    assert.equal(NOT_A_REPOSITORY_MESSAGE, "not a git repository (required for brief)");
+  });
+
+  it("renders a real document for a repository with nothing changed", async () => {
+    const text = await brief(repository({}));
+    assert.ok(text.startsWith("# Change brief\n"), text);
+    assert.ok(text.includes("0 source files changed vs HEAD"), text);
+  });
+});
+
+describe("brief: the change set", () => {
+  it("groups changed files into Source, Tests and Other", async () => {
+    const root = repository({
+      "src/a.ts": "export const a = 1;\n",
+      "test/a.test.ts": "export const t = 1;\n",
+      "scripts/build.js": "module.exports = 1;\n",
+    });
+    const text = await brief(root);
+    assert.ok(text.includes("## Source\n- src/a.ts\n"), text);
+    assert.ok(text.includes("## Tests\n- test/a.test.ts\n"), text);
+    assert.ok(text.includes("## Other\n- scripts/build.js\n"), text);
+    assert.ok(text.includes("3 source files changed vs HEAD"), text);
+  });
+
+  it("files a colocated test under Tests, not Source", async () => {
+    // A `*.test.ts` inside a source path would otherwise leave the section a
+    // reviewer checks first permanently empty.
+    const root = repository({ "src/a.test.ts": "export const t = 1;\n" });
+    const text = await brief(root);
+    assert.ok(text.includes("## Tests\n- src/a.test.ts\n"), text);
+    assert.ok(!text.includes("## Source"), text);
+  });
+
+  it("omits kragg's own artifacts", async () => {
+    const root = repository({
+      "src/a.ts": "export const a = 1;\n",
+      ".kragg/history.jsonl": "{}\n",
+    });
+    const text = await brief(root);
+    assert.ok(!text.includes(".kragg/"), text);
+    assert.ok(text.includes("1 source file changed vs HEAD"), text);
+  });
+
+  it("names the base when diffing against a ref", async () => {
+    const root = repository({ "src/a.ts": "export const a = 1;\n" });
+    const text = await buildBrief({ root, since: "main", policy: POLICY, api: ts });
+    assert.ok(text !== null);
+    assert.ok(text.includes("vs main"), text);
+  });
+
+  it("returns null for a ref git cannot resolve", async () => {
+    const root = repository({ "src/a.ts": "export const a = 1;\n" });
+    const text = await buildBrief({ root, since: "no-such-ref", policy: POLICY, api: ts });
+    assert.equal(text, null);
+  });
+});
+
+describe("brief: critical functions touched", () => {
+  const CRITICALITY = JSON.stringify([
+    { name: "src/a#low", fan_in: 2, is_critical: true, risk: "MED" },
+    { name: "src/a#high", fan_in: 9, is_critical: true, risk: "HIGH" },
+    { name: "src/untouched#other", fan_in: 20, is_critical: true, risk: "HIGH" },
+  ]);
+
+  it("lists only the changed ones, ranked by fan-in", async () => {
+    const root = repository({
+      "src/a.ts": "export function low(): void {}\nexport function high(): void {}\n",
+      "src/untouched.ts": "export function other(): void {}\n",
+      ".kragg/criticality.json": CRITICALITY,
+    });
+    // Commit `untouched.ts` so it is genuinely not part of the change set.
+    git(root, ["add", "src/untouched.ts"]);
+    git(root, ["commit", "-m", "untouched"]);
+    const text = await brief(root);
+    assert.ok(
+      text.includes(
+        "## Critical functions touched\n" +
+          "- `src/a#high` (fan-in 9) in src/a.ts\n" +
+          "- `src/a#low` (fan-in 2) in src/a.ts\n",
+      ),
+      text,
+    );
+    assert.ok(!text.includes("src/untouched#other"), text);
+  });
+
+  it("prints `none` rather than dropping the heading", async () => {
+    const root = repository({ "src/a.ts": "export const a = 1;\n" });
+    const text = await brief(root);
+    assert.ok(text.includes("## Critical functions touched\nnone\n"), text);
+  });
+
+  it("caps the list and says how many were withheld", async () => {
+    const names = Array.from({ length: 6 }, (_, index) => `fn${index}`);
+    const root = repository({
+      "src/a.ts": names.map((name) => `export function ${name}(): void {}`).join("\n"),
+      ".kragg/criticality.json": JSON.stringify(
+        names.map((name, index) => ({
+          name: `src/a#${name}`,
+          fan_in: 10 - index,
+          is_critical: true,
+          risk: "HIGH",
+        })),
+      ),
+    });
+    const text = await buildBrief({
+      root,
+      since: null,
+      policy: { ...POLICY, maxViolationsPerGate: 2 },
+      api: ts,
+    });
+    assert.ok(text !== null);
+    assert.ok(text.includes("- `src/a#fn0` (fan-in 10) in src/a.ts\n"), text);
+    assert.ok(text.includes("- `src/a#fn1` (fan-in 9) in src/a.ts\n"), text);
+    assert.ok(text.includes("- +4 more, ranked by fan-in\n"), text);
+    assert.ok(!text.includes("fn5"), text);
+  });
+});
+
+describe("brief: the gate section", () => {
+  it("says there are no recorded runs when the journal is missing", async () => {
+    const text = await brief(repository({}));
+    assert.ok(
+      text.includes("## Last gate run\nno recorded runs (run `kragg check`)"),
+      text,
+    );
+  });
+
+  it("summarises the journal when there is one", async () => {
+    const root = repository({
+      ".kragg/history.jsonl": `${JSON.stringify({
+        schema_version: 1,
+        ts: "2026-08-06T00:00:00Z",
+        command: "check",
+        mode: "full",
+        git_sha: "abc1234",
+        git_dirty: false,
+        passed: true,
+        exit_code: 0,
+        duration_ms: 1500,
+        gates: [],
+      })}\n`,
+    });
+    const text = await brief(root);
+    assert.ok(text.includes("## Last gate run\nlast run: PASS (check, full mode"), text);
+  });
+
+  it("ends with exactly one trailing newline", async () => {
+    const text = await brief(repository({}));
+    assert.ok(text.endsWith("\n"), JSON.stringify(text.slice(-4)));
+    assert.ok(!text.endsWith("\n\n"), JSON.stringify(text.slice(-4)));
+  });
+});

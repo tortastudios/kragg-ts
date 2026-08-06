@@ -1,0 +1,62 @@
+{
+  "name": "kragg",
+  "version": "0.0.0",
+  "description": "Opinionated guardrails framework and CLI for AI-assisted TypeScript projects.",
+  "keywords": [
+    "guardrails",
+    "quality-gates",
+    "static-analysis",
+    "cli",
+    "typescript"
+  ],
+  "license": "MIT",
+  "author": "Torta Studios, LLC <tech@tortastudios.com>",
+  "maintainers": [
+    {
+      "name": "Torta Studios, LLC",
+      "email": "tech@tortastudios.com"
+    }
+  ],
+  "homepage": "https://tortastudios.com",
+  "repository": {
+    "type": "git",
+    "url": "git+https://github.com/tortastudios/kragg-ts.git"
+  },
+  "bugs": {
+    "url": "https://github.com/tortastudios/kragg-ts/issues"
+  },
+  "type": "module",
+  "engines": {
+    "node": ">=20"
+  },
+  "packageManager": "pnpm@11.9.0+sha512.bd682d5d03fe525ef7c9fd6780c6884d1e756ac4c9c9fe00c538782824310dcf90e3ddc4f53835f06dfaebd5085e41855e0bcbb3b60de2ac5bbab89e5036f03b",
+  "bin": {
+    "kragg": "./dist/cli.js"
+  },
+  "main": "./dist/index.js",
+  "types": "./dist/index.d.ts",
+  "exports": {
+    ".": {
+      "types": "./dist/index.d.ts",
+      "default": "./dist/index.js"
+    },
+    "./package.json": "./package.json"
+  },
+  "files": [
+    "dist",
+    "README.md",
+    "LICENSE"
+  ],
+  "sideEffects": false,
+  "scripts": {
+    "build": "tsc -p tsconfig.build.json",
+    "typecheck": "tsc --noEmit -p tsconfig.json",
+    "test": "node --test \"test/**/*.test.ts\""
+  },
+  "dependencies": {
+    "typescript": "6.0.3"
+  },
+  "devDependencies": {
+    "@types/node": "24.12.4"
+  }
+}

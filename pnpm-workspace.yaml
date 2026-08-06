@@ -1,0 +1,58 @@
+# pnpm settings for kragg-ts.
+#
+# As of pnpm v11, ONLY auth and registry settings are read from `.npmrc`.
+# Every behavioural setting — including all supply-chain hardening below —
+# must live here or it is silently ignored. See docs/dependency-policy.md.
+#
+# `packages:` is deliberately omitted: this is a single-package repo, so the
+# workspace contains only the root package. This file exists for settings.
+
+# --- Build / lifecycle scripts -------------------------------------------
+#
+# Never run install lifecycle scripts (preinstall/install/postinstall/
+# prepare) from dependencies OR from this project. This is the single most
+# important control against npm supply-chain attacks: a malicious version
+# cannot execute code merely by being installed.
+# Verified: https://pnpm.io/settings/build#ignorescripts (default: false)
+ignoreScripts: true
+
+# Allowlist of packages permitted to run build scripts, as a map of package
+# matchers to true/false. Empty map = nothing is allowed to build.
+# `onlyBuiltDependencies`, `onlyBuiltDependenciesFile`, `neverBuiltDependencies`,
+# `ignoredBuiltDependencies` and `ignoreDepScripts` were REMOVED in pnpm v11
+# and replaced by `allowBuilds`. Do not add entries here without a written
+# review; adding one re-enables arbitrary code execution at install time.
+# Verified: https://pnpm.io/settings/build#allowbuilds (added in v10.26.0)
+allowBuilds: {}
+
+# Explicitly reassert the default. `true` would run every dependency's build
+# scripts with no approval step. It must stay false, forever.
+# Verified: https://pnpm.io/settings/build#dangerouslyallowallbuilds (v10.9.0)
+dangerouslyAllowAllBuilds: false
+
+# --- Release-age cooldown ------------------------------------------------
+#
+# A published-then-yanked malicious version is usually caught within days.
+# Refuse to install anything younger than 30 days (43200 minutes).
+# pnpm v11's default is 1440 (1 day), which is not enough for us.
+# Verified: https://pnpm.io/settings/dependency-resolution#minimumreleaseage
+# (added in v10.16.0; unit is MINUTES)
+minimumReleaseAge: 43200
+
+# Fail the install when no version satisfies the cooldown, rather than
+# quietly installing a too-new one. Defaults to true when minimumReleaseAge
+# is explicitly configured; set here so the fail-closed behaviour is not
+# dependent on a default we would rather not trust.
+# Verified: https://pnpm.io/settings/dependency-resolution#minimumreleaseagestrict
+# (added in v11.0.0)
+minimumReleaseAgeStrict: true
+
+# The default (true) SKIPS the cooldown check for any package whose registry
+# metadata lacks a `time` field — an obvious bypass. Fail closed instead.
+# Verified: https://pnpm.io/settings/dependency-resolution#minimumreleaseageignoremissingtime
+# (added in v11.0.0)
+minimumReleaseAgeIgnoreMissingTime: false
+
+# No package is exempt from the cooldown. Keep this empty.
+# Verified: https://pnpm.io/settings/dependency-resolution#minimumreleaseageexclude
+minimumReleaseAgeExclude: []

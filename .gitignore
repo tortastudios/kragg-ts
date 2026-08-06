@@ -1,0 +1,21 @@
+# Build and dependency output. LEADING SLASHES ARE LOAD-BEARING: an unanchored
+# `name/` pattern matches that directory name at ANY depth, so `coverage/`
+# silently swallowed the whole of `src/coverage/` — this package's coverage
+# NORMALIZERS, real source, never committed and never noticed, because git does
+# not warn about a file it was told to ignore. `src/analysis/walk.ts` documents
+# the identical bug in the source walk and fixes it the same way: build-output
+# names are output only at the REPO ROOT. Anchor every one of them.
+/node_modules/
+/dist/
+# kragg local artifacts (journal, coverage, criticality, mutation sessions).
+# NOTE the `/*` — git cannot re-include a file inside an excluded DIRECTORY,
+# so `.kragg/` would make the negation below a silent no-op.
+.kragg/*
+# Accepted equivalent mutants are a reviewed, shared property of the codebase,
+# so this one artifact is deliberately tracked. See src/commands/mutation/baseline.ts.
+!.kragg/mutants.baseline
+/coverage/
+*.tsbuildinfo
+.DS_Store
+.env
+.env.*

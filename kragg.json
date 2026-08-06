@@ -1,0 +1,31 @@
+{
+  "profile": "strict-ai-typescript",
+  "source_paths": ["src"],
+  "test_paths": ["test"],
+
+  "structure_exclude": [
+    "src/index.ts"
+  ],
+
+  "layers": [
+    "src/index",
+    "src/cli",
+    "src/commands",
+    "src/hooks",
+    "src/catalog",
+    "src/gates",
+    "src/adapters",
+    "src/scaffold",
+    "src/coverage",
+    "src/analysis",
+    "src/environment",
+    "src/git",
+    "src/policy",
+    "src/util",
+    "src/engine"
+  ],
+
+  "forbidden_calls": {
+    "node:child_process": "spawn subprocesses through runCommand in src/engine/runner.ts"
+  }
+}

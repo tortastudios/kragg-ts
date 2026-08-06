@@ -1,0 +1,437 @@
+/**
+ * Tests for the two analysis tiers.
+ *
+ * The load-bearing properties here are not "does it parse" but:
+ *
+ *  - the program tier is LAZY and SHARED — a run with no type-aware gate must
+ *    never build a `ts.Program`, and two gates must never build two;
+ *  - a broken configuration is REPORTED, not guessed around;
+ *  - the syntax tier never crashes the run on one bad file.
+ *
+ * The tests import `typescript` directly, which production analysis code must
+ * NOT do (see `resolveTypeScript`): here it is the compiler under test, and
+ * passing it in explicitly keeps these tests off the shared handle cache.
+ */
+
+import assert from "node:assert/strict";
+import { mkdirSync, mkdtempSync, rmSync, writeFileSync } from "node:fs";
+import { tmpdir } from "node:os";
+import { join } from "node:path";
+import { after, describe, it } from "node:test";
+
+import ts from "typescript";
+
+import {
+  analysisProgram,
+  clearAnalysisProgramCache,
+  programFileNames,
+  sourceFilesFor,
+} from "../src/analysis/program.ts";
+import {
+  clearCompilerCache,
+  moduleImports,
+  moduleName,
+  parsedSources,
+  resolveTypeScript,
+} from "../src/analysis/sourceFile.ts";
+
+const temporaryRoots: string[] = [];
+
+after(() => {
+  clearAnalysisProgramCache();
+  clearCompilerCache();
+  for (const root of temporaryRoots) {
+    rmSync(root, { recursive: true, force: true });
+  }
+});
+
+function project(files: Readonly<Record<string, string>>): string {
+  const root = mkdtempSync(join(tmpdir(), "kragg-analysis-"));
+  temporaryRoots.push(root);
+  for (const [name, contents] of Object.entries(files)) {
+    const path = join(root, name);
+    mkdirSync(join(path, ".."), { recursive: true });
+    writeFileSync(path, contents);
+  }
+  return root;
+}
+
+/** Parse a snippet with the bundled compiler, for import-table assertions. */
+function parse(fileName: string, text: string): ts.SourceFile {
+  return ts.createSourceFile(fileName, text, ts.ScriptTarget.Latest, true, ts.ScriptKind.TS);
+}
+
+function importsOf(module: string, text: string): ReadonlyMap<string, string> {
+  return moduleImports(module, parse(`${module}.ts`, text), ts);
+}
+
+describe("moduleName", () => {
+  it("drops the extension and uses / separators", () => {
+    assert.equal(moduleName("/repo/src/a/b.ts", "/repo"), "src/a/b");
+    assert.equal(moduleName("/repo/src/a.tsx", "/repo/src"), "a");
+    assert.equal(moduleName("/repo/src/a.mts", "/repo/src"), "a");
+    assert.equal(moduleName("/repo/src/a.d.ts", "/repo/src"), "a");
+  });
+
+  it("drops a trailing index, as Python drops __init__", () => {
+    assert.equal(moduleName("/repo/src/a/index.ts", "/repo/src"), "a");
+  });
+
+  it("falls back to the source directory's own name at the root", () => {
+    assert.equal(moduleName("/repo/src/index.ts", "/repo/src"), "src");
+  });
+});
+
+describe("moduleImports", () => {
+  it("records default, named, aliased and namespace imports", () => {
+    const imports = importsOf(
+      "src/a",
+      [
+        'import def from "./other.ts";',
+        'import { one, two as alias } from "./other.ts";',
+        'import * as ns from "node:fs";',
+      ].join("\n"),
+    );
+    assert.equal(imports.get("def"), "src/other#default");
+    assert.equal(imports.get("one"), "src/other#one");
+    assert.equal(imports.get("alias"), "src/other#two");
+    assert.equal(imports.get("ns"), "node:fs#*");
+  });
+
+  it("records type-only imports — a type edge is still a dependency edge", () => {
+    const imports = importsOf(
+      "src/a",
+      ['import type { T } from "./types.ts";', 'import { type U } from "./types.ts";'].join("\n"),
+    );
+    assert.equal(imports.get("T"), "src/types#T");
+    assert.equal(imports.get("U"), "src/types#U");
+  });
+
+  it("keeps bare specifiers verbatim and resolves relative ones", () => {
+    const imports = importsOf(
+      "src/deep/a",
+      ['import { x } from "../shared/util.ts";', 'import { y } from "typescript";'].join("\n"),
+    );
+    assert.equal(imports.get("x"), "src/shared/util#x");
+    assert.equal(imports.get("y"), "typescript#y");
+  });
+
+  it("collapses a barrel specifier onto the directory module", () => {
+    const imports = importsOf("src/a", 'import { x } from "./sub/index.ts";');
+    assert.equal(imports.get("x"), "src/sub#x");
+  });
+
+  it("records re-exports, which barrels depend on", () => {
+    const imports = importsOf("src/index", 'export { inner as outer } from "./inner.ts";');
+    assert.equal(imports.get("outer"), "src/inner#inner");
+  });
+
+  it("skips export * — expanding it needs the other module's exports", () => {
+    assert.equal(importsOf("src/index", 'export * from "./inner.ts";').size, 0);
+  });
+
+  it("ignores a side-effect import, which binds no name", () => {
+    assert.equal(importsOf("src/a", 'import "./polyfill.ts";').size, 0);
+  });
+
+  it("records the two unambiguous require shapes", () => {
+    const imports = importsOf(
+      "src/a",
+      ['const whole = require("node:path");', 'const { join, resolve: r } = require("node:fs");'].join(
+        "\n",
+      ),
+    );
+    assert.equal(imports.get("whole"), "node:path#=");
+    assert.equal(imports.get("join"), "node:fs#join");
+    assert.equal(imports.get("r"), "node:fs#resolve");
+  });
+
+  it("never lets a re-export alias clobber a real local binding", () => {
+    const imports = importsOf(
+      "src/index",
+      ['import { x } from "./real.ts";', 'export { other as x } from "./barrel.ts";'].join("\n"),
+    );
+    assert.equal(imports.get("x"), "src/real#x");
+  });
+});
+
+describe("parsedSources", () => {
+  it("walks the source paths deterministically, skipping generated trees", () => {
+    const root = project({
+      "src/a.ts": "export const a = 1;\n",
+      "src/nested/b.ts": "export const b = 2;\n",
+      "src/types.d.ts": "export declare const d: number;\n",
+      "src/node_modules/vendor.ts": "export const v = 3;\n",
+      "dist/built.ts": "export const c = 4;\n",
+      "other/z.ts": "export const z = 5;\n",
+    });
+    const parsed = [...parsedSources(root, ["src"], { api: ts })];
+    assert.deepEqual(
+      parsed.map((source) => source.relative),
+      ["src/a.ts", "src/nested/b.ts"],
+    );
+    assert.equal(parsed[0]?.module, "src/a");
+    assert.equal(parsed[1]?.module, "src/nested/b");
+  });
+
+  it("analyzes real source directories named after build outputs", () => {
+    // REGRESSION. The skip set once matched by name at ANY depth, so this
+    // repo's own `src/coverage/istanbul.ts` was invisible to every gate that
+    // walks sources — they reported green over code they had never read.
+    // Output names are only generated at the top of a walk; a directory
+    // deeper in the tree is somebody's module.
+    const root = project({
+      "src/build/emit.ts": "export const emit = 2;\n",
+      "src/coverage/istanbul.ts": "export const normalize = 1;\n",
+      "src/dist/pack.ts": "export const pack = 3;\n",
+      "src/out/write.ts": "export const write = 4;\n",
+    });
+    assert.deepEqual(
+      [...parsedSources(root, ["src"], { api: ts })].map((source) => source.relative),
+      ["src/build/emit.ts", "src/coverage/istanbul.ts", "src/dist/pack.ts", "src/out/write.ts"],
+    );
+  });
+
+  it("still skips build outputs at the root of the walk", () => {
+    // The other half of the rule: scanning `.` must not pull in dist/.
+    const root = project({
+      "coverage/report.ts": "export const r = 2;\n",
+      "dist/built.ts": "export const b = 3;\n",
+      "src/a.ts": "export const a = 1;\n",
+    });
+    assert.deepEqual(
+      [...parsedSources(root, ["."], { api: ts })].map((source) => source.relative),
+      ["src/a.ts"],
+    );
+  });
+
+  it("skips nested node_modules at any depth", () => {
+    const root = project({
+      "src/a.ts": "export const a = 1;\n",
+      "src/pkg/node_modules/vendor.ts": "export const v = 2;\n",
+    });
+    assert.deepEqual(
+      [...parsedSources(root, ["src"], { api: ts })].map((source) => source.relative),
+      ["src/a.ts"],
+    );
+  });
+
+  it("includes declaration files only when asked", () => {
+    const root = project({ "src/types.d.ts": "export declare const d: number;\n" });
+    assert.equal([...parsedSources(root, ["src"], { api: ts })].length, 0);
+    assert.equal(
+      [...parsedSources(root, ["src"], { api: ts, includeDeclarations: true })].length,
+      1,
+    );
+  });
+
+  it("skips a source path that does not exist", () => {
+    const root = project({ "src/a.ts": "export const a = 1;\n" });
+    assert.equal([...parsedSources(root, ["src", "lib"], { api: ts })].length, 1);
+  });
+
+  it("skips a broken file instead of crashing the run", () => {
+    // Python skips SyntaxError; the TS parser recovers instead, so we detect
+    // the errors ourselves. One bad file must never take down twelve gates.
+    const root = project({
+      "src/broken.ts": "const = ;;; function (\n",
+      "src/good.ts": "export const good = 1;\n",
+    });
+    const parsed = [...parsedSources(root, ["src"], { api: ts })];
+    assert.deepEqual(
+      parsed.map((source) => source.relative),
+      ["src/good.ts"],
+    );
+  });
+
+  it("carries raw lines and an import table", () => {
+    const root = project({ "src/a.ts": 'import { x } from "./b.ts";\n// kragg: allow\n' });
+    const parsed = [...parsedSources(root, ["src"], { api: ts })];
+    const first = parsed[0];
+    assert.ok(first !== undefined);
+    assert.equal(first.lines[1], "// kragg: allow");
+    assert.equal(first.imports.get("x"), "src/b#x");
+  });
+});
+
+describe("resolveTypeScript", () => {
+  it("falls back to the bundled compiler with an explicit note", () => {
+    // A silent fallback is the one outcome that is not allowed: a report that
+    // used the wrong compiler and said nothing is worse than no report.
+    clearCompilerCache();
+    const root = project({ "package.json": "{}" });
+    const resolution = resolveTypeScript(root);
+    assert.equal(resolution.source, "bundled");
+    assert.equal(resolution.version, ts.version);
+    assert.match(resolution.note ?? "", /bundled typescript/);
+  });
+
+  it("caches per root", () => {
+    clearCompilerCache();
+    const root = project({ "package.json": "{}" });
+    assert.equal(resolveTypeScript(root), resolveTypeScript(root));
+  });
+
+  it("resolves this repo's own compiler, and reports no version caveat", () => {
+    // kragg-ts's own root resolves `typescript` to the very module we bundle,
+    // so there is no version disagreement to warn about.
+    clearCompilerCache();
+    const resolution = resolveTypeScript(join(import.meta.dirname, ".."));
+    assert.equal(resolution.api, ts);
+    assert.notEqual(resolution.path, null);
+    assert.equal(resolution.note, null);
+  });
+});
+
+describe("analysisProgram", () => {
+  const sample = {
+    "tsconfig.json": JSON.stringify({
+      compilerOptions: { target: "es2023", module: "nodenext", strict: true },
+      include: ["src/**/*.ts"],
+    }),
+    "src/a.ts": "export const count = 1;\nexport const label = 'x';\n",
+    "src/b.ts": "import { count } from './a.js';\nexport const doubled = count * 2;\n",
+  };
+
+  it("does not build a program until something asks for one", () => {
+    // The whole reason this tier is separate: `check --changed` over three
+    // files, with no type-aware gate firing, must cost nothing.
+    const handle = analysisProgram({ root: project(sample), api: ts });
+    assert.equal(handle.loaded(), false);
+    handle.load();
+    assert.equal(handle.loaded(), true);
+  });
+
+  it("builds one program and one checker, and reuses them", () => {
+    const handle = analysisProgram({ root: project(sample), api: ts });
+    const first = handle.load();
+    const second = handle.load();
+    assert.equal(first.ok, true);
+    assert.equal(first, second, "the program must be built once, not per caller");
+    if (!first.ok) {
+      return;
+    }
+    const file = first.program.getSourceFile(join(handle.root, "src", "a.ts"));
+    if (file === undefined) {
+      assert.fail("the program must contain the project's own source file");
+    }
+    // The checker is real: it knows `count` is a literal-typed number.
+    const statement = file.statements[0];
+    if (statement === undefined || !ts.isVariableStatement(statement)) {
+      assert.fail("expected `export const count = 1` as the first statement");
+    }
+    const declaration = statement.declarationList.declarations[0];
+    if (declaration === undefined) {
+      assert.fail("expected one declaration");
+    }
+    const symbol = first.checker.getSymbolAtLocation(declaration.name);
+    if (symbol === undefined) {
+      assert.fail("the checker must resolve a symbol for a declared name");
+    }
+    assert.equal(
+      first.checker.typeToString(first.checker.getTypeOfSymbolAtLocation(symbol, file)),
+      "1",
+    );
+  });
+
+  it("shares one handle per tsconfig across callers", () => {
+    clearAnalysisProgramCache();
+    const root = project(sample);
+    const shared = analysisProgram({ root });
+    assert.equal(analysisProgram({ root }), shared, "one program per run, not per gate");
+    clearAnalysisProgramCache();
+    assert.notEqual(analysisProgram({ root }), shared, "clearing must really clear");
+  });
+
+  it("keeps an explicit compiler out of the shared cache", () => {
+    clearAnalysisProgramCache();
+    const root = project(sample);
+    const injected = analysisProgram({ root, api: ts });
+    assert.notEqual(injected, analysisProgram({ root }));
+  });
+
+  it("reports a missing tsconfig instead of inventing default options", () => {
+    const load = analysisProgram({ root: project({ "src/a.ts": "export const a = 1;\n" }), api: ts })
+      .load();
+    assert.equal(load.ok, false);
+    if (load.ok) {
+      return;
+    }
+    assert.match(load.message, /no tsconfig\.json at/);
+    assert.match(load.message, /Fix:/);
+  });
+
+  it("reports an unusable tsconfig", () => {
+    const root = project({
+      "tsconfig.json": JSON.stringify({ extends: "./does-not-exist.json" }),
+      "src/a.ts": "export const a = 1;\n",
+    });
+    const load = analysisProgram({ root, api: ts }).load();
+    assert.equal(load.ok, false);
+  });
+
+  it("reports a tsconfig that matches no files", () => {
+    const root = project({
+      "tsconfig.json": JSON.stringify({ include: ["nothing/**/*.ts"] }),
+    });
+    const load = analysisProgram({ root, api: ts }).load();
+    assert.equal(load.ok, false);
+    if (load.ok) {
+      return;
+    }
+    assert.match(load.message, /No inputs were found|matches no files/);
+  });
+
+  it("caches the failure, so twelve gates do not retry a broken config", () => {
+    const handle = analysisProgram({ root: project({ "src/a.ts": "" }), api: ts });
+    assert.equal(handle.load(), handle.load());
+  });
+});
+
+describe("program file selection", () => {
+  const sample = {
+    "tsconfig.json": JSON.stringify({
+      compilerOptions: { target: "es2023", module: "nodenext" },
+      include: ["src/**/*.ts"],
+    }),
+    "src/a.ts": "export const a = 1;\n",
+    "src/b.ts": "export const b = 2;\n",
+  };
+
+  it("lists the project's own files, not lib or vendored declarations", () => {
+    const handle = analysisProgram({ root: project(sample), api: ts });
+    const load = handle.load();
+    assert.equal(load.ok, true);
+    if (!load.ok) {
+      return;
+    }
+    const names = programFileNames(load.program);
+    assert.deepEqual(
+      [...names].sort(),
+      [join(handle.root, "src", "a.ts"), join(handle.root, "src", "b.ts")].sort(),
+    );
+  });
+
+  it("narrows to a changed subset given relative or absolute paths", () => {
+    const handle = analysisProgram({ root: project(sample), api: ts });
+    const load = handle.load();
+    assert.equal(load.ok, true);
+    if (!load.ok) {
+      return;
+    }
+    const selected = sourceFilesFor(load.program, handle.root, [
+      "src/a.ts",
+      join(handle.root, "src", "a.ts"),
+      "src/a.ts",
+    ]);
+    assert.equal(selected.length, 1, "duplicates must collapse");
+
+    const mixed = sourceFilesFor(load.program, handle.root, [
+      "src/b.ts",
+      "README.md",
+      "src/deleted.ts",
+    ]);
+    assert.equal(mixed.length, 1);
+    assert.equal(mixed[0]?.fileName.endsWith("b.ts"), true);
+  });
+});

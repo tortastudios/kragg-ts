@@ -1,0 +1,61 @@
+{
+  "$schema": "https://json.schemastore.org/tsconfig",
+  "compilerOptions": {
+    /* Node 20+ is the floor (see package.json engines). ES2023 is fully
+       supported there, so nothing needs downlevelling. */
+    "target": "es2023",
+    "lib": ["es2023"],
+
+    /* Real Node ESM resolution: relative imports carry an explicit `.js`
+       extension and package.json `exports` is honoured. */
+    "module": "nodenext",
+    "moduleResolution": "nodenext",
+    "types": ["node"],
+
+    /* --- Strictness. This project dogfoods its own future
+       `typing-strictness` gate, so there are no escape hatches here.
+       Do not relax any of these to make an error go away; fix the code. --- */
+    "strict": true,
+    "noUncheckedIndexedAccess": true,
+    "exactOptionalPropertyTypes": true,
+    "noImplicitOverride": true,
+    "noFallthroughCasesInSwitch": true,
+    "noImplicitReturns": true,
+    "noUnusedLocals": true,
+    "noUnusedParameters": true,
+    "noPropertyAccessFromIndexSignature": true,
+    "useUnknownInCatchVariables": true,
+    "allowUnusedLabels": false,
+    "allowUnreachableCode": false,
+
+    /* `verbatimModuleSyntax` forces `import type` for type-only imports, so
+       emitted JS matches the source import-for-import. This is also what
+       makes the sources runnable under Node's native type stripping. */
+    "verbatimModuleSyntax": true,
+    "isolatedModules": true,
+    "erasableSyntaxOnly": true,
+    "forceConsistentCasingInFileNames": true,
+
+    /* Relative imports carry a literal `.ts` extension everywhere — in `src/`
+       and `test/` alike — so Node's native type stripping runs the sources
+       directly with no build step (`pnpm test`). Node does NOT remap a `.js`
+       specifier onto a `.ts` file, so the extension must be real on disk.
+
+       `rewriteRelativeImportExtensions` is what makes that safe to emit: tsc
+       rewrites each `./foo.ts` specifier to `./foo.js` in the output, so the
+       built ESM in `dist/` is correct Node ESM. One convention in source,
+       correct output at build time. The two flags go together — do not
+       enable one without the other. */
+    "allowImportingTsExtensions": true,
+    "rewriteRelativeImportExtensions": true,
+
+    /* `skipLibCheck` is an escape hatch: it hides breakage inside dependency
+       type definitions. We check them. If @types/node ever fails here, that
+       is a real signal about the dependency, not a reason to flip this. */
+    "skipLibCheck": false,
+
+    "noEmit": true
+  },
+  "include": ["src/**/*.ts", "test/**/*.ts"],
+  "exclude": ["node_modules", "dist"]
+}

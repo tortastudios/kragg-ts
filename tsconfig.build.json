@@ -1,0 +1,21 @@
+{
+  "$schema": "https://json.schemastore.org/tsconfig",
+  "extends": "./tsconfig.json",
+  "compilerOptions": {
+    "noEmit": false,
+    /* `allowImportingTsExtensions` is inherited as true and must stay true:
+       `rewriteRelativeImportExtensions` (also inherited) is what makes it
+       legal alongside emit, and is what turns the `.ts` specifiers in src/
+       into `.js` specifiers in dist/. See tsconfig.json for the rationale. */
+    "rootDir": "src",
+    "outDir": "dist",
+    "declaration": true,
+    "declarationMap": true,
+    "sourceMap": true,
+    "removeComments": false,
+    "incremental": true,
+    "tsBuildInfoFile": "dist/.tsbuildinfo"
+  },
+  "include": ["src/**/*.ts"],
+  "exclude": ["node_modules", "dist", "test"]
+}

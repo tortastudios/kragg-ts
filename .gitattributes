@@ -1,0 +1,18 @@
+* text=auto eol=lf
+
+*.ts    text eol=lf
+*.js    text eol=lf
+*.json  text eol=lf
+*.yaml  text eol=lf
+*.yml   text eol=lf
+*.md    text eol=lf
+
+# Lockfiles are generated: keep them out of diffs and language stats, but
+# they MUST stay in review scope for supply-chain audits. `linguist-generated`
+# collapses the diff by default; reviewers can still expand it.
+pnpm-lock.yaml  linguist-generated=true -diff
+
+*.png binary
+*.jpg binary
+*.gif binary
+*.ico binary

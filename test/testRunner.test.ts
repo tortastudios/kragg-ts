@@ -1,0 +1,495 @@
+/**
+ * Tests for the test-runner adapter.
+ *
+ * Three runners, three formats, one normalized report. The fixtures are built
+ * from each runner's documented/verified output shape — vitest's JSON reporter
+ * (read out of an installed vitest 3.2.7 and cross-checked against 4.1.10),
+ * node's TAP reporter, bun's console output — and no runner is executed here
+ * beyond the one already running these tests.
+ *
+ * The load-bearing cases:
+ *
+ *  - a test file that fails to IMPORT is a test failure, not a broken
+ *    environment (the `_is_tool_module` distinction from `catalog.py`);
+ *  - policy outranks every inference, and no evidence yields no runner;
+ *  - a missing runner is an environment error, never a passing gate.
+ *
+ * The coverage formats have their own file, `adapterCoverage.test.ts`.
+ */
+
+import assert from "node:assert/strict";
+import { mkdirSync, mkdtempSync, rmSync, writeFileSync } from "node:fs";
+import { tmpdir } from "node:os";
+import { join } from "node:path";
+import { after, test } from "node:test";
+
+import { runTests } from "../src/adapters/testRunner.ts";
+import { detectTestRunner } from "../src/adapters/support/detect.ts";
+import { parseBunTest } from "../src/adapters/support/bunTestReport.ts";
+import { parseNodeTap } from "../src/adapters/support/nodeTestReport.ts";
+import { parseVitestJson } from "../src/adapters/support/vitestReport.ts";
+import { artifacts, buildCommand } from "../src/adapters/support/testCommands.ts";
+import { resolveProjectEnvironment } from "../src/environment/project.ts";
+
+const roots: string[] = [];
+
+after(() => {
+  for (const root of roots) {
+    rmSync(root, { recursive: true, force: true });
+  }
+});
+
+function project(files: Readonly<Record<string, string>>): string {
+  const root = mkdtempSync(join(tmpdir(), "kragg-testrunner-"));
+  roots.push(root);
+  for (const [name, contents] of Object.entries(files)) {
+    const path = join(root, name);
+    mkdirSync(join(path, ".."), { recursive: true });
+    writeFileSync(path, contents, "utf8");
+  }
+  return root;
+}
+
+// ── vitest ─────────────────────────────────────────────────────────────────
+
+const VITEST_REPORT = JSON.stringify({
+  numTotalTestSuites: 2,
+  numPassedTestSuites: 1,
+  numFailedTestSuites: 1,
+  numPendingTestSuites: 0,
+  numTotalTests: 3,
+  numPassedTests: 1,
+  numFailedTests: 1,
+  numPendingTests: 1,
+  numTodoTests: 0,
+  startTime: 1_697_737_019_307,
+  success: false,
+  testResults: [
+    {
+      assertionResults: [
+        {
+          ancestorTitles: ["", "math"],
+          fullName: " math adds",
+          status: "passed",
+          title: "adds",
+          duration: 2,
+          failureMessages: [],
+          meta: {},
+        },
+        {
+          ancestorTitles: ["", "math"],
+          fullName: " math subtracts",
+          status: "failed",
+          title: "subtracts",
+          duration: 3,
+          failureMessages: [
+            "AssertionError: expected 5 to be 4 // Object.is equality\n" +
+              "    at /repo/test/math.test.ts:21:20\n" +
+              "    at node_modules/@vitest/runner/dist/index.js:9:1",
+          ],
+          location: { line: 20, column: 28 },
+          meta: {},
+        },
+        {
+          ancestorTitles: ["", "math"],
+          fullName: " math divides",
+          status: "skipped",
+          title: "divides",
+          failureMessages: [],
+          meta: {},
+        },
+      ],
+      startTime: 1,
+      endTime: 2,
+      status: "failed",
+      message: "",
+      name: "/repo/test/math.test.ts",
+    },
+  ],
+  snapshot: {},
+});
+
+test("vitest: a failed assertion becomes one pointer with a re-run command", () => {
+  const report = parseVitestJson(VITEST_REPORT, "/repo");
+  assert.ok(report !== undefined);
+  assert.equal(report.success, false);
+  assert.deepEqual(report.summary, {
+    total: 3,
+    passed: 1,
+    failed: 1,
+    skipped: 1,
+    todo: 0,
+    failedFiles: 1,
+  });
+
+  assert.equal(report.violations.length, 1);
+  const violation = report.violations[0];
+  // Project-relative: an absolute path embeds a home directory and cannot be
+  // diffed between machines.
+  assert.equal(violation?.file, "test/math.test.ts");
+  // `location` is the DEFINITION site and wins over the stack's top frame.
+  assert.equal(violation?.line, 20);
+  assert.equal(violation?.column, 28);
+  assert.equal(violation?.code, "test-failed");
+  assert.match(violation?.message ?? "", /expected 5 to be 4/u);
+  assert.match(violation?.fixHint ?? "", /vitest run test\/math\.test\.ts -t 'math subtracts'/u);
+});
+
+test("vitest: the stack is used when --includeTaskLocation was not passed", () => {
+  const withoutLocation = VITEST_REPORT.replace('"location":{"line":20,"column":28},', "");
+  const report = parseVitestJson(withoutLocation, "/repo");
+  assert.ok(report !== undefined);
+  // The frame inside node_modules must never be preferred over the test file.
+  assert.equal(report.violations[0]?.line, 21);
+  assert.equal(report.violations[0]?.column, 20);
+});
+
+test("vitest: a test file that fails to IMPORT is a test failure, not a broken env", () => {
+  const importFailure = JSON.stringify({
+    numTotalTests: 0,
+    numPassedTests: 0,
+    numFailedTests: 0,
+    success: false,
+    testResults: [
+      {
+        assertionResults: [],
+        startTime: 1,
+        endTime: 1,
+        status: "failed",
+        message: "Cannot find module './helpers.ts' imported from /repo/test/api.test.ts",
+        name: "/repo/test/api.test.ts",
+      },
+    ],
+  });
+  const report = parseVitestJson(importFailure, "/repo");
+  assert.ok(report !== undefined);
+  assert.equal(report.violations.length, 1);
+  // Its own code, so a reader can tell "your import is wrong" from
+  // "your assertion is wrong" — and neither from "vitest is missing".
+  assert.equal(report.violations[0]?.code, "test-suite-error");
+  assert.equal(report.violations[0]?.file, "test/api.test.ts");
+  assert.match(report.violations[0]?.message ?? "", /Cannot find module/u);
+});
+
+test("vitest: a run matching no test files is a failure, not an empty pass", () => {
+  const noFiles = JSON.stringify({
+    numTotalTests: 0,
+    numPassedTests: 0,
+    numFailedTests: 0,
+    success: false,
+    testResults: [],
+  });
+  const report = parseVitestJson(noFiles, "/repo");
+  assert.ok(report !== undefined);
+  assert.equal(report.success, false);
+  assert.deepEqual(report.violations, []);
+});
+
+test("vitest: malformed, truncated, empty and foreign JSON never parse", () => {
+  const bad = ["", " \n", "not json", '{"numTotalTests":3,"testResults":[', '{"issues":[]}', "[]"];
+  for (const text of bad) {
+    assert.equal(parseVitestJson(text, "/repo"), undefined, text);
+  }
+});
+
+// ── node --test (TAP) ──────────────────────────────────────────────────────
+
+const NODE_TAP = `TAP version 13
+# Subtest: adds
+ok 1 - adds
+  ---
+  duration_ms: 0.5
+  ...
+# Subtest: subtracts
+not ok 2 - subtracts
+  ---
+  duration_ms: 1.2
+  location: '/repo/test/math.test.ts:12:1'
+  failureType: 'testCodeFailure'
+  error: 'Expected values to be strictly equal:\\n\\n1 !== 2'
+  code: 'ERR_ASSERTION'
+  stack: |-
+    TestContext.<anonymous> (/repo/test/math.test.ts:13:3)
+    Test.run (node:internal/test_runner/test:1118:25)
+  ...
+# Subtest: pending
+not ok 3 - pending # SKIP
+  ---
+  ...
+1..3
+# tests 3
+# suites 0
+# pass 1
+# fail 1
+# cancelled 0
+# skipped 1
+# todo 0
+# duration_ms 40
+`;
+
+test("node: parses TAP counts, locations and re-run commands", () => {
+  const report = parseNodeTap(NODE_TAP, "/repo");
+  assert.ok(report !== undefined);
+  assert.equal(report.summary.total, 3);
+  assert.equal(report.summary.passed, 1);
+  assert.equal(report.summary.failed, 1);
+  assert.equal(report.summary.skipped, 1);
+  assert.equal(report.success, false);
+
+  assert.equal(report.violations.length, 1);
+  const violation = report.violations[0];
+  assert.equal(violation?.file, "test/math.test.ts");
+  assert.equal(violation?.line, 12);
+  assert.match(violation?.message ?? "", /subtracts/u);
+  assert.match(violation?.fixHint ?? "", /node --test test\/math\.test\.ts/u);
+});
+
+test("node: a `# SKIP` directive is not a failure", () => {
+  const report = parseNodeTap(NODE_TAP, "/repo");
+  assert.ok(report !== undefined);
+  assert.ok(!report.violations.some((violation) => /pending/u.test(violation.message)));
+});
+
+test("node: a subtestsFailed rollup does not double-report its children", () => {
+  const withRollup = `TAP version 13
+    # Subtest: fails
+    not ok 1 - fails
+      ---
+      location: '/repo/test/a.test.ts:3:1'
+      failureType: 'testCodeFailure'
+      error: 'boom'
+      ...
+    1..1
+not ok 1 - test/a.test.ts
+  ---
+  location: '/repo/test/a.test.ts:1:1'
+  failureType: 'subtestsFailed'
+  error: '1 subtest failed'
+  ...
+1..1
+# tests 1
+# pass 0
+# fail 1
+`;
+  const report = parseNodeTap(withRollup, "/repo");
+  assert.ok(report !== undefined);
+  assert.equal(report.violations.length, 1);
+  assert.match(report.violations[0]?.message ?? "", /^fails/u);
+});
+
+test("node: a clean run passes and a truncated one does not", () => {
+  const clean = "TAP version 13\nok 1 - works\n1..1\n# tests 1\n# pass 1\n# fail 0\n";
+  const report = parseNodeTap(clean, "/repo");
+  assert.ok(report !== undefined);
+  assert.equal(report.success, true);
+  assert.deepEqual(report.violations, []);
+
+  // No summary at all: the run died before finishing, so it is not a pass.
+  const truncated = parseNodeTap("TAP version 13\nok 1 - works\n", "/repo");
+  assert.ok(truncated !== undefined);
+  assert.equal(truncated.success, false);
+});
+
+test("node: output that is not TAP at all does not parse", () => {
+  for (const bad of ["", "node: bad option: --nope", "{}"]) {
+    assert.equal(parseNodeTap(bad, "/repo"), undefined, bad);
+  }
+});
+
+// ── bun test ───────────────────────────────────────────────────────────────
+
+test("bun: scrapes counts and failures from the console output", () => {
+  const output = `bun test v1.3.14 (abcdef01)
+
+test/math.test.ts:
+(pass) math > adds [0.05ms]
+(fail) math > subtracts [0.10ms]
+  error: expect(received).toBe(expected)
+
+ 1 pass
+ 0 skip
+ 1 fail
+ 2 expect() calls
+Ran 2 tests across 1 files. [12.00ms]
+`;
+  const report = parseBunTest(output, 1);
+  assert.ok(report !== undefined);
+  assert.equal(report.summary.total, 2);
+  assert.equal(report.summary.passed, 1);
+  assert.equal(report.summary.failed, 1);
+  assert.equal(report.success, false);
+  assert.equal(report.violations[0]?.file, "test/math.test.ts");
+  assert.match(report.violations[0]?.message ?? "", /expect\(received\)/u);
+  assert.match(report.violations[0]?.fixHint ?? "", /bun test test\/math\.test\.ts/u);
+});
+
+test("bun: the TTY marker is recognised too, and a clean run needs exit 0", () => {
+  const output = "✓ adds [0.05ms]\n✗ subtracts [0.10ms]\n 1 pass\n 1 fail\n";
+  const report = parseBunTest(output, 1);
+  assert.ok(report !== undefined);
+  assert.equal(report.violations.length, 1);
+
+  const clean = parseBunTest(" 2 pass\n 0 fail\nRan 2 tests across 1 files.\n", 0);
+  assert.ok(clean !== undefined);
+  assert.equal(clean.success, true);
+
+  // The exit code is authoritative: bun's text format is not a contract, so a
+  // non-zero exit with no parsed failure must still not read as a pass.
+  const exitOnly = parseBunTest(" 2 pass\n 0 fail\nRan 2 tests across 1 files.\n", 1);
+  assert.ok(exitOnly !== undefined);
+  assert.equal(exitOnly.success, false);
+});
+
+test("bun: unrecognisable output does not parse", () => {
+  assert.equal(parseBunTest("", 1), undefined);
+  assert.equal(parseBunTest("bun: command not found", 127), undefined);
+});
+
+// ── detection ──────────────────────────────────────────────────────────────
+
+test("the test script outranks a config file and a dependency", () => {
+  const root = project({
+    "package.json": JSON.stringify({
+      scripts: { test: "tsc --noEmit && node --test" },
+      devDependencies: { vitest: "3.2.7" },
+    }),
+    "vitest.config.ts": "export default {}",
+  });
+  const detection = detectTestRunner(root, "auto");
+  assert.equal(detection.runner, "node");
+  assert.equal(detection.source, "package.json#scripts.test");
+});
+
+test("the first runner token in the script wins", () => {
+  const root = project({
+    "package.json": JSON.stringify({ scripts: { test: "vitest run && bun test" } }),
+  });
+  assert.equal(detectTestRunner(root, "auto").runner, "vitest");
+});
+
+test("a vitest config, then a vitest dependency, then bun evidence", () => {
+  assert.equal(
+    detectTestRunner(project({ "package.json": "{}", "vitest.config.mts": "" }), "auto").runner,
+    "vitest",
+  );
+  assert.equal(
+    detectTestRunner(
+      project({ "package.json": JSON.stringify({ devDependencies: { vitest: "3" } }) }),
+      "auto",
+    ).runner,
+    "vitest",
+  );
+  assert.equal(
+    detectTestRunner(project({ "package.json": "{}", "bunfig.toml": "[test]\n" }), "auto").runner,
+    "bun",
+  );
+});
+
+test("policy outranks every inference, and `off` means off", () => {
+  const root = project({ "package.json": JSON.stringify({ scripts: { test: "vitest run" } }) });
+  assert.equal(detectTestRunner(root, "node").runner, "node");
+  assert.equal(detectTestRunner(root, "off").runner, undefined);
+});
+
+test("an unsupported runner is named rather than reported as absent", () => {
+  const root = project({ "package.json": JSON.stringify({ scripts: { test: "jest --ci" } }) });
+  const detection = detectTestRunner(root, "auto");
+  assert.equal(detection.runner, undefined);
+  assert.equal(detection.unsupported, "jest");
+});
+
+test("no evidence yields no runner rather than defaulting to node", () => {
+  const detection = detectTestRunner(project({ "package.json": '{"name":"x"}' }), "auto");
+  assert.equal(detection.runner, undefined);
+  assert.equal(detection.source, "no test runner detected");
+});
+
+// ── commands ───────────────────────────────────────────────────────────────
+
+test("vitest is told where to write both of its reports", () => {
+  const layout = artifacts("/repo", "coverage/coverage-final.json");
+  const command = buildCommand("/repo/node_modules/.bin/vitest", "vitest", layout, true, []);
+  assert.ok(command.includes("--includeTaskLocation"), "location needs the explicit flag");
+  assert.ok(command.includes("--coverage.reporter=json"));
+  // Without this a failing run writes no coverage at all.
+  assert.ok(command.includes("--coverage.reportOnFailure"));
+  // No threshold is delegated: vitest signals it with the same exit code as a
+  // test failure, which would destroy the distinction.
+  assert.ok(!command.some((argument) => argument.includes("thresholds")));
+});
+
+test("node pairs each reporter with the destination that follows it", () => {
+  const layout = artifacts("/repo", "coverage/coverage-final.json");
+  const command = buildCommand("/usr/bin/node", "node", layout, true, ["test/"]);
+  const tap = command.indexOf("--test-reporter=tap");
+  const tapTo = command.indexOf("--test-reporter-destination=stdout");
+  const lcov = command.indexOf("--test-reporter=lcov");
+  assert.ok(tap >= 0 && tapTo === tap + 1, "tap destination must follow tap");
+  assert.ok(lcov > tapTo, "lcov reporter must come after the tap pair");
+  assert.equal(command[lcov + 1], `--test-reporter-destination=${layout.lcovFile}`);
+  assert.equal(command.at(-1), "test/");
+});
+
+test("bun asks for lcov, the only coverage format it can write", () => {
+  const layout = artifacts("/repo", "coverage/coverage-final.json");
+  const command = buildCommand("bun", "bun", layout, true, []);
+  assert.deepEqual(command, [
+    "bun",
+    "test",
+    "--coverage",
+    "--coverage-reporter=lcov",
+    `--coverage-dir=${layout.coverageDir}`,
+  ]);
+});
+
+test("the coverage report path decides where the runner is told to write", () => {
+  const layout = artifacts("/repo", "reports/cov/coverage-final.json");
+  assert.equal(layout.coverageDir, "/repo/reports/cov");
+  assert.equal(layout.lcovFile, "/repo/reports/cov/lcov.info");
+});
+
+// ── end to end skips ───────────────────────────────────────────────────────
+
+test("a project with no runner skips visibly with install commands", async () => {
+  const outcome = await runTests({
+    env: resolveProjectEnvironment(
+      project({ "package.json": '{"name":"x"}', "pnpm-lock.yaml": "" }),
+    ),
+    coverageFailUnder: 80,
+    maxViolations: 25,
+  });
+  assert.equal(outcome.ok, false);
+  assert.equal(outcome.kind, "not-configured");
+  assert.match(outcome.message, /no test runner detected/u);
+  assert.match(outcome.message, /pnpm add -D vitest/u);
+  assert.match(outcome.message, /nothing was verified/iu);
+});
+
+test("a missing vitest is an environment error, not a passing gate", async () => {
+  const outcome = await runTests({
+    env: resolveProjectEnvironment(
+      project({
+        "package.json": JSON.stringify({
+          packageManager: "pnpm@11.9.0",
+          scripts: { test: "vitest run" },
+        }),
+      }),
+    ),
+    coverageFailUnder: 80,
+    maxViolations: 25,
+  });
+  assert.equal(outcome.ok, false);
+  assert.equal(outcome.kind, "missing-tool");
+  assert.match(outcome.message, /pnpm add -D vitest/u);
+});
+
+test("`test_runner: off` is a deliberate skip that says so", async () => {
+  const outcome = await runTests({
+    env: resolveProjectEnvironment(project({ "package.json": "{}" })),
+    choice: "off",
+    coverageFailUnder: 80,
+    maxViolations: 25,
+  });
+  assert.equal(outcome.ok, false);
+  assert.match(outcome.message, /switched off/u);
+});
