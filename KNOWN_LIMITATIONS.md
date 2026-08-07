@@ -141,10 +141,12 @@ performs no inference of its own.
   of `any` is invisible to both this gate and `type-complexity`.
 - `Function` and `object` are matched **by name**, not through the checker.
 - The `{}` type is not flagged.
-- **Advisories on a passing gate are recorded but not printed.** `GateResult`
-  has no severity channel — adding one would break wire compatibility with
-  Python — so advisory findings (`skipLibCheck`, non-null assertions, internal
-  `any`) ride in a separate bucket that only surfaces when the gate fails.
+- Advisory findings (`skipLibCheck`, non-null assertions, internal `any`) are
+  reported on a **separate channel** from violations: they print under the gate
+  in text output, appear as `advisories` / `advisory_count` in JSON, and are
+  read by nothing that decides pass/fail or the exit code. An advisory that
+  changed the verdict would just be a violation with extra steps. They are
+  information, and it is on you to weigh them — nothing forces the issue.
 
 What it *does* close, which Python does not: since the `include`/`exclude`
 audit landed, a source file that no tsconfig covers is reported
@@ -267,8 +269,11 @@ and the MI formula is sensitive to it.
   - The stamped walk follows the **policy's** paths, not the tsconfig's
     `include`. A file checked by tsc but outside `source_paths` does not
     invalidate the stamp.
-  - `kragg map` and the Claude hook inherit the freshness *refusal* but do not
-    yet derive, so on stale data they show nothing rather than recomputing.
+  - `kragg map`, the Claude hook's SessionStart, and the check pipeline all
+    derive through the same memoized cache, so all three agree by construction
+    about what is critical and about when the answer has gone stale. A
+    derivation that fails inside the hook costs the criticality section and
+    nothing else — the hook's fail-open contract outranks completeness.
 
 ---
 

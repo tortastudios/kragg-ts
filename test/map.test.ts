@@ -27,8 +27,16 @@ import { after, describe, it } from "node:test";
 
 import ts from "typescript";
 
-import { buildMap, criticalityFlags, MAP_RELATIVE, writeMap } from "../src/commands/map.ts";
+import { analysisProgram } from "../src/analysis/program.ts";
+import {
+  buildMap,
+  criticalityFlags,
+  MAP_RELATIVE,
+  runMap,
+  writeMap,
+} from "../src/commands/map.ts";
 import { clamp, compact } from "../src/commands/map/render.ts";
+import { criticalityFreshness } from "../src/gates/criticality.ts";
 import { DEFAULT_POLICY, type KraggPolicy } from "../src/policy/policy.ts";
 
 const roots: string[] = [];
@@ -269,6 +277,88 @@ describe("map: docs and risk flags", () => {
 
   it("yields no flags when there is no criticality file", () => {
     assert.equal(criticalityFlags(project({})).size, 0);
+  });
+});
+
+/**
+ * `runMap` must DERIVE criticality data, not merely read it.
+ *
+ * `readJson` refuses data that no longer describes the tree, so a map that
+ * only read it would silently lose every risk flag the moment anyone edited a
+ * file — the flags being the one thing on a map line that reading the source
+ * would not have told you. Both directions are pinned here: it derives when it
+ * must, and it builds no program when it must not.
+ */
+describe("map: criticality derivation", () => {
+  /** Five callers of one helper: fan-in 5, which is `HIGH` on any threshold. */
+  const CALLERS = ["one", "two", "three", "four", "five"];
+  const HUB =
+    "export function helper(): number {\n  return 1;\n}\n" +
+    CALLERS.map((name) => `export function ${name}(): number {\n  return helper();\n}\n`).join("");
+
+  const TSCONFIG = JSON.stringify({
+    compilerOptions: {
+      target: "ES2022",
+      module: "ESNext",
+      moduleResolution: "bundler",
+      strict: true,
+      noEmit: true,
+    },
+    include: ["src"],
+  });
+
+  /** Run `runMap` with stdout captured, so a suite run stays readable. */
+  async function mapOutput(root: string): Promise<string> {
+    const chunks: string[] = [];
+    const real = process.stdout.write;
+    process.stdout.write = (chunk: string | Uint8Array): boolean => {
+      chunks.push(String(chunk));
+      return true;
+    };
+    try {
+      assert.equal(await runMap({ root, policy: POLICY }), 0);
+    } finally {
+      process.stdout.write = real;
+    }
+    return chunks.join("");
+  }
+
+  it("derives the flags rather than showing none, and again after an edit", async () => {
+    const root = project({ "tsconfig.json": TSCONFIG, "src/a.ts": HUB });
+
+    // No `.kragg/criticality.json` at all: the pre-derivation map printed the
+    // symbols with no flags and said nothing about why.
+    assert.match(await mapOutput(root), /fn helper\(\): number {2}\[HIGH]/);
+    assert.equal(criticalityFreshness(root), "fresh", "derivation must stamp what it wrote");
+
+    // Now the case that actually bites in an agent's inner loop: an edit
+    // invalidates the stamp, so the data on disk is refused. It must be
+    // rebuilt, not quietly dropped.
+    writeFileSync(join(root, "src/a.ts"), `${HUB}export const touched = 1;\n`);
+    assert.equal(criticalityFreshness(root), "stale", "the edit must invalidate the stamp");
+    assert.match(await mapOutput(root), /fn helper\(\): number {2}\[HIGH]/);
+    assert.equal(criticalityFreshness(root), "fresh");
+  });
+
+  it("builds no program when the data on disk is already current", async () => {
+    // THE LAZINESS CONTRACT. `ts.createProgram` is seconds on a real repo, and
+    // `kragg map` is a thing an agent runs at session start. Seeding the
+    // memoized handle first means the assertion is about the handle `runMap`
+    // itself will get, not a lookalike.
+    const root = project({
+      "tsconfig.json": TSCONFIG,
+      "src/a.ts": HUB,
+      ".kragg/criticality.json": JSON.stringify([
+        { name: "src/a#helper", fan_in: 5, is_critical: true, risk: "HIGH" },
+      ]),
+    });
+    assert.equal(criticalityFreshness(root), "fresh");
+    const handle = analysisProgram({ root });
+
+    const output = await mapOutput(root);
+
+    assert.equal(handle.loaded(), false, "a fresh cache must cost no compile");
+    assert.match(output, /fn helper\(\): number {2}\[HIGH]/);
   });
 });
 

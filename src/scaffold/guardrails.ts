@@ -289,9 +289,25 @@ jobs:
   check:
     runs-on: ubuntu-latest
     steps:
-      - uses: actions/checkout@v4
-      - uses: pnpm/action-setup@v4
-      - uses: actions/setup-node@v4
+      # Every \`uses:\` is pinned to a full commit SHA, and must stay that way.
+      #
+      # A tag — \`@v4\`, \`@v4.4.0\`, any of them — is a mutable pointer owned by
+      # the action's maintainer. Repointing it is a normal git operation, so a
+      # tag is a standing authorization to run whatever that account publishes
+      # next, with this repository checked out and this job's token in scope.
+      # That is the same exposure \`pnpm-workspace.yaml\` spends \`ignoreScripts\`
+      # and the 30-day \`minimumReleaseAge\` defending against for npm packages;
+      # CI runs on every push, so a mutable tag here would undo the rest.
+      #
+      # To update one, resolve the tag to its commit and paste the SHA:
+      #   gh api repos/<owner>/<repo>/git/ref/tags/<tag> --jq '.object.sha'
+      # If that reports \`"type": "tag"\` the tag is annotated and the SHA is
+      # the tag object, NOT the commit — dereference it before pinning:
+      #   gh api repos/<owner>/<repo>/git/tags/<sha> --jq '.object.sha'
+      # Never hand-write a SHA: a wrong-but-plausible one is worse than a tag.
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4.4.0
+      - uses: pnpm/action-setup@b906affcce14559ad1aafd4ab0e942779e9f58b1 # v4.3.0
+      - uses: actions/setup-node@49933ea5288caeca8642d1e84afbd3f7d6820020 # v4.4.0
         with:
           node-version-file: .node-version
           cache: pnpm

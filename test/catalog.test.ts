@@ -39,9 +39,11 @@ import {
   fromSecrets,
   fromSimple,
   fromTestDepth,
+  fromTypingStrictness,
   fromUnavailable,
   nativeGate,
   skipGate,
+  type RanReport,
 } from "../src/catalog/results.ts";
 import { FAST, SLOW, type GateSpec } from "../src/engine/gate.ts";
 import { EXIT_ENVIRONMENT, EXIT_GATE_FAILURES, EXIT_OK } from "../src/engine/report.ts";
@@ -353,6 +355,48 @@ describe("outcome mapping: fail vs error vs skip", () => {
       output: "segfault",
     });
     assert.equal(unparsed.output, "segfault");
+  });
+
+  it("routes typing-strictness advisories to the advisory channel, not to output", () => {
+    // THE REGRESSION THIS CLOSES. They used to be joined into `output`, which
+    // the report shows only for a FAILING gate with nothing structured — so on
+    // a green gate a deliberate escape hatch in the config was recorded and
+    // never printed. They must also not touch the verdict.
+    const result = fromTypingStrictness("typing-strictness", {
+      ok: true,
+      violations: [],
+      advisories: [{ message: "skipLibCheck is enabled", code: "tsconfig-advisory-flag" }],
+    });
+    assert.equal(result.passed, true);
+    assert.equal(result.violationCount, 0);
+    assert.equal(result.output, "");
+    assert.deepEqual(
+      result.advisories.map((advisory) => advisory.code),
+      ["tsconfig-advisory-flag"],
+    );
+  });
+
+  it("carries an adapter's advisories through, defaulting to none", () => {
+    // `audit` uses this to report what its severity floor filtered out —
+    // otherwise a clean run is indistinguishable from a run where the floor
+    // hid three findings, and nobody can judge whether the floor is set right.
+    const base: RanReport = {
+      ok: true,
+      command: ["x"],
+      violations: [],
+      violationCount: 0,
+      passed: true,
+      output: "",
+    };
+    const floored = fromReport("audit", {
+      ...base,
+      output: "audit: no advisories at or above `high` (3 below the `high` floor)",
+      advisories: [{ message: "3 advisories below the `high` severity floor, not reported" }],
+    });
+    assert.equal(floored.passed, true, "an advisory must never fail the gate");
+    assert.equal(floored.output, "", "a passing gate's raw output is still suppressed");
+    assert.equal(floored.advisories.length, 1);
+    assert.deepEqual(fromReport("t", base).advisories, []);
   });
 });
 

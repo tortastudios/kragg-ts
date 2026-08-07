@@ -41,7 +41,7 @@ import { runDoctor } from "./commands/doctor.ts";
 import { runFix } from "./commands/fix.ts";
 import { flakyCommand } from "./commands/flaky.ts";
 import { runGen } from "./commands/gen.ts";
-import { hookCheck } from "./commands/hookCheck.ts";
+import { hookCheck, hookCriticality } from "./commands/hookCheck.ts";
 import { cmdHook } from "./commands/hook.ts";
 import { runInit } from "./commands/init.ts";
 import { runMap } from "./commands/map.ts";
@@ -329,7 +329,12 @@ function reportCommand(
       // The protocol name is required, not defaulted. Running the Claude
       // adapter under another harness's name would "work" while feeding a
       // model output it never reads — the silent-no-op failure again.
-      return cmdHook({ protocol: rest[0] ?? "", root, runCheck: hookCheck });
+      return cmdHook({
+        protocol: rest[0] ?? "",
+        root,
+        runCheck: hookCheck,
+        ensureCriticality: hookCriticality,
+      });
     default:
       return usageError(`unknown command '${command}'`);
   }

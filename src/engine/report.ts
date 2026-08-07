@@ -60,6 +60,24 @@ export interface ProcessedGate {
   readonly shown: readonly Violation[];
   readonly truncated: boolean;
   readonly rawOutput: string | null;
+  /**
+   * Advisories to display: deduped and capped exactly like `shown`.
+   *
+   * They are processed on EVERY gate, passing or failing, which is the whole
+   * point — `rawOutput` above is deliberately a failure-only fallback, and
+   * routing advisories through it (as `typing-strictness` used to) meant a
+   * green gate printed nothing about a real escape hatch in the config.
+   */
+  readonly advisories: readonly Violation[];
+  /**
+   * How many DISTINCT advisories the gate produced, after dedupe.
+   *
+   * Deliberately post-dedupe, unlike `result.violationCount`, so that
+   * `advisoryCount > advisories.length` is exactly the truncation signal and
+   * needs no companion boolean. Dedupe loses nothing: the collapsed message
+   * carries its own `(+N more at …)` tail.
+   */
+  readonly advisoryCount: number;
 }
 
 /** A full pipeline run, ready to render as text or JSON. */
@@ -125,11 +143,16 @@ function processGate(result: GateResult, maxViolations: number): ProcessedGate {
   const failed = !result.passed && !result.skipped;
   const rawOutput =
     failed && shown.length === 0 && result.output ? capOutput(result.output) : null;
+  // Advisories get the same dedupe and the same cap, and are NOT conditioned
+  // on the verdict: a passing gate is the case they exist for.
+  const advisories = dedupeViolations(result.advisories);
   return {
     result,
     shown,
     truncated: shown.length < deduped.length,
     rawOutput,
+    advisories: advisories.slice(0, maxViolations),
+    advisoryCount: advisories.length,
   };
 }
 

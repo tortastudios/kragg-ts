@@ -58,6 +58,22 @@ export interface GateResult {
   /** Total violations found, including any not present in `violations`. */
   readonly violationCount: number;
   /**
+   * INFORMATION, NOT FINDINGS. Things a reader should see that must not change
+   * the verdict: a deliberate escape hatch in a config, a severity floor that
+   * filtered something out.
+   *
+   * Deliberately NOT consulted by `reportPassed`, `reportExitCode` or
+   * `violationCount`. An advisory that moved the exit code would be a
+   * violation with extra steps, and the split exists precisely so a gate can
+   * say "look at this" without saying "you are blocked".
+   *
+   * `Violation` is reused as the carrier because an advisory has the identical
+   * shape — file, line, code, message, fix hint — and the severity lives in
+   * WHICH LIST it is in, not in a field. That keeps `Violation` byte-identical
+   * to the Python sibling's; see `reportPayload.ts` for the wire decision.
+   */
+  readonly advisories: readonly Violation[];
+  /**
    * The gate could not run at all (missing tool, broken environment) as
    * opposed to running and finding problems. Drives exit code 3.
    */
@@ -93,6 +109,7 @@ export function gateResult(init: GateResultInit): GateResult {
     durationMs: init.durationMs ?? 0,
     violations: init.violations ?? [],
     violationCount: init.violationCount ?? 0,
+    advisories: init.advisories ?? [],
     error: init.error ?? false,
   };
 }

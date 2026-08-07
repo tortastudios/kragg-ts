@@ -79,6 +79,18 @@ export interface AuditFindings {
   readonly belowFloor: number;
   readonly passed: boolean;
   readonly output: string;
+  /**
+   * `belowFloor`, as something the report will actually print.
+   *
+   * `output` carries the same sentence, but the report suppresses a PASSING
+   * gate's raw output — and a passing audit is exactly the case where nobody
+   * is otherwise told that the floor filtered something out. "Clean at `high`"
+   * and "clean at `high`, with three below it" are different facts, and a
+   * reader judging whether the floor is set right needs to know which they
+   * have. Satisfies the optional `advisories` on `RanReport`; never affects
+   * `passed` or the exit code.
+   */
+  readonly advisories: readonly Violation[];
 }
 
 export type AuditOutcome = AuditFindings | Unavailable;
@@ -259,7 +271,30 @@ function report(
     belowFloor,
     passed: violations.length === 0,
     output: summarize(violations.length, belowFloor, floor),
+    advisories: floorAdvisory(belowFloor, floor),
   };
+}
+
+/**
+ * One advisory naming what the floor filtered, or none when it filtered
+ * nothing.
+ *
+ * One line, not one per excluded package: the actionable fact is that the
+ * floor is doing work and can be lowered, and listing N packages nobody is
+ * being asked to fix would cost a reader's attention to say the same thing.
+ */
+function floorAdvisory(belowFloor: number, floor: Severity): readonly Violation[] {
+  if (belowFloor === 0) {
+    return [];
+  }
+  const noun = belowFloor === 1 ? "advisory" : "advisories";
+  return [
+    {
+      message: `${belowFloor} ${noun} below the \`${floor}\` severity floor, not reported`,
+      code: "below-severity-floor",
+      fixHint: "lower `audit_severity` in kragg.json to see them",
+    },
+  ];
 }
 
 /**

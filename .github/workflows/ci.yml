@@ -27,17 +27,28 @@ jobs:
       npm_config_ignore_scripts: "true"
 
     steps:
-      # TODO(pin): these are major-version tags, which are MUTABLE — the tag
-      # is repointed by the action's maintainer at will, so `@v5` is a
-      # standing authorization to run whatever they publish next. Pin each to
-      # a full 40-character commit SHA, with the version in a trailing
-      # comment, e.g.:
-      #   uses: actions/checkout@<sha>  # v5.0.0
-      # These SHAs were NOT verified when this workflow was scaffolded and
-      # are deliberately not guessed: a wrong-but-plausible SHA is worse than
-      # an honest tag. Look them up before the first real CI run.
+      # EVERY `uses:` IN THIS FILE IS PINNED TO A FULL COMMIT SHA. Do not
+      # replace one with a tag, not even a patch tag.
+      #
+      # A tag — `@v5`, `@v5.0.1`, any of them — is a mutable pointer owned by
+      # the action's maintainer. Repointing it is a normal git operation, so a
+      # tag is a standing authorization to run whatever that account publishes
+      # next, with this repository checked out and this job's token in scope.
+      # That is the same exposure `pnpm-workspace.yaml` spends `ignoreScripts`
+      # and a 30-day `minimumReleaseAge` defending against for npm; CI runs on
+      # every push, so leaving it open here would undo the rest.
+      #
+      # To update one: resolve the tag to its commit and paste the SHA.
+      #   gh api repos/<owner>/<repo>/git/ref/tags/<tag> --jq '.object.sha'
+      # If that prints `"type": "tag"` rather than `"type": "commit"`, it is
+      # an annotated tag and the SHA is the tag object, NOT the commit —
+      # dereference it before pinning:
+      #   gh api repos/<owner>/<repo>/git/tags/<sha> --jq '.object.sha'
+      # Then confirm the SHA is real before committing it:
+      #   gh api repos/<owner>/<repo>/commits/<sha> --jq .sha
+      # Never hand-write a SHA. A wrong-but-plausible one is worse than a tag.
       - name: Checkout
-        uses: actions/checkout@v5
+        uses: actions/checkout@fbc6f3992d24b796d5a048ff273f7fcc4a7b6c09 # v5.1.0
         with:
           persist-credentials: false
 
@@ -47,7 +58,7 @@ jobs:
         run: corepack enable
 
       - name: Setup Node
-        uses: actions/setup-node@v5
+        uses: actions/setup-node@a0853c24544627f65ddf259abe73b1d18a591444 # v5.0.0
         with:
           node-version-file: .node-version
           cache: pnpm

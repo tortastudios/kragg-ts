@@ -1,10 +1,11 @@
 /**
- * The `RunCheck` implementation injected into the Claude Code hook.
+ * The implementations behind the Claude Code hook's two injected seams:
+ * `RunCheck` and `EnsureCriticality`.
  *
  * `src/hooks/claude.ts` deliberately does NOT import the catalog: it declares
- * the narrow seam it needs and takes an implementation as a parameter, so the
- * hook is testable with a fake pipeline and cannot drift into assembling its
- * own gate list. This module is the one place that closes the seam.
+ * the narrow seams it needs and takes implementations as parameters, so the
+ * hook is testable with fakes and cannot drift into assembling its own gate
+ * list. This module is the one place that closes them.
  *
  * It runs the SAME pipeline as `kragg check` — via `buildCheckGates`, the
  * single assembly point — because a hook that enforced a different set of
@@ -26,7 +27,9 @@
  * through that file.
  */
 
+import { analysisProgram } from "../analysis/program.ts";
 import { buildCheckGates } from "../catalog.ts";
+import { criticalityCache } from "../catalog/criticalityCache.ts";
 import { runGates } from "../engine/gate.ts";
 import { appendRun } from "../engine/journal.ts";
 import { buildReport, utcNow, type CheckReport } from "../engine/report.ts";
@@ -81,4 +84,26 @@ export async function hookCheck(request: HookCheckRequest): Promise<CheckReport 
   } catch {
     return null;
   }
+}
+
+/**
+ * The `EnsureCriticality` implementation: bring `.kragg/criticality.json` up
+ * to date so SessionStart can read a real inventory instead of an empty one.
+ *
+ * ONE DERIVATION PATH, NOT TWO. This is the same `criticalityCache` the check
+ * pipeline and `kragg map` use, assembled from the same policy paths, so all
+ * three agree by construction about what "critical" means and about when the
+ * answer has gone stale.
+ *
+ * NOT WRAPPED IN A `try`. `loadPolicy` throws on an unusable `kragg.json`, and
+ * the hook's fail-open contract already catches at the call site — swallowing
+ * here as well would only hide the failure from the tests that assert it.
+ */
+export function hookCriticality(root: string): void {
+  const policy = loadPolicy(root);
+  criticalityCache({
+    root,
+    scanPaths: [...policy.sourcePaths, ...policy.testPaths],
+    analysis: analysisProgram({ root }),
+  }).ensure();
 }

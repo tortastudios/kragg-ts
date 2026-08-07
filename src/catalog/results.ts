@@ -151,6 +151,17 @@ export interface RanReport {
   readonly violationCount: number;
   readonly passed: boolean;
   readonly output: string;
+  /**
+   * Optional, because most adapters have nothing to advise about.
+   *
+   * `audit` does: everything under the severity floor is filtered out of
+   * `violations` on purpose, and the count of what was filtered used to live
+   * only in `output` — which is suppressed on a passing gate. "Clean at
+   * `high`, with 3 below it" and "clean, full stop" are different facts and a
+   * reader deciding whether the floor is set right needs to be told which one
+   * they are looking at.
+   */
+  readonly advisories?: readonly Violation[] | undefined;
 }
 
 /**
@@ -179,6 +190,7 @@ export function fromReport(name: string, outcome: RanReport | Unavailable): Gate
     command: outcome.command,
     violations: outcome.violations,
     violationCount: outcome.violationCount,
+    advisories: outcome.advisories ?? [],
   });
 }
 
@@ -202,17 +214,22 @@ export function fromLint(name: string, outcome: LintOutcome): GateResult {
 /**
  * Map the typing-strictness outcome, which carries a second severity.
  *
- * `advisories` are findings that should be SEEN but must not fail a build.
- * `GateResult` has no severity channel — neither sibling's does — so they ride
- * in `output` and are NOT added to `violations`, because adding them would
- * turn an advisory into a build failure and that is exactly what the split
- * exists to prevent.
+ * `advisories` are findings that should be SEEN but must not fail a build:
+ * `skipLibCheck`, non-null assertions, module-internal `any`,
+ * `isolatedModules`/`verbatimModuleSyntax`, and the solution-style-tsconfig
+ * notice. They are NOT added to `violations`, because that would turn an
+ * advisory into a build failure and that is exactly what the split exists to
+ * prevent.
  *
- * KNOWN LIMITATION, stated rather than hidden: `processGate` only surfaces
- * `output` for a gate that failed and produced no structured violations, so on
- * a passing gate the advisories are recorded and not printed. Fixing that
- * needs an advisory channel in `engine/report.ts`, which is a cross-sibling
- * schema change and not something to smuggle in through the catalog.
+ * THEY NOW HAVE THEIR OWN CHANNEL, and this is the gate that motivated it.
+ * They used to ride in `output`, which `processGate` surfaces only for a gate
+ * that FAILED and produced no structured violations — so on a green
+ * `typing-strictness` a real, deliberate escape hatch in the project's config
+ * was recorded and never printed. `GateResult.advisories` carries them
+ * instead, `processGate` dedupes and caps them like violations, and both
+ * renderers show them under the gate whatever its verdict. Nothing about the
+ * verdict, the counts or the exit code reads that list; see
+ * `engine/models.ts`.
  */
 export function fromTypingStrictness(
   name: string,
@@ -221,15 +238,12 @@ export function fromTypingStrictness(
   if (!outcome.ok) {
     return errorGate(name, outcome.message);
   }
-  const advisories = outcome.advisories.map(
-    (advisory) => `advisory: ${advisory.file ?? "?"} ${advisory.code ?? ""} ${advisory.message}`,
-  );
   return gateResult({
     name,
     passed: outcome.violations.length === 0,
     violations: outcome.violations,
     violationCount: outcome.violations.length,
-    output: advisories.join("\n"),
+    advisories: outcome.advisories,
   });
 }
 

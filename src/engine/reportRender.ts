@@ -24,9 +24,15 @@ export function renderText(report: CheckReport): string {
     lines.push(...renderGateText(gate));
   }
   const summary = summaryPayload(report);
+  // Advisories are appended to the tally rather than folded into it: they are
+  // not a fourth gate state, and a reader must not be able to mistake one for
+  // a failure. Omitted entirely at zero so a clean run's last line is
+  // unchanged.
+  const advisories = report.gates.reduce((n, gate) => n + gate.advisoryCount, 0);
+  const advisoryTally = advisories === 0 ? "" : `, ${advisories} advisories`;
   lines.push(
     `${summary.gates_passed} passed, ${summary.gates_failed} failed, ` +
-      `${summary.gates_skipped} skipped`,
+      `${summary.gates_skipped} skipped${advisoryTally}`,
   );
   for (const action of nextActions(report)) {
     lines.push(`next: ${action}`);
@@ -37,12 +43,20 @@ export function renderText(report: CheckReport): string {
 function renderGateText(gate: ProcessedGate): string[] {
   const result = gate.result;
   const seconds = (result.durationMs / 1000).toFixed(1);
+  // A skipped gate never ran, so it cannot have observed anything to advise
+  // about. Returning early keeps that impossible rather than merely unlikely.
   if (result.skipped) {
     return [`[SKIP] ${result.name} — ${result.skipReason ?? ""}`];
   }
-  if (result.passed) {
-    return [`[PASS] ${result.name} (${seconds}s)`];
-  }
+  const lines = result.passed
+    ? [`[PASS] ${result.name} (${seconds}s)`]
+    : renderFailedGateText(gate, seconds);
+  lines.push(...renderAdvisoryText(gate));
+  return lines;
+}
+
+function renderFailedGateText(gate: ProcessedGate, seconds: string): string[] {
+  const result = gate.result;
   const label = result.error ? "ERROR" : "FAIL";
   const count =
     result.violationCount > 0 ? ` — ${result.violationCount} violations` : "";
@@ -58,6 +72,26 @@ function renderGateText(gate: ProcessedGate): string[] {
     for (const line of gate.rawOutput.split("\n")) {
       lines.push(`  ${line}`);
     }
+  }
+  return lines;
+}
+
+/**
+ * The advisory block, printed under a gate whatever its verdict.
+ *
+ * EVERY LINE IS PREFIXED `[advisory]`. A reader — human or agent — scans this
+ * output for things to fix, and an unlabelled line under a `[PASS]` heading
+ * would read as either a violation the tool forgot to count or as noise. The
+ * prefix says, in the one place it matters, that this is information and the
+ * gate is still green.
+ */
+function renderAdvisoryText(gate: ProcessedGate): string[] {
+  const lines = gate.advisories.map(
+    (advisory) => `  [advisory] ${renderViolationText(advisory)}`,
+  );
+  if (gate.advisoryCount > gate.advisories.length) {
+    const hidden = gate.advisoryCount - gate.advisories.length;
+    lines.push(`  [advisory] ... ${hidden} more not shown (use --max-violations)`);
   }
   return lines;
 }

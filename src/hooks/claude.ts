@@ -13,7 +13,8 @@
  *    `stop_hook_active` is honoured — see {@link handleStop}.
  *  - SessionStart: inject last-run status and the critical-function inventory
  *    as context, so the model starts the session knowing where the load-
- *    bearing code is.
+ *    bearing code is. The inventory is DERIVED when the last session's edits
+ *    outran it, rather than silently omitted — see {@link EnsureCriticality}.
  *
  * ==================== READ THIS BEFORE CHANGING EXIT CODES ================
  *
@@ -94,6 +95,25 @@ export interface HookCheckRequest {
  */
 export type RunCheck = (request: HookCheckRequest) => Promise<CheckReport | null>;
 
+/**
+ * THE SECOND INTEGRATION SEAM: make `.kragg/criticality.json` current.
+ *
+ * Injected for the same reason as {@link RunCheck} — the real implementation
+ * needs the catalog and a `ts.Program`, and this module must stay pure
+ * protocol so every test here drives it with a fake. `hookCheck.ts` closes
+ * both seams; the CLI wires them at one call site.
+ *
+ * SessionStart needs this because `readJson` refuses data that no longer
+ * describes the tree, and the previous session's edits are exactly what makes
+ * it stale. Reading without deriving means the critical-function inventory
+ * silently empties out for every repo anyone has ever worked in.
+ *
+ * CONTRACT: synchronous, idempotent, and best-effort. It may do nothing. It
+ * may throw — the caller catches — but it must not be slow on a repo whose
+ * data is already fresh, because it runs before the model gets its context.
+ */
+export type EnsureCriticality = (root: string) => void;
+
 /** Inputs to one hook invocation. */
 export interface ClaudeHookOptions {
   /** Project root — normally `process.cwd()`. */
@@ -102,6 +122,8 @@ export interface ClaudeHookOptions {
   readonly stdin: string;
   /** The check pipeline. See {@link RunCheck}. */
   readonly runCheck: RunCheck;
+  /** Criticality derivation. See {@link EnsureCriticality}. */
+  readonly ensureCriticality: EnsureCriticality;
   /** Where a payload line goes. Defaults to stdout. Injected by tests. */
   readonly emit?: ((line: string) => void) | undefined;
 }
@@ -129,7 +151,7 @@ async function dispatch(options: ClaudeHookOptions): Promise<number> {
     return await handleStop(input, options, emit);
   }
   if (input.hookEventName === "SessionStart") {
-    return handleSessionStart(options.root, emit);
+    return handleSessionStart(options, emit);
   }
   // Everything else is treated as a post-edit event, matching the Python
   // original. An unknown or absent event name therefore costs at most one
@@ -212,19 +234,44 @@ async function handleStop(
  * Two pieces of state that are cheap to read and expensive to rediscover:
  * whether the last check passed, and which functions the criticality analysis
  * marked load-bearing. Both come from files on disk (`.kragg/history.jsonl`,
- * `.kragg/criticality.json`), so this event never runs a gate and never
- * delays the session.
+ * `.kragg/criticality.json`), so this event still runs NO GATE.
+ *
+ * IT MAY NOW DERIVE, ONCE. `readJson` refuses criticality data that no longer
+ * describes the tree, and last session's edits are precisely what makes it
+ * stale — so reading alone would have handed the model an empty inventory in
+ * any repo anyone had ever touched, without saying so. `ensureCriticality`
+ * regenerates it. That is a `ts.Program` build in the worst case, which is why
+ * it is here and NOT on the PostToolUse path: SessionStart fires once, before
+ * the model has started, where a one-time cost buys a session's worth of
+ * context. Fresh data costs a directory walk and nothing else.
+ *
+ * FAIL-OPEN IS PRESERVED, AND THAT IS WHY THE `catch` IS HERE RATHER THAN
+ * AROUND THE WHOLE DISPATCH. `runClaudeHook` would already swallow a throw,
+ * but it would swallow the run-status lines with it — losing information that
+ * was already on disk because a derivation we did not need failed. Catching at
+ * the derivation means a broken analyzer costs exactly the criticality
+ * section, quietly, and the rest of the context still reaches the model.
  *
  * NOTE ON A DELIBERATE GAP: the Python version also emits a project-map
  * digest via its `mapping` module. This port has no `mapping` equivalent yet,
  * so that section is absent rather than faked. Add it here when `kragg map`
  * lands on the TypeScript side.
  */
-function handleSessionStart(root: string, emit: (line: string) => void): number {
+function handleSessionStart(
+  options: ClaudeHookOptions,
+  emit: (line: string) => void,
+): number {
+  const root = options.root;
   const lines: string[] = [];
   const runs = readRuns(root, SESSION_RUN_WINDOW);
   if (runs.length > 0) {
     lines.push(...renderStatusLines(runs));
+  }
+  try {
+    options.ensureCriticality(root);
+  } catch {
+    // See the fail-open note above. No stderr: the harness surfaces anything
+    // written there as a `hook error` notice on the user's session.
   }
   const critical = criticalFunctions(root, SESSION_CRITICAL_LIMIT);
   if (critical.length > 0) {

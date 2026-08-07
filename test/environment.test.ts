@@ -248,6 +248,36 @@ describe("resolveBin", () => {
     });
   });
 
+  it("finds the .cmd shim on Windows, which is the only entry that runs there", () => {
+    // The platform is INJECTED so this branch runs on every host. Read from
+    // `process.platform` it would only ever execute on a machine nobody here
+    // has, which is how "Windows support" ships having never run.
+    withOverride(undefined, () => {
+      const root = project({ "pnpm-lock.yaml": "" });
+      const cmd = fakeBin(root, ".", "tsc.cmd");
+      const env = resolveProjectEnvironment(root);
+
+      assert.equal(resolveBin(env, "tsc", { platform: "win32" }), cmd);
+      // The same lookup on POSIX must NOT find it: a `.cmd` is not runnable
+      // there, and reporting one as the project's tsc would be a false pass.
+      assert.equal(resolveBin(env, "tsc", { platform: "linux" }), null);
+    });
+  });
+
+  it("prefers the .cmd over the extension-less shell shim on Windows", () => {
+    // npm and pnpm write BOTH. The extension-less one is a shell script
+    // `CreateProcess` cannot run, so preferring it would break every tool.
+    withOverride(undefined, () => {
+      const root = project({ "pnpm-lock.yaml": "" });
+      const bare = fakeBin(root, ".", "tsc");
+      const cmd = fakeBin(root, ".", "tsc.cmd");
+      const env = resolveProjectEnvironment(root);
+
+      assert.equal(resolveBin(env, "tsc", { platform: "win32" }), cmd);
+      assert.equal(resolveBin(env, "tsc", { platform: "darwin" }), bare);
+    });
+  });
+
   it("returns null instead of falling back to a global install", () => {
     // `node` is certainly on PATH wherever these tests run. Finding it would
     // mean we resolved through the environment, which is the whole bug.

@@ -36,11 +36,13 @@
 import { mkdirSync, writeFileSync } from "node:fs";
 import { dirname, join } from "node:path";
 
+import { analysisProgram } from "../analysis/program.ts";
 import {
   parsedSources,
   resolveTypeScript,
   type TypeScriptApi,
 } from "../analysis/sourceFile.ts";
+import { criticalityCache } from "../catalog/criticalityCache.ts";
 import { EXIT_OK, EXIT_USAGE } from "../engine/report.ts";
 import { readJson } from "../gates/criticality.ts";
 import { loadPolicy, PolicyError, type KraggPolicy } from "../policy/policy.ts";
@@ -67,6 +69,23 @@ export interface MapOptions {
  * Returns `0` always except on a malformed `kragg.json`, which is a usage
  * error and not this command's to interpret. `map` is a REPORT: it never
  * fails a build, and an empty map is a fact about the repo, not an error.
+ *
+ * ── WHY THIS DERIVES CRITICALITY DATA ──────────────────────────────────────
+ * The risk flags are the load-bearing half of the map, and `readJson` refuses
+ * data that no longer describes the tree (`gates/criticality/freshness.ts`).
+ * Any edit invalidates the stamp — which, in an agent's inner loop, is every
+ * run — so a map that only READ the file would have quietly dropped every flag
+ * from the moment the session's first edit landed, and said nothing about it.
+ * That is the same silent-wrong-answer the freshness work exists to kill, one
+ * layer out. So `map` derives, through the SAME `ensure()` the check pipeline
+ * uses: two answers to "what is critical" is one too many.
+ *
+ * IT STAYS LAZY. `ensure()` checks freshness first and returns before it
+ * touches the analysis handle, and the handle builds its `ts.Program` only on
+ * `load()`. A `kragg map` on a repo whose data is already current therefore
+ * compiles nothing — it costs one `readdirSync` pass more than it used to.
+ * `analysisProgram` is also where the compiler now comes from, so the map is
+ * parsed with the same compiler any derivation would have used.
  */
 export async function runMap(options: MapOptions = {}): Promise<number> {
   const root = options.root ?? process.cwd();
@@ -80,7 +99,18 @@ export async function runMap(options: MapOptions = {}): Promise<number> {
     }
     throw error;
   }
-  const lines = buildMap(root, policy, options.api);
+  const analysis = analysisProgram({
+    root,
+    ...(options.api === undefined ? {} : { api: options.api }),
+  });
+  criticalityCache({
+    root,
+    // Sources AND tests, matching `catalogContext`: both are in the program,
+    // so both contribute call-graph nodes and either can change the answer.
+    scanPaths: [...policy.sourcePaths, ...policy.testPaths],
+    analysis,
+  }).ensure();
+  const lines = buildMap(root, policy, analysis.compiler.api);
   if (lines.length === 0) {
     process.stdout.write("no exported symbols found\n");
     return EXIT_OK;

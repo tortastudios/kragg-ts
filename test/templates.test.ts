@@ -9,10 +9,11 @@
  */
 
 import assert from "node:assert/strict";
-import { mkdtempSync, rmSync } from "node:fs";
+import { mkdtempSync, readdirSync, readFileSync, rmSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { after, describe, it } from "node:test";
+import { fileURLToPath } from "node:url";
 
 import { runGen } from "../src/commands/gen.ts";
 import { runInit } from "../src/commands/init.ts";
@@ -34,6 +35,32 @@ function temporaryRoot(): string {
   const root = mkdtempSync(join(tmpdir(), "kragg-templates-"));
   temporaryRoots.push(root);
   return root;
+}
+
+/**
+ * Assert that every GitHub Action a workflow uses is pinned to a commit.
+ *
+ * A tag — `@v4`, `@v4.4.0`, any of them — is a mutable pointer the action's
+ * maintainer can repoint at any commit. It is therefore a standing
+ * authorization to run whatever that account publishes next, with the
+ * repository checked out and the job's token in scope. Only a commit SHA is
+ * immutable. Asserted rather than left to review because CI runs on every
+ * push and nobody re-reads a workflow that is passing.
+ */
+function assertActionsPinned(workflow: string, what: string): void {
+  const lines = workflow.split("\n").filter((line) => /^\s*(?:-\s*)?uses:/.test(line));
+  assert.ok(lines.length > 0, `${what} declares no actions at all`);
+  for (const line of lines) {
+    const reference = /uses:\s*(\S+)/.exec(line)?.[1] ?? "";
+    assert.match(
+      reference,
+      /^[\w.-]+\/[\w.-]+@[0-9a-f]{40}$/,
+      `${what}: ${reference} is not pinned to a full 40-character commit SHA`,
+    );
+    // A bare SHA is unreadable, so the version it stands for travels with it.
+    // Without that nobody can tell what they are looking at or updating from.
+    assert.match(line, /#\s*v\d+\.\d+\.\d+\s*$/, `${what}: no version comment on ${reference}`);
+  }
 }
 
 /** Captured stdio and exit code from one command invocation. */
@@ -176,6 +203,16 @@ describe("guardrail files", () => {
     assert.match(files[".github/workflows/quality.yml"] ?? "", /kragg check/);
   });
 
+  it("pins every scaffolded CI action to a commit SHA, never a tag", () => {
+    // A tag is a mutable pointer the action's maintainer can repoint at any
+    // commit, so `@v4` authorises whatever they publish next to run with the
+    // project checked out and CI's token in scope. Every project kragg
+    // creates would ship that hole, on every push, which is why this is
+    // asserted rather than left to review.
+    const workflow = files[".github/workflows/quality.yml"] ?? "";
+    assertActionsPinned(workflow, "the scaffolded quality.yml");
+  });
+
   it("emits valid JSON for every JSON guardrail file", () => {
     for (const relative of ["package.json", "kragg.json", ".claude/settings.json", ".gemini/settings.json"]) {
       const contents = files[relative] ?? "";
@@ -286,5 +323,23 @@ describe("command handlers", () => {
 
   it("kragg init rejects extra positionals", () => {
     assert.equal(capture(() => runInit(["a", "b"])).code, 2);
+  });
+});
+
+/**
+ * The same rule, applied to kragg's own CI.
+ *
+ * A scaffold that pins actions while the tool's own workflow does not is a
+ * tool that does not believe its own advice — and this repository is where a
+ * compromised action would find the credentials that publish kragg.
+ */
+describe("kragg's own workflows", () => {
+  it("pins every action to a commit SHA, never a tag", () => {
+    const directory = fileURLToPath(new URL("../.github/workflows", import.meta.url));
+    const workflows = readdirSync(directory).filter((name) => /\.ya?ml$/.test(name));
+    assert.ok(workflows.length > 0, "no workflows found to check");
+    for (const name of workflows) {
+      assertActionsPinned(readFileSync(join(directory, name), "utf8"), name);
+    }
   });
 });

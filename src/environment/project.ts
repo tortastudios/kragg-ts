@@ -59,6 +59,7 @@ export {
   remediation,
 } from "./packageManager.ts";
 export { detectWorkspaces } from "./workspaces.ts";
+export type { BinLookupOptions } from "./bin.ts";
 export { resolveBin, toolCommand } from "./bin.ts";
 export { missingTool, missingToolMessage } from "./missing.ts";
 

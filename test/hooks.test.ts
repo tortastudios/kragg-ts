@@ -91,17 +91,24 @@ function spyCheck(result: CheckReport | null): {
   };
 }
 
-/** Drive the hook with one payload and collect everything it emitted. */
+/**
+ * Drive the hook with one payload and collect everything it emitted.
+ *
+ * `ensureCriticality` defaults to a no-op that RECORDS its calls: nothing here
+ * may build a `ts.Program`, and several tests assert on when it was invoked.
+ */
 async function invoke(
   root: string,
   stdin: string,
   check: (request: HookCheckRequest) => Promise<CheckReport | null>,
+  ensureCriticality: (derivedRoot: string) => void = () => undefined,
 ): Promise<{ code: number; emitted: string[] }> {
   const emitted: string[] = [];
   const code = await runClaudeHook({
     root,
     stdin,
     runCheck: check,
+    ensureCriticality,
     emit: (line) => emitted.push(line),
   });
   return { code, emitted };
@@ -367,6 +374,43 @@ describe("SessionStart", () => {
     assert.deepEqual(emitted, []);
   });
 
+  it("derives the inventory before reading it, so an edit does not empty it", async () => {
+    // THE BUG THIS CLOSES. `readJson` refuses data the sources have outrun,
+    // and last session's edits are exactly what outruns it — so a hook that
+    // only read would hand the model an empty critical-function list in any
+    // repo anyone had ever worked in, silently. The fake writes what a real
+    // derivation would have written; what is asserted is that the hook asks
+    // BEFORE it reads, and asks about the right root.
+    const root = project({ ".kragg/history.jsonl": `${journalLine}\n` });
+    const derived: string[] = [];
+    const { code, emitted } = await invoke(root, sessionStart, spyCheck(null).run, (target) => {
+      derived.push(target);
+      mkdirSync(join(target, ".kragg"), { recursive: true });
+      writeFileSync(join(target, ".kragg/criticality.json"), criticality);
+    });
+
+    assert.equal(code, HOOK_OK);
+    assert.deepEqual(derived, [root]);
+    const fields = table(payload(emitted[0])["hookSpecificOutput"]);
+    assert.match(String(fields["additionalContext"]), /src\/engine\/gate#runGates/);
+  });
+
+  it("keeps the rest of the context when the derivation throws", async () => {
+    // FAIL-OPEN, NARROWLY. `runClaudeHook` would swallow this throw anyway,
+    // but it would swallow the run-status lines with it — dropping facts
+    // already on disk because a derivation nobody asked for broke. The catch
+    // sits at the derivation so the cost is exactly the criticality section.
+    const root = project({ ".kragg/history.jsonl": `${journalLine}\n` });
+    const { code, emitted } = await invoke(root, sessionStart, spyCheck(null).run, () => {
+      throw new Error("tsconfig is unusable");
+    });
+
+    assert.equal(code, HOOK_OK);
+    const context = String(table(payload(emitted[0])["hookSpecificOutput"])["additionalContext"]);
+    assert.match(context, /last run: FAIL/);
+    assert.doesNotMatch(context, /critical functions/);
+  });
+
   it("ignores a corrupt criticality file instead of failing the session", async () => {
     const root = project({
       ".kragg/history.jsonl": `${journalLine}\n`,
@@ -464,6 +508,7 @@ describe("cmdHook", () => {
       protocol: "claude",
       root,
       runCheck: spyCheck(report(false)).run,
+      ensureCriticality: () => undefined,
       readStdin: () => postToolUse("src/a.ts"),
       emit: (line) => emitted.push(line),
     });
@@ -476,6 +521,7 @@ describe("cmdHook", () => {
     const code = await cmdHook({
       root,
       runCheck: spyCheck(report(true)).run,
+      ensureCriticality: () => undefined,
       readStdin: () => postToolUse("src/a.ts"),
       emit: () => undefined,
     });
@@ -489,6 +535,7 @@ describe("cmdHook", () => {
       protocol: "gemini",
       root: project(),
       runCheck: check.run,
+      ensureCriticality: () => undefined,
       readStdin: () => postToolUse("src/a.ts"),
       emitError: (line) => errors.push(line),
     });

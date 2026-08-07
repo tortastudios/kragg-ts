@@ -23,7 +23,7 @@
 import { readFileSync } from "node:fs";
 
 import { EXIT_USAGE } from "../engine/report.ts";
-import { runClaudeHook, type RunCheck } from "../hooks/claude.ts";
+import { runClaudeHook, type EnsureCriticality, type RunCheck } from "../hooks/claude.ts";
 
 /** Harness protocols this command speaks. Only Claude Code exists today. */
 export const HOOK_PROTOCOLS: readonly string[] = ["claude"];
@@ -42,6 +42,15 @@ export interface HookCommandOptions {
    * for why this is a parameter and not an import.
    */
   readonly runCheck: RunCheck;
+  /**
+   * Criticality derivation, injected for the same reason as `runCheck`.
+   *
+   * REQUIRED, not defaulted to a no-op. A default would let a caller wire the
+   * hook and silently get the pre-derivation behaviour back — SessionStart
+   * quietly dropping the critical-function inventory the moment anyone edits a
+   * file, which is the exact bug this seam exists to close.
+   */
+  readonly ensureCriticality: EnsureCriticality;
   /** Stdin reader. Defaults to a blocking read of fd 0. Injected by tests. */
   readonly readStdin?: (() => string) | undefined;
   /** Payload sink. Defaults to stdout. Injected by tests. */
@@ -71,6 +80,7 @@ export async function cmdHook(options: HookCommandOptions): Promise<number> {
     root: options.root ?? process.cwd(),
     stdin: (options.readStdin ?? readStdinSync)(),
     runCheck: options.runCheck,
+    ensureCriticality: options.ensureCriticality,
     emit: options.emit,
   });
 }

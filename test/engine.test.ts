@@ -18,15 +18,18 @@ import {
   gateResult,
   type CompletedCommand,
   type GateResult,
+  type Violation,
 } from "../src/engine/models.ts";
 import {
   buildReport,
   EXIT_ENVIRONMENT,
   EXIT_GATE_FAILURES,
   EXIT_OK,
+  renderText,
   reportExitCode,
   reportPassed,
 } from "../src/engine/report.ts";
+import { toPayload } from "../src/engine/reportPayload.ts";
 
 /** A gate that records that it ran, and returns the verdict we asked for. */
 function spec(
@@ -202,6 +205,105 @@ describe("exit-code selection", () => {
       gateResult({ name: "b", passed: false, error: true }),
     ]);
     assert.equal(reportExitCode(r), EXIT_ENVIRONMENT);
+  });
+});
+
+/**
+ * The advisory channel.
+ *
+ * Advisories exist for findings a reader must SEE but must not be blocked by —
+ * `skipLibCheck`, a non-null assertion, a severity floor that filtered
+ * something out. Two properties carry the whole design, and each has the
+ * failure mode it prevents written next to it: they never move the verdict,
+ * and they are printed on a PASSING gate, which is the case they exist for and
+ * the case the old `output` bucket could not reach.
+ */
+describe("advisories", () => {
+  const hatch = (line: number): Violation => ({
+    message: "skipLibCheck is enabled",
+    file: "tsconfig.json",
+    line,
+    code: "tsconfig-advisory-flag",
+  });
+
+  function reportOf(result: GateResult, maxViolations = 25) {
+    return buildReport({
+      command: "check",
+      mode: "all",
+      targets: [],
+      results: [result],
+      maxViolations,
+      startedAt: "2026-01-01T00:00:00+00:00",
+      gitSha: null,
+    });
+  }
+
+  it("never move the verdict, the counts or the exit code", () => {
+    // An advisory that changed the outcome would just be a violation with
+    // extra steps, and the split would be pointless.
+    const r = reportOf(
+      gateResult({ name: "typing-strictness", passed: true, advisories: [hatch(3)] }),
+    );
+    assert.equal(reportPassed(r), true);
+    assert.equal(reportExitCode(r), EXIT_OK);
+    assert.equal(r.gates[0]?.result.violationCount, 0);
+    assert.deepEqual(r.gates[0]?.shown, []);
+  });
+
+  it("are printed under a passing gate, labelled as advice", () => {
+    // THE REGRESSION. These used to ride in `GateResult.output`, which the
+    // report surfaces only for a gate that FAILED with nothing structured —
+    // so a green `typing-strictness` said nothing about a real, deliberate
+    // escape hatch in the project's config.
+    const text = renderText(
+      reportOf(gateResult({ name: "typing-strictness", passed: true, advisories: [hatch(3)] })),
+    );
+    assert.match(text, /\[PASS] typing-strictness/);
+    assert.match(text, /\[advisory] tsconfig\.json:3 tsconfig-advisory-flag skipLibCheck/);
+    assert.match(text, /0 failed, 0 skipped, 1 advisories$/m);
+  });
+
+  it("reach the JSON as their own list, leaving `violations` alone", () => {
+    // The wire decision: a NEW key, never a `severity` field on a violation.
+    // Every consumer today filters on `violations`, and an advisory landing
+    // in that list would read as a finding to fix in both siblings.
+    const gate = toPayload(
+      reportOf(gateResult({ name: "typing-strictness", passed: true, advisories: [hatch(3)] })),
+    ).gates[0];
+    assert.deepEqual(gate?.violations, []);
+    assert.equal(gate?.violation_count, 0);
+    assert.equal(gate?.advisory_count, 1);
+    assert.equal(gate?.advisories[0]?.code, "tsconfig-advisory-flag");
+    assert.equal(gate?.advisories[0]?.fix_hint, null, "absent fields are explicit nulls");
+    assert.equal(gate?.passed, true);
+  });
+
+  it("are deduped and capped, and say so rather than vanishing", () => {
+    const many = [hatch(1), hatch(2), hatch(3)];
+    const deduped = reportOf(gateResult({ name: "g", passed: true, advisories: many }));
+    assert.equal(deduped.gates[0]?.advisoryCount, 1);
+    assert.match(String(deduped.gates[0]?.advisories[0]?.message), /\+2 more at tsconfig/);
+
+    const distinct = [hatch(1), { ...hatch(2), message: "second" }];
+    const capped = reportOf(gateResult({ name: "g", passed: true, advisories: distinct }), 1);
+    assert.equal(capped.gates[0]?.advisoryCount, 2);
+    assert.equal(capped.gates[0]?.advisories.length, 1);
+    assert.match(renderText(capped), /\[advisory] \.\.\. 1 more not shown/);
+  });
+
+  it("are not printed for a skipped gate, which observed nothing", () => {
+    const skipped = gateResult({
+      name: "g",
+      passed: false,
+      skipped: true,
+      skipReason: "x",
+      advisories: [hatch(1)],
+    });
+    assert.doesNotMatch(renderText(reportOf(skipped)), /\[advisory]/);
+  });
+
+  it("leave a clean run's summary line untouched", () => {
+    assert.match(renderText(reportOf(gateResult({ name: "g", passed: true }))), /0 skipped$/m);
   });
 });
 

@@ -7,11 +7,17 @@
  * means a reviewer can read the contract without reading the report
  * machinery around it.
  *
- * The JSON emitted by `toPayload` must be byte-compatible in *shape* with the
- * Python implementation's output at the same `schema_version`. Payload
- * interfaces therefore use snake_case keys on purpose — they describe the
- * wire format, not TypeScript style. Domain types stay camelCase; this module
- * is the only translation boundary.
+ * The JSON emitted by `toPayload` must be compatible in *shape* with the
+ * Python implementation's output at the same `schema_version`: every key
+ * Python writes is written here, with the same name, nesting and null
+ * convention. Payload interfaces therefore use snake_case keys on purpose —
+ * they describe the wire format, not TypeScript style. Domain types stay
+ * camelCase; this module is the only translation boundary.
+ *
+ * COMPATIBLE MEANS SUPERSET, NOT IDENTICAL. `GatePayload.advisories` and
+ * `advisory_count` exist here and not in Python. Adding a key is safe in a way
+ * that renaming or repurposing one is not, and the reasoning is written out at
+ * the field itself — read it before adding a second one.
  *
  * See docs/spec-conformance.md before changing anything here.
  */
@@ -43,6 +49,26 @@ export interface GatePayload {
   violations: ViolationPayload[];
   truncated: boolean;
   raw_output: string | null;
+  /**
+   * ADDITIVE, AT `schema_version` 1, AND DELIBERATELY SO.
+   *
+   * Python's `report.py` has no advisory concept: `GatePayload` is a
+   * `TypedDict` it only ever WRITES, and the one place either sibling reads a
+   * gate object back — `journal.py`'s `_gates`/`read_runs` — indexes the
+   * handful of keys it names (`name`, `passed`, `skipped`, `duration_ms`,
+   * `violation_count`) and ignores everything else. Two extra keys therefore
+   * cannot break a Python reader; they are simply not looked at. Nothing is
+   * renamed, nothing is repurposed, and a kragg-ts report is still a superset
+   * of a kragg-Python one at the same schema version.
+   *
+   * The alternative — a `severity` field on `ViolationPayload` — was rejected:
+   * it changes a shape Python DOES construct positionally in its own tests and
+   * would make an advisory indistinguishable from a violation to any consumer
+   * that filters on `violations` alone, which is every consumer today.
+   */
+  advisories: ViolationPayload[];
+  /** Distinct advisories after dedupe; greater than `advisories.length` when capped. */
+  advisory_count: number;
 }
 
 export interface SummaryPayload {
@@ -102,6 +128,8 @@ function gatePayload(gate: ProcessedGate): GatePayload {
     violations: gate.shown.map(violationPayload),
     truncated: gate.truncated,
     raw_output: gate.rawOutput,
+    advisories: gate.advisories.map(violationPayload),
+    advisory_count: gate.advisoryCount,
   };
 }
 

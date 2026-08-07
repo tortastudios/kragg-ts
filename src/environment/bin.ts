@@ -13,6 +13,20 @@ import { dirname, join, resolve, sep } from "node:path";
 import type { ProjectEnvironment } from "./model.ts";
 
 /**
+ * Which platform's `node_modules/.bin` layout to assume.
+ *
+ * INJECTED rather than read inline from `process.platform`, because the
+ * Windows branch of this module cannot be reached on the machines this
+ * project is developed and tested on. A branch only reachable on a host
+ * nobody runs the suite on is a branch nobody has ever executed; taking the
+ * platform as an argument makes it an ordinary test. Production callers omit
+ * it and get `process.platform`.
+ */
+export interface BinLookupOptions {
+  readonly platform?: NodeJS.Platform;
+}
+
+/**
  * Resolve a tool binary from the PROJECT's `node_modules/.bin`.
  *
  * MUST NOT fall back to `PATH` or to a global install. A globally-installed
@@ -33,16 +47,24 @@ import type { ProjectEnvironment } from "./model.ts";
  * `node_modules`, not against `env.root`, since a hoisted workspace binary
  * legitimately lives above the member package.
  *
- * TODO(win32): the `.cmd` shim this returns on Windows cannot be spawned by
- * `execFile` without a shell, and `src/engine/runner.ts` will not use one.
- * Windows support needs the shim's target resolved to a `node <script>`
- * argv instead. Returning the path is still correct for reporting.
+ * WINDOWS: what comes back here is a `.cmd` shim, which `execFile` refuses
+ * to spawn without a shell (Node rejects batch files outright since the
+ * CVE-2024-27980 fix) and `src/engine/runner.ts` will not use one. Returning
+ * the shim path is still the right answer for this function — it is the
+ * project's entry for that tool, and `doctor` should print it. Turning it
+ * into a spawnable argv is `runner.ts`'s job, at the single sanctioned
+ * subprocess call; see `launchPlan` there.
  */
-export function resolveBin(env: ProjectEnvironment, name: string): string | null {
+export function resolveBin(
+  env: ProjectEnvironment,
+  name: string,
+  options: BinLookupOptions = {},
+): string | null {
+  const platform = options.platform ?? process.platform;
   for (const base of binSearchDirs(env.root)) {
     const binDir = join(base, "node_modules", ".bin");
-    for (const candidate of binCandidates(binDir, name)) {
-      if (!isExecutableFile(candidate)) {
+    for (const candidate of binCandidates(binDir, name, platform)) {
+      if (!isExecutableFile(candidate, platform)) {
         continue;
       }
       const real = realPathOrNull(candidate);
@@ -103,20 +125,43 @@ function binSearchDirs(root: string): readonly string[] {
   return dirs;
 }
 
-/** Platform-specific shim names, most preferred first. */
-function binCandidates(binDir: string, name: string): readonly string[] {
+/**
+ * Extensions Windows shims use, lowercase, in the order `resolveBin` prefers.
+ *
+ * `.cmd` first because that is what npm, pnpm and yarn all write and what a
+ * Windows user would run by hand. `.exe` next: a real executable needs no
+ * shim rewriting at all. `.ps1` is listed so it is FOUND rather than reported
+ * missing, but it is the least preferred — PowerShell brings its own
+ * argument parsing, which is the problem, not the fix.
+ */
+const WINDOWS_BIN_EXTENSIONS: readonly string[] = [".cmd", ".exe", ".ps1"];
+
+/**
+ * Platform-specific shim names, most preferred first.
+ *
+ * The extension-less entry is tried LAST on Windows and is the only entry
+ * anywhere else. On Windows it is the Cygwin/Git-Bash shell script npm and
+ * pnpm write alongside the `.cmd`; `CreateProcess` cannot run it, so it is a
+ * last resort there — but `runner.ts` can still read the target path out of
+ * it, which is better than reporting the tool as missing.
+ */
+function binCandidates(
+  binDir: string,
+  name: string,
+  platform: NodeJS.Platform,
+): readonly string[] {
   const direct = join(binDir, name);
-  if (process.platform !== "win32") {
+  if (platform !== "win32") {
     return [direct];
   }
-  return [`${direct}.cmd`, `${direct}.exe`, `${direct}.ps1`, direct];
+  return [...WINDOWS_BIN_EXTENSIONS.map((extension) => `${direct}${extension}`), direct];
 }
 
-function isExecutableFile(path: string): boolean {
+function isExecutableFile(path: string, platform: NodeJS.Platform): boolean {
   try {
     // X_OK is meaningless on Windows (always true); existence is the real test
     // there, and `binCandidates` already discriminates by extension.
-    accessSync(path, process.platform === "win32" ? constants.F_OK : constants.X_OK);
+    accessSync(path, platform === "win32" ? constants.F_OK : constants.X_OK);
     return true;
   } catch {
     return false;

@@ -28,8 +28,9 @@ is the shape of the report that carries them.
 
 ### 1. The report JSON, `schema_version: 1`
 
-Both sides emit the same keys, in the same nesting, with `null` rather than an
-absent key for anything missing — consumers index unconditionally. Keys are
+kragg-ts emits a **superset**: every key Python emits, in the same nesting,
+with `null` rather than an absent key for anything missing — consumers index
+unconditionally — plus the two additive keys marked `*` below. Keys are
 snake_case on the wire in both languages; TypeScript keeps camelCase
 internally and translates in exactly one place,
 [`src/engine/reportPayload.ts`](../src/engine/reportPayload.ts). Python's
@@ -43,9 +44,27 @@ ReportPayload   schema_version, kragg_version, command, mode, targets,
 SummaryPayload  gates_total, gates_passed, gates_failed, gates_skipped,
                 violations_total, violations_shown
 GatePayload     name, passed, skipped, skip_reason, error, duration_ms,
-                violation_count, violations, truncated, raw_output
+                violation_count, violations, truncated, raw_output,
+                advisories*, advisory_count*
 ViolationPayload  file, line, column, code, message, fix_hint
 ```
+
+`*` **TypeScript only.** An advisory is something a gate reports without
+failing on it — `skipLibCheck`, non-null assertions, `audit` findings below the
+severity floor. Advisories use the `ViolationPayload` shape but ride in their
+own list, because every consumer today treats an entry in `violations` as
+something to go and fix. Nothing in `passed`, `exit_code` or `violation_count`
+reads them, and none reaches the journal.
+
+Adding them was safe because `GatePayload` is **write-only on the Python
+side**: `report.py` never reads a gate object back, and `journal.py` — the only
+place either sibling does — indexes five named keys (`name`, `passed`,
+`skipped`, `duration_ms`, `violation_count`). That was verified by running
+Python's real `append_run` / `read_runs` / `render_status_lines` against a live
+kragg-ts `--format json` payload: extra keys ignored, no declared key missing,
+journal entries byte-shape-identical.
+
+**Do not assume the next additive key is equally safe.** Run the same check.
 
 `violation_count` is the true total; `violations` may be capped
 (`max_violations_per_gate`, default 25) with `truncated: true` saying so. A
@@ -213,3 +232,22 @@ Any change to the report schema, the exit codes, the pipeline semantics, the
 journal, the criticality file or the hook protocol is a change to **both**
 repos and needs a `schema_version` bump. Do not make one implementation
 "temporarily" divergent — that is how the two stop being siblings.
+
+**One carve-out, and it is narrow.** A purely *additive* key that no consumer
+in either repo reads may be introduced on one side without a bump —
+`advisories` and `advisory_count` were, and `.kragg/criticality.stamp.json`
+exists as a sidecar for the same reason. The bar is not "additive"; it is
+**additive and provably unread**:
+
+1. Find every place the other implementation *reads* the structure, not just
+   where it writes one. For gate objects that is `journal.py`, not `report.py`.
+2. Run the other implementation's readers against a real payload from yours.
+3. Confirm no key it declares went missing, and that anything it persists is
+   byte-shape-identical.
+
+Renaming, repurposing, or changing the type of an existing key is never
+additive, however compatible it looks. Neither is adding a key that a consumer
+would reasonably iterate over rather than index — which is exactly why the
+criticality fingerprint could not go inside `criticality.json`: its top level
+is a **list**, and Python's `read_json` returns every dict in it as a profile
+record. A metadata object there would have surfaced as a nameless function.
