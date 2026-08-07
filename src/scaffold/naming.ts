@@ -68,7 +68,7 @@ const BUILTINS: ReadonlySet<string> = new Set<string>([
 const MAX_NAME_LENGTH = 214;
 
 /** Characters npm permits in a name segment. Everything else is replaced. */
-const UNSAFE = /[^a-z0-9\-._~]+/g;
+const UNSAFE = /[^a-z0-9._~-]+/g;
 
 /**
  * Return a valid npm package name derived from a free-form project name.
@@ -95,8 +95,8 @@ function normalizeSegment(segment: string): string {
     .toLowerCase()
     .replace(UNSAFE, "-")
     .replace(/-{2,}/g, "-")
-    .replace(/^[._\-]+/, "")
-    .replace(/[.\-]+$/, "");
+    .replace(/^[._-]+/, "")
+    .replace(/[.-]+$/, "");
   if (cleaned === "") {
     return "app";
   }
@@ -152,7 +152,7 @@ function validateSegment(segment: string, label: string): string | null {
   if (segment.startsWith(".") || segment.startsWith("_")) {
     return `${label} may not start with '.' or '_'`;
   }
-  const bad = segment.replace(/[a-z0-9\-._~]/g, "");
+  const bad = segment.replace(/[a-z0-9._~-]/g, "");
   if (bad !== "") {
     return `${label} contains characters npm does not allow: ${[...new Set(bad)].join("")}`;
   }

@@ -33,6 +33,11 @@ export const MAX_TEXT_LENGTH = 200;
  * description out of an untrusted repo cannot repaint the terminal it is
  * printed to.
  */
+// Matching control characters is the entire point. The rule exists to catch
+// someone typing one by accident; here the class IS the security control, and
+// the range deliberately covers ESC (0x1B) so a scanner's output cannot
+// repaint the terminal it is printed to.
+// oxlint-disable-next-line no-control-regex
 const CONTROL_CHARACTERS = /[\u0000-\u001F\u007F-\u009F]/gu;
 
 /** A scanner kragg knows how to drive. */

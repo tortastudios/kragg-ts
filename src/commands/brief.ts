@@ -87,11 +87,16 @@ export async function runBrief(options: BriefOptions = {}): Promise<number> {
     }
     throw error;
   }
+  // Under `exactOptionalPropertyTypes` an absent key and a present-but-
+  // undefined one are different things, so `api: undefined` is a type error
+  // and the key must be omitted rather than set. Named, because a conditional
+  // spread buried in a call argument is hard to read as deliberate.
+  const apiOption = options.api === undefined ? {} : { api: options.api };
   const text = await buildBrief({
     root,
     since: options.since ?? null,
     policy,
-    ...(options.api === undefined ? {} : { api: options.api }),
+    ...apiOption,
   });
   if (text === null) {
     process.stderr.write(`${NOT_A_REPOSITORY_MESSAGE}\n`);
@@ -211,9 +216,11 @@ function criticalSection(
   changed: readonly string[],
 ): string[] {
   const changedSet = new Set(changed);
-  const touched = criticalFunctions(options.root, options.policy.sourcePaths, {
-    ...(options.api === undefined ? {} : { api: options.api }),
-  })
+  const touched = criticalFunctions(
+    options.root,
+    options.policy.sourcePaths,
+    options.api === undefined ? {} : { api: options.api },
+  )
     .filter((critical) => changedSet.has(critical.file))
     .sort((left, right) => right.fanIn - left.fanIn);
   const cap = options.policy.maxViolationsPerGate;

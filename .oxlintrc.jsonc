@@ -1,0 +1,29 @@
+{
+  "$schema": "./node_modules/oxlint/configuration_schema.json",
+
+  // Deliberately close to oxlint's defaults.
+  //
+  // `correctness` is the category for things that are simply wrong.
+  // `suspicious`, `perf`, `pedantic` and `style` are opinions: enabling them
+  // here produced 65 findings, almost entirely "prefer toSorted() over
+  // sort()". That is a fair point and a 65-site refactor — a decision to take
+  // deliberately, not a side effect of adopting a linter.
+  //
+  // kragg runs `tsc` as its own gate and does its own TypeChecker analysis in
+  // forbidden-calls and nullable-default, so most of what oxlint cannot
+  // express (it has no type information) is covered elsewhere in the pipeline.
+  // The known exception is `no-floating-promises`: nothing here catches an
+  // un-awaited async call whose rejection disappears. See KNOWN_LIMITATIONS.md.
+  "plugins": ["eslint", "typescript", "unicorn", "oxc"],
+  "categories": {
+    "correctness": "error"
+  },
+  "rules": {
+    // Redundant with the `typing-strictness` gate, which reports `any` in an
+    // exported signature as a violation and internal `any` as an advisory.
+    // Kept anyway: the linter reports it at the point of use, and a rule that
+    // two tools agree on is one nobody argues about.
+    "typescript/no-explicit-any": "error"
+  },
+  "ignorePatterns": ["dist", "node_modules", "coverage"]
+}

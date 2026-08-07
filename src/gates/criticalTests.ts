@@ -98,9 +98,15 @@ export async function checkCriticalTests(
     return ran([]);
   }
   const changedSet = new Set(changed);
-  const violations = criticalFunctions(options.root, options.sourcePaths, {
-    ...(options.api === undefined ? {} : { api: options.api }),
-  })
+  // The conditional spread is the `exactOptionalPropertyTypes` idiom: passing
+  // `api: undefined` explicitly is a type error, so an absent key and a
+  // present-but-undefined one are different things. Here the wrapping object
+  // literal genuinely was redundant, so it is gone; the spread is not.
+  const violations = criticalFunctions(
+    options.root,
+    options.sourcePaths,
+    options.api === undefined ? {} : { api: options.api },
+  )
     .filter((critical) => changedSet.has(critical.file))
     .map(toViolation);
   return ran(violations);
