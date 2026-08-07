@@ -144,6 +144,47 @@ describe("createNewProject", () => {
     assert.match(readFileSync(join(root, ".npmrc"), "utf8"), /^ignore-scripts=true$/m);
   });
 
+  /**
+   * The cooldown exemption is the one setting that varies by kind, and the
+   * only place the scaffold weakens its own floor. Two things are asserted
+   * because either one alone is a different bug: that the mcp/fastmcp project
+   * HAS the exemption (without it its very first `pnpm install` fails, since
+   * no version of `@prefecthq/fastmcp-ts` is 30 days old), and that no other
+   * kind has it — an exemption that leaked into `cli` would silently drop the
+   * cooldown for a project that never needed it.
+   */
+  it("exempts the young MCP packages from the cooldown, for that kind only", () => {
+    const workspace = (root: string): string =>
+      readFileSync(join(root, "pnpm-workspace.yaml"), "utf8");
+
+    const mcp = workspace(scaffolded("mcp", "fastmcp"));
+    assert.match(mcp, /^minimumReleaseAgeExclude:$/m);
+    assert.match(mcp, /^ {2}- "@prefecthq\/fastmcp-ts"$/m);
+    // The floor itself must survive intact: exempting names is the mechanism,
+    // lowering the cooldown for everything is the mistake it exists to avoid.
+    assert.match(mcp, /^minimumReleaseAge: 43200$/m);
+    assert.match(mcp, /^minimumReleaseAgeStrict: true$/m);
+    // The exemption has to say what it is and when it goes away.
+    assert.match(mcp, /REMOVE/);
+    assert.match(mcp, /30 days/);
+
+    for (const root of [scaffolded("cli"), scaffolded("api"), scaffolded("mcp", "official")]) {
+      const other = workspace(root);
+      assert.match(other, /^minimumReleaseAgeExclude: \[\]$/m);
+      assert.equal(other.includes("@prefecthq/fastmcp-ts"), false);
+    }
+  });
+
+  it("warns in the README that the MCP dependency is young", () => {
+    const readme = readFileSync(join(scaffolded("mcp", "fastmcp"), "README.md"), "utf8");
+    assert.match(readme, /@prefecthq\/fastmcp-ts/);
+    assert.match(readme, /minimumReleaseAgeExclude/);
+    assert.equal(
+      readFileSync(join(scaffolded("cli"), "README.md"), "utf8").includes("fastmcp"),
+      false,
+    );
+  });
+
   it("creates the layered layout for every kind", () => {
     for (const kind of KINDS) {
       const root = scaffolded(kind);

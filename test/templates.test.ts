@@ -118,10 +118,73 @@ describe("kind templates", () => {
   it("defaults the mcp kind to fastmcp and switches on --mcp-sdk official", () => {
     assert.equal(MCP_SDKS[0], "fastmcp");
     const fast = kindFiles("mcp", "demo", "fastmcp")["src/entrypoints/server.ts"] ?? "";
-    assert.match(fast, /from "fastmcp"/);
+    assert.match(fast, /from "@prefecthq\/fastmcp-ts\/server"/);
     const official = kindFiles("mcp", "demo", "official")["src/entrypoints/server.ts"] ?? "";
     assert.match(official, /@modelcontextprotocol\/sdk/);
-    assert.equal(/from "fastmcp"/.test(official), false);
+    assert.equal(/@prefecthq\/fastmcp-ts/.test(official), false);
+  });
+
+  /**
+   * The unscoped `fastmcp` on npm is punkpeye/fastmcp — a different project by
+   * a different author from the Python FastMCP whose relationship is the whole
+   * reason this SDK is the default. Scaffolding it was a real bug, and it is
+   * the kind that reads as correct forever: the code compiles, the name looks
+   * right, and the generated server is written against an API that is not
+   * there. Asserted on the manifest AND on every import specifier.
+   */
+  it("scaffolds @prefecthq/fastmcp-ts, never the unrelated unscoped `fastmcp`", () => {
+    const dependencies = kindDependencies("mcp", "fastmcp");
+    assert.equal("@prefecthq/fastmcp-ts" in dependencies, true);
+    assert.equal("fastmcp" in dependencies, false);
+    const manifest = packageJson({
+      projectName: "demo",
+      packageName: "demo",
+      kind: "mcp",
+      mcpSdk: "fastmcp",
+    });
+    const declared = manifest["dependencies"] as Record<string, string>;
+    assert.equal(declared["@prefecthq/fastmcp-ts"], "1.3.0");
+    assert.equal("fastmcp" in declared, false);
+    for (const source of Object.values(kindFiles("mcp", "demo", "fastmcp"))) {
+      assert.equal(/from "fastmcp"/.test(source), false, "imports the wrong package");
+    }
+  });
+
+  /**
+   * `@prefecthq/fastmcp-ts` publishes `./server` and `./client` and nothing at
+   * the root, so a bare-specifier import does not resolve at all. A type-level
+   * check cannot catch it here (the package is not installed in this repo), so
+   * the shape of every specifier is asserted directly.
+   */
+  it("imports the fastmcp package only through a real subpath export", () => {
+    const specifiers: string[] = [];
+    for (const source of Object.values(kindFiles("mcp", "demo", "fastmcp"))) {
+      for (const match of source.matchAll(/from "(@prefecthq\/fastmcp-ts[^"]*)"/g)) {
+        specifiers.push(match[1] ?? "");
+      }
+    }
+    assert.ok(specifiers.length > 0, "the fastmcp template imports the package at all");
+    for (const specifier of specifiers) {
+      assert.match(
+        specifier,
+        /^@prefecthq\/fastmcp-ts\/(?:server|client)$/,
+        `${specifier} is not one of the package's two subpath exports`,
+      );
+    }
+  });
+
+  /** The API in the template must be the one `dist/server.d.ts` declares. */
+  it("uses the fastmcp-ts server API, not the unscoped package's", () => {
+    const files = kindFiles("mcp", "demo", "fastmcp");
+    const server = files["src/entrypoints/server.ts"] ?? "";
+    const bin = files["src/entrypoints/bin.ts"] ?? "";
+    assert.match(server, /server\.tool\(/);
+    assert.match(server, /input: z\.object\(/);
+    assert.match(bin, /server\.run\(\{ transport: "stdio" \}\)/);
+    // The unscoped package's spellings. None of these exist on FastMCP here.
+    for (const wrong of ["addTool(", "parameters:", "execute:", "transportType"]) {
+      assert.equal(`${server}${bin}`.includes(wrong), false, `uses ${wrong}`);
+    }
   });
 
   it("names the mcp server after the project", () => {

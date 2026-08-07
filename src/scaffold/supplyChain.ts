@@ -13,7 +13,14 @@
  * settings from `.npmrc`, and silently ignores everything else — is invisible
  * from the outside and produces confident, useless configuration when unknown.
  * A generated project inherits the explanation along with the setting.
+ *
+ * ONE setting varies by kind, and only one: `minimumReleaseAgeExclude`. See
+ * `releaseAgeExclude` at the bottom of this file for what is excluded and why.
+ * Everything else is byte-identical across every project kragg generates —
+ * hardening that differs per kind is hardening nobody can reason about.
  */
+
+import type { Kind, McpSdk } from "./kinds.ts";
 
 /**
  * `.npmrc`. Governs `npm`/`npx`, NOT `pnpm` — see the comment in the file.
@@ -46,13 +53,14 @@ save-exact=true
 `;
 
 /**
- * `pnpm-workspace.yaml`. This is where pnpm's hardening actually takes effect.
+ * The invariant half of `pnpm-workspace.yaml` — everything except the
+ * cooldown's exclusion list, which `releaseAgeExclude` appends.
  *
  * Every setting carries the doc URL it was verified against, because several
  * of these keys were renamed or introduced recently and a plausible-looking
  * wrong key name provides exactly zero protection while looking like a wall.
  */
-export const PNPM_WORKSPACE = `# pnpm settings for this project.
+const PNPM_WORKSPACE_BASE = `# pnpm settings for this project.
 #
 # As of pnpm v11, ONLY auth and registry settings are read from \`.npmrc\`.
 # Every behavioural setting — including all supply-chain hardening below —
@@ -110,8 +118,93 @@ minimumReleaseAgeStrict: true
 # Verified: https://pnpm.io/settings/dependency-resolution#minimumreleaseageignoremissingtime
 # (added in v11.0.0)
 minimumReleaseAgeIgnoreMissingTime: false
+`;
 
+/** The exclusion list for every kind that has nothing to exclude. */
+const NO_EXCLUSIONS = `
 # No package is exempt from the cooldown. Keep this empty.
 # Verified: https://pnpm.io/settings/dependency-resolution#minimumreleaseageexclude
 minimumReleaseAgeExclude: []
 `;
+
+/**
+ * The exclusion list for `--kind mcp` on the fastmcp SDK.
+ *
+ * This is the ONE place the scaffold weakens its own floor, and it is written
+ * out at length on purpose. An exemption that does not say what it exempts,
+ * why, and when it stops being needed is indistinguishable from someone
+ * silencing a check — the same reason `// kragg: ignore` in this codebase is
+ * required to carry a reason.
+ */
+const FASTMCP_EXCLUSIONS = `
+# --- EXEMPTION from the cooldown above: scoped, dated, and temporary -----
+#
+# WHAT IS EXCLUDED: the packages named below, and nothing else. A name here
+# is exempt from \`minimumReleaseAge\` — it installs at whatever version the
+# range resolves to, however recently that version was published. Everything
+# not named here is still held to the full 30 days.
+#
+# WHY: \`@prefecthq/fastmcp-ts\` is the official FastMCP TypeScript library,
+# and it is new. 1.0.0 was published 2026-07-28 and releases have been
+# landing weekly since. NO published version of it is 30 days old, and its
+# runtime dependency on MCP TypeScript SDK v2 (\`@modelcontextprotocol/*\`,
+# whose only non-prerelease 2.x version is 2.0.0, published 2026-07-27) is
+# in the same position — \`^2.0.0\` has exactly one satisfying version and it
+# is younger than the floor. With \`minimumReleaseAgeStrict: true\` above,
+# that is not a warning: \`pnpm install\` fails outright, in a project that
+# has not been touched since it was generated.
+#
+# WHY IT IS WRITTEN THIS WAY: lowering \`minimumReleaseAge\`, or dropping
+# \`minimumReleaseAgeStrict\`, would exempt EVERY dependency in the tree —
+# hundreds of packages — to unblock six. This list exempts the six. Each
+# entry is a full package name, never a \`@scope/*\` pattern, so a NEW package
+# published under either scope is not silently exempted along with them.
+#
+# WHEN TO REMOVE: as soon as the versions this project pins are older than
+# 30 days. Check with:
+#
+#   npm view @prefecthq/fastmcp-ts time
+#   npm view @modelcontextprotocol/server time
+#
+# then delete the entries that have aged out. Deleting all of them and
+# restoring \`minimumReleaseAgeExclude: []\` is the goal state.
+#
+# Verified: https://pnpm.io/settings/dependency-resolution#minimumreleaseageexclude
+minimumReleaseAgeExclude:
+  # The MCP framework itself. Pinned exactly in package.json.
+  - "@prefecthq/fastmcp-ts"
+  # Its runtime dependencies: MCP TypeScript SDK v2, published 2026-07-27.
+  # Pulled in transitively by the entry above, so excluding only that one
+  # would leave the install failing on these instead.
+  - "@modelcontextprotocol/core"
+  - "@modelcontextprotocol/client"
+  - "@modelcontextprotocol/node"
+  - "@modelcontextprotocol/server"
+  - "@modelcontextprotocol/server-legacy"
+`;
+
+/**
+ * `pnpm-workspace.yaml` for a project of this kind. This is where pnpm's
+ * hardening actually takes effect.
+ *
+ * `kind` is `null` for `kragg init`, which adds guardrails to a project whose
+ * dependencies are not ours — so it gets the unexempted floor.
+ */
+export function pnpmWorkspace(kind: Kind | null, mcpSdk: McpSdk): string {
+  return PNPM_WORKSPACE_BASE + releaseAgeExclude(kind, mcpSdk);
+}
+
+/**
+ * Which exclusion block a kind gets.
+ *
+ * Only `--kind mcp --mcp-sdk fastmcp` gets one. The `official` SDK variant
+ * depends on `@modelcontextprotocol/sdk` v1, not on anything excluded here,
+ * so exempting names it does not install would be dead configuration that
+ * quietly widens over time.
+ */
+function releaseAgeExclude(kind: Kind | null, mcpSdk: McpSdk): string {
+  if (kind === "mcp" && mcpSdk === "fastmcp") {
+    return FASTMCP_EXCLUSIONS;
+  }
+  return NO_EXCLUSIONS;
+}

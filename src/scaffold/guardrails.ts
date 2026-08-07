@@ -22,7 +22,7 @@ import {
   type Kind,
   type McpSdk,
 } from "./kinds.ts";
-import { NPMRC, PNPM_WORKSPACE } from "./supplyChain.ts";
+import { NPMRC, pnpmWorkspace } from "./supplyChain.ts";
 
 /** Node version the scaffold targets. Type stripping needs 22.18 or newer. */
 export const NODE_VERSION = "24";
@@ -54,7 +54,7 @@ export function guardrailFiles(identity: ProjectIdentity): Record<string, string
     ".gitignore": GITIGNORE,
     ".node-version": `${NODE_VERSION}\n`,
     ".npmrc": NPMRC,
-    "pnpm-workspace.yaml": PNPM_WORKSPACE,
+    "pnpm-workspace.yaml": pnpmWorkspace(identity.kind, identity.mcpSdk),
     "package.json": `${JSON.stringify(packageJson(identity), null, 2)}\n`,
     "tsconfig.json": TSCONFIG,
     "tsconfig.build.json": TSCONFIG_BUILD,
@@ -166,7 +166,7 @@ pnpm install
 Lifecycle scripts are disabled and a 30-day release cooldown is enforced (see
 \`pnpm-workspace.yaml\`). Both are deliberate; read the comments there before
 changing either.
-
+${youngDependencyNote(identity)}
 ${run}## Quality gates
 
 \`\`\`bash
@@ -174,6 +174,39 @@ pnpm exec kragg check
 \`\`\`
 
 The agent contract is \`AGENTS.md\`. Read it before changing code here.
+`;
+}
+
+/**
+ * The README paragraph warning that this project's MCP dependency is young.
+ *
+ * Stated in the README rather than only in `pnpm-workspace.yaml` because the
+ * person deciding whether this project is fit for production reads the README,
+ * and "a dependency here is two weeks old and exempted from your own cooldown"
+ * is exactly the fact that decision turns on. Empty for every other kind.
+ */
+function youngDependencyNote(identity: ProjectIdentity): string {
+  if (identity.kind !== "mcp" || identity.mcpSdk !== "fastmcp") {
+    return "";
+  }
+  return `
+### A note on this project's MCP dependency
+
+\`@prefecthq/fastmcp-ts\` is PrefectHQ's official FastMCP TypeScript library —
+the same organisation as the Python FastMCP, which is why it is the default
+here. It is also NEW: 1.0.0 shipped 2026-07-28, releases have been landing
+weekly, and no published version is yet 30 days old.
+
+That has one concrete consequence you are agreeing to. It and the MCP
+TypeScript SDK v2 packages it depends on are listed in
+\`minimumReleaseAgeExclude\` in \`pnpm-workspace.yaml\`, which exempts them from
+the 30-day cooldown every other dependency in this project is held to. Without
+that, \`pnpm install\` would fail on a project nobody had touched yet. The
+exemption is scoped to those package names, nothing else, and it should be
+deleted once the pinned versions have aged past 30 days.
+
+Expect the API to move. The version in \`package.json\` is pinned exactly; read
+the release notes before raising it.
 `;
 }
 
