@@ -14,7 +14,11 @@
     "sourceMap": true,
     "removeComments": false,
     "incremental": true,
-    "tsBuildInfoFile": "dist/.tsbuildinfo"
+    /* Build cache, deliberately OUTSIDE `dist/`. Inside it, the file landed in
+       the published tarball: `files` allowlists `dist`, and a build cache is
+       both useless to a consumer and a small leak of local paths. Kept at the
+       repo root where `*.tsbuildinfo` in .gitignore already covers it. */
+    "tsBuildInfoFile": ".tsbuildinfo"
   },
   "include": ["src/**/*.ts"],
   "exclude": ["node_modules", "dist", "test"]
