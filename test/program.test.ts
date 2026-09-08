@@ -25,8 +25,10 @@ import {
   analysisProgram,
   clearAnalysisProgramCache,
   programFileNames,
+  programSourceFiles,
   sourceFilesFor,
 } from "../src/analysis/program.ts";
+import { absolutePath, resolveSpecifier, toPosix } from "../src/analysis/modulePath.ts";
 import {
   clearCompilerCache,
   moduleImports,
@@ -433,5 +435,114 @@ describe("program file selection", () => {
     ]);
     assert.equal(mixed.length, 1);
     assert.equal(mixed[0]?.fileName.endsWith("b.ts"), true);
+  });
+});
+
+/**
+ * The path arithmetic under the syntax tier.
+ *
+ * `moduleName` above and `resolveSpecifier` here must agree: the first names a
+ * FILE, the second names the target of an import SPECIFIER, and if the two
+ * disagree the import table stops joining against the file table and every
+ * cross-module gate goes quietly blind. So the assertions below are written as
+ * pairs wherever both functions can reach the same module.
+ */
+describe("resolveSpecifier", () => {
+  it("agrees with moduleName on a sibling import", () => {
+    assert.equal(resolveSpecifier("src/a", "./b.ts"), "src/b");
+    assert.equal(resolveSpecifier("src/a", "./b.ts"), moduleName("/repo/src/b.ts", "/repo"));
+  });
+
+  it("resolves .. against the importing module's directory", () => {
+    assert.equal(resolveSpecifier("src/gates/architecture/layers", "../../engine/models.ts"),
+      "src/engine/models");
+    assert.equal(resolveSpecifier("src/a/b/c", "../../d.ts"), "src/d");
+  });
+
+  it("drops a trailing /index, as moduleName drops it from a path", () => {
+    assert.equal(resolveSpecifier("src/a", "./sub/index.ts"), "src/sub");
+    assert.equal(
+      resolveSpecifier("src/a", "./sub/index.ts"),
+      moduleName("/r/src/sub/index.ts", "/r"),
+    );
+  });
+
+  it("strips every recognised extension, compound .d.ts included", () => {
+    assert.equal(resolveSpecifier("src/a", "./b.mts"), "src/b");
+    assert.equal(resolveSpecifier("src/a", "./b.tsx"), "src/b");
+    assert.equal(resolveSpecifier("src/a", "./b.d.ts"), "src/b");
+  });
+
+  it("keeps bare, builtin and aliased specifiers verbatim", () => {
+    // Not a gap being papered over: `moduleImports` documents why aliases are
+    // deliberately left unresolved rather than guessed at.
+    assert.equal(resolveSpecifier("src/a", "typescript"), "typescript");
+    assert.equal(resolveSpecifier("src/a", "node:fs"), "node:fs");
+    assert.equal(resolveSpecifier("src/a", "@scope/pkg/sub"), "@scope/pkg/sub");
+    assert.equal(resolveSpecifier("src/a", "#internal/x"), "#internal/x");
+  });
+
+  it("keeps a specifier that escapes the module root rather than dropping the ..", () => {
+    assert.equal(resolveSpecifier("a", "../outside.ts"), "../outside");
+  });
+
+  it("resolves against a module with no directory part", () => {
+    assert.equal(resolveSpecifier("cli", "./commands/check.ts"), "commands/check");
+  });
+});
+
+describe("toPosix", () => {
+  it("leaves a POSIX path untouched", () => {
+    // On a POSIX host this is the identity; the Windows branch is what makes a
+    // report read the same on every platform.
+    assert.equal(toPosix("src/a/b.ts"), "src/a/b.ts");
+    assert.equal(toPosix(""), "");
+    assert.equal(toPosix(join("src", "a", "b.ts")), "src/a/b.ts");
+  });
+});
+
+describe("absolutePath", () => {
+  it("resolves a repo-relative path against the root", () => {
+    assert.equal(absolutePath(join("/repo"), "src/a.ts"), join("/repo", "src", "a.ts"));
+  });
+
+  it("leaves an already-absolute path absolute, ignoring the root", () => {
+    // git reports relative paths, but a caller's `--changed` list may not.
+    const elsewhere = join("/elsewhere", "src", "a.ts");
+    assert.equal(absolutePath("/repo", elsewhere), elsewhere);
+  });
+
+  it("normalizes . and .. segments so two spellings of one file match", () => {
+    assert.equal(absolutePath("/repo", "./src/../src/a.ts"), join("/repo", "src", "a.ts"));
+  });
+});
+
+describe("programSourceFiles", () => {
+  it("returns the project's own source files, not lib or vendored declarations", () => {
+    // A program contains every `lib.*.d.ts` the target pulls in; reporting a
+    // violation inside one is a bug report against the compiler.
+    const root = project({
+      "tsconfig.json": JSON.stringify({
+        compilerOptions: { target: "es2023", module: "nodenext" },
+        include: ["src/**/*.ts"],
+      }),
+      "src/a.ts": "export const a = 1;\n",
+      "src/types.d.ts": "export declare const t: number;\n",
+    });
+    const load = analysisProgram({ root, api: ts }).load();
+    assert.equal(load.ok, true);
+    if (!load.ok) {
+      return;
+    }
+    const files = programSourceFiles(load.program);
+    assert.deepEqual(files.map((file) => file.fileName), [join(root, "src", "a.ts")]);
+    // Real SourceFile objects, not paths — that is what the callers walk.
+    assert.equal(files[0]?.statements.length, 1);
+    // The program itself really did carry the noise this filters out.
+    assert.equal(
+      load.program.getSourceFiles().some((file) => file.isDeclarationFile),
+      true,
+    );
+    assert.equal(files.some((file) => file.isDeclarationFile), false);
   });
 });
