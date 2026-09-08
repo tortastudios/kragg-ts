@@ -556,6 +556,122 @@ describe("an accepted argument must be an argument that acts", () => {
   });
 });
 
+/**
+ * The inventory filters, end to end.
+ *
+ * `test/map.test.ts` and `test/spec.test.ts` cover what the documents say;
+ * this covers what a caller can ask for and what the process does about it —
+ * the exit code, the machine format on stdout, and the artifact on disk.
+ */
+describe("focused, bounded inventories", () => {
+  /** A project with two source modules and one two-case test file. */
+  function inventory(): string {
+    const root = project();
+    mkdirSync(join(root, "src"), { recursive: true });
+    mkdirSync(join(root, "test"), { recursive: true });
+    writeFileSync(
+      join(root, "src", "alpha.ts"),
+      "export function zulu(): void {}\nexport function alpha(): void {}\n",
+    );
+    writeFileSync(join(root, "src", "beta.ts"), "export const beta = 1;\n");
+    writeFileSync(
+      join(root, "test", "a.test.ts"),
+      'describe("group", () => {\n  it("one", () => {});\n  it("two", () => {});\n});\n',
+    );
+    return root;
+  }
+
+  it("scopes `map` to a path and to a symbol", async () => {
+    const root = inventory();
+    const scoped = await run(["map", "--path", "src/beta"], root);
+    assert.equal(scoped.code, EXIT_OK);
+    assert.match(scoped.out, /^map: 1 exported symbols across 1 modules\n/);
+
+    const named = await run(["map", "--symbol", "zulu"], root);
+    assert.equal(named.code, EXIT_OK);
+    assert.match(named.out, /^map: 1 exported symbols across 1 modules\n/);
+    assert.ok(named.out.includes("fn zulu(): void"), named.out);
+  });
+
+  it("bounds `map` and says what it withheld, in text and in JSON", async () => {
+    const root = inventory();
+    const text = await run(["map", "--limit", "1"], root);
+    assert.equal(text.code, EXIT_OK);
+    assert.ok(
+      text.out.trimEnd().endsWith("showing 1 of 3 exported symbols — pass --limit 0 for everything"),
+      text.out,
+    );
+
+    const json = await run(["map", "--limit", "1", "--format", "json"], root);
+    assert.equal(json.code, EXIT_OK);
+    const parsed = JSON.parse(json.out) as { total: number; shown: number; truncated: boolean };
+    assert.deepEqual(parsed, { ...parsed, total: 3, shown: 1, truncated: true });
+  });
+
+  it("writes the whole inventory to .kragg/map.md however small the printout", async () => {
+    // The enforcement contract: a display budget is not a scope. What the
+    // session-start injection loads must not shrink because of a --limit.
+    const root = inventory();
+    const result = await run(["map", "--limit", "1", "--write"], root);
+    assert.equal(result.code, EXIT_OK);
+    assert.match(result.out, /showing 1 of 3 exported symbols/);
+    const written = readFileSync(join(root, ".kragg", "map.md"), "utf8");
+    assert.equal(written.split("\n").filter((line) => line.startsWith("  ")).length, 3, written);
+    assert.ok(!written.includes("showing"), written);
+  });
+
+  it("refuses to persist a map scoped by a filter", async () => {
+    const result = await run(["map", "--write", "--path", "src/beta"], inventory());
+    assert.equal(result.code, EXIT_USAGE);
+    assert.match(result.err, /--write cannot be combined with --path, --symbol or --changed/);
+  });
+
+  it("scopes and bounds `spec` the same way", async () => {
+    const root = inventory();
+    const scoped = await run(["spec", "--symbol", "one", "--format", "json"], root);
+    assert.equal(scoped.code, EXIT_OK);
+    const parsed = JSON.parse(scoped.out) as { total: number; entries: { title: string }[] };
+    assert.equal(parsed.total, 1);
+    assert.equal(parsed.entries[0]?.title, "one");
+
+    const missed = await run(["spec", "--symbol", "nosuchtest"], root);
+    assert.equal(missed.code, EXIT_OK, "an empty selection is a fact, not a failure");
+    assert.match(missed.out, /^no tests match the selection\n/);
+  });
+
+  it("cannot answer --changed outside a repository, and says so instead of guessing", async () => {
+    // The `null` vs `[]` rule: "git cannot answer" must never render as
+    // "nothing changed", which would look like a clean, complete inventory.
+    for (const command of ["map", "spec"]) {
+      const result = await run([command, "--changed"], inventory());
+      assert.equal(result.code, EXIT_ENVIRONMENT, command);
+      assert.match(result.err, /not a git repository \(required for --changed\)/, command);
+    }
+  });
+
+  it("rejects a limit that is not a count, and --all alongside it", async () => {
+    const bad = await run(["map", "--limit", "abc"]);
+    assert.equal(bad.code, EXIT_USAGE);
+    assert.match(bad.err, /--limit must be a non-negative integer, not 'abc'/);
+
+    const both = await run(["spec", "--all", "--limit", "5"]);
+    assert.equal(both.code, EXIT_USAGE);
+    assert.match(both.err, /--all cannot be combined with --limit/);
+  });
+
+  it("keeps each command's filters to the ones it implements", async () => {
+    // `brief` has no symbol to filter on and `spec` writes no artifact, so
+    // accepting either flag would be an argument that does not act.
+    const symbol = await run(["brief", "--symbol", "x"]);
+    assert.equal(symbol.code, EXIT_USAGE);
+    assert.match(symbol.err, /`brief` does not accept --symbol/);
+
+    const write = await run(["spec", "--write"]);
+    assert.equal(write.code, EXIT_USAGE);
+    assert.match(write.err, /`spec` does not accept --write/);
+  });
+});
+
 describe("the help text and the flag table cannot drift apart", () => {
   // Both directions of one contract: a flag `--help` advertises must be one a
   // command accepts, and a flag a command accepts must be advertised. Read as
@@ -625,7 +741,7 @@ describe("the help text and the flag table cannot drift apart", () => {
     const documented = documentedTable();
     assert.deepEqual(
       [...documented.keys()].sort(),
-      ["brief", "check", "criticality", "fix", "flaky", "init", "map", "mutation", "security", "status"],
+      ["brief", "check", "criticality", "fix", "flaky", "init", "map", "mutation", "security", "spec", "status"],
     );
     assert.deepEqual(documented.get("criticality"), ["write", "path"]);
     assert.deepEqual(allowedTable().get("mutation"), ["path", "since", "all", "update-baseline"]);
