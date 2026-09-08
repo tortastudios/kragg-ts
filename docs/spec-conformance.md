@@ -287,8 +287,9 @@ merging. kragg-ts adds tool-selection keys (`lint_tool`, `test_runner`,
 `secret_scanner`, `audit_severity`) that have no Python analogue, where `"off"`
 is a deliberate, visible disable: the gate SKIPs with a reason saying so — and
 `baseline`, the root-relative path of the legacy-debt baseline (row 31 of
-section 11), `null` by default. Malformed *values* fail closed to the stricter
-default; a file that cannot be parsed at all is a usage error (exit 2).
+section 11), `null` by default. A malformed *value* is rejected by name
+(`PolicyError`, exit 2; row 15) rather than defaulted, and a file that cannot
+be parsed at all is a usage error too (exit 2).
 
 ## 9. Fixtures in this repository
 
