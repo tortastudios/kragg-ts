@@ -23,7 +23,12 @@ import { parseBunAudit } from "../src/adapters/support/auditBun.ts";
 import { parseNpmAudit } from "../src/adapters/support/auditNpm.ts";
 import { parsePnpmAudit } from "../src/adapters/support/auditPnpm.ts";
 import { parseYarnBerryAudit, parseYarnClassicAudit } from "../src/adapters/support/auditYarn.ts";
-import { looksOffline, meetsFloor } from "../src/adapters/support/auditTypes.ts";
+import {
+  excerpt,
+  looksOffline,
+  meetsFloor,
+  toSeverity,
+} from "../src/adapters/support/auditTypes.ts";
 import { resolveProjectEnvironment } from "../src/environment/project.ts";
 
 const roots: string[] = [];
@@ -466,4 +471,47 @@ test("an unidentifiable project skips visibly instead of auditing nothing", asyn
   assert.equal(outcome.ok, false);
   assert.equal(outcome.kind, "not-configured");
   assert.match(outcome.message, /will not guess which auditor to run/u);
+});
+
+// ── The shared vocabulary: the severity floor, and the failure excerpt ─────
+
+test("toSeverity accepts the vocabulary in any case and rejects everything else", () => {
+  assert.equal(toSeverity("high"), "high");
+  assert.equal(toSeverity("HIGH"), "high");
+  assert.equal(toSeverity("Moderate"), "moderate");
+  assert.equal(toSeverity("info"), "info");
+  // A value outside the vocabulary must stay UNKNOWN, not be coerced to a
+  // rank: `meetsFloor` reports an unknown severity regardless of the floor,
+  // and coercing it to `low` here would silently drop the finding instead.
+  assert.equal(toSeverity("severe"), undefined);
+  assert.equal(toSeverity(""), undefined);
+  assert.equal(toSeverity(undefined), undefined);
+});
+
+test("toSeverity feeds meetsFloor: an unrecognised severity is still reported", () => {
+  assert.equal(meetsFloor(toSeverity("critical"), "high"), true);
+  assert.equal(meetsFloor(toSeverity("low"), "high"), false);
+  assert.equal(meetsFloor(toSeverity("catastrophic"), "critical"), true);
+});
+
+test("excerpt keeps the first non-empty lines, which carry the cause", () => {
+  const output = [
+    "",
+    "  npm error code ENOTFOUND  ",
+    "",
+    "npm error syscall getaddrinfo",
+    "npm error errno ENOTFOUND",
+  ].join("\n");
+  assert.equal(
+    excerpt(output),
+    "npm error code ENOTFOUND\nnpm error syscall getaddrinfo\nnpm error errno ENOTFOUND",
+  );
+});
+
+test("excerpt caps the output, so a multi-kilobyte HTTP body is not the report", () => {
+  const long = Array.from({ length: 40 }, (_, index) => `line ${index}`).join("\n");
+  assert.equal(excerpt(long).split("\n").length, 8);
+  assert.equal(excerpt(long, 2), "line 0\nline 1");
+  assert.equal(excerpt(""), "");
+  assert.equal(excerpt("\n  \n\t\n"), "");
 });

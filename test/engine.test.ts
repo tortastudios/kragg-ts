@@ -12,9 +12,21 @@
  */
 
 import assert from "node:assert/strict";
-import { describe, it } from "node:test";
+import { mkdirSync, mkdtempSync, rmSync, writeFileSync } from "node:fs";
+import { tmpdir } from "node:os";
+import { join } from "node:path";
+import { after, describe, it } from "node:test";
 
 import { FAST, runGates, SLOW, type GateSpec } from "../src/engine/gate.ts";
+import {
+  appendRun,
+  journalPath,
+  JOURNAL_DIR,
+  readRuns,
+  renderStatusLines,
+  type JournalEntry,
+  type JournalGate,
+} from "../src/engine/journal.ts";
 import {
   commandOutput,
   gateResult,
@@ -31,7 +43,37 @@ import {
   reportExitCode,
   reportPassed,
 } from "../src/engine/report.ts";
-import { toPayload } from "../src/engine/reportPayload.ts";
+import { toPayload, type ReportPayload } from "../src/engine/reportPayload.ts";
+
+/** Temporary journal roots, removed after the suite. */
+const journalRoots: string[] = [];
+
+after(() => {
+  for (const root of journalRoots) {
+    rmSync(root, { recursive: true, force: true });
+  }
+});
+
+/** A real payload, built the way `runPipeline` builds the one it journals. */
+function journalPayload(command: string, passed: boolean, gateName: string): ReportPayload {
+  return toPayload(
+    buildReport({
+      command,
+      mode: "full",
+      targets: [],
+      results: [
+        gateResult({
+          name: gateName,
+          passed,
+          violations: passed ? [] : [{ message: "x" }],
+        }),
+      ],
+      maxViolations: 25,
+      startedAt: "2026-01-01T00:00:00+00:00",
+      gitSha: null,
+    }),
+  );
+}
 
 /** A gate that records that it ran, and returns the verdict we asked for. */
 function spec(
@@ -548,5 +590,160 @@ describe("commandOutput", () => {
     // callers can test it for emptiness.
     assert.equal(commandOutput(completed("", "")), "");
     assert.equal(commandOutput(completed("\n  \n", "  ")), "");
+  });
+});
+
+/**
+ * The run journal, read back from a real `.kragg/history.jsonl`.
+ *
+ * `commands.test.ts` covers what `runPipeline` WRITES. These cover the read
+ * side, which has a different obligation: the file is append-only and a run
+ * can be interrupted mid-line, so a half-written final entry must cost that
+ * entry and nothing else. A reader that threw on it would take `kragg status`
+ * down for the rest of the history too.
+ */
+describe("readRuns", () => {
+  function journalRoot(lines: readonly string[]): string {
+    const root = mkdtempSync(join(tmpdir(), "kragg-journal-"));
+    journalRoots.push(root);
+    mkdirSync(join(root, JOURNAL_DIR), { recursive: true });
+    writeFileSync(journalPath(root), lines.map((line) => `${line}\n`).join(""), "utf8");
+    return root;
+  }
+
+  it("returns an empty history rather than throwing when there is no file", () => {
+    const root = mkdtempSync(join(tmpdir(), "kragg-journal-"));
+    journalRoots.push(root);
+    assert.deepEqual(readRuns(root, 10), []);
+  });
+
+  it("round-trips what appendRun wrote, oldest first", () => {
+    const root = mkdtempSync(join(tmpdir(), "kragg-journal-"));
+    journalRoots.push(root);
+    appendRun(root, journalPayload("check", true, "a"));
+    appendRun(root, journalPayload("security", false, "b"), { gitDirty: true });
+    const runs = readRuns(root, 10);
+    assert.equal(runs.length, 2);
+    assert.equal(runs[0]?.command, "check");
+    assert.equal(runs[0]?.passed, true);
+    assert.equal(runs[0]?.git_dirty, false, "an omitted gitDirty records clean");
+    assert.equal(runs[1]?.command, "security");
+    assert.equal(runs[1]?.passed, false);
+    assert.equal(runs[1]?.git_dirty, true);
+    assert.equal(runs[1]?.gates[0]?.name, "b");
+  });
+
+  it("returns only the most recent runs, and all of them when `last` is larger", () => {
+    const root = journalRoot([
+      JSON.stringify({ command: "one" }),
+      JSON.stringify({ command: "two" }),
+      JSON.stringify({ command: "three" }),
+    ]);
+    assert.deepEqual(readRuns(root, 99).map((run) => run.command), ["one", "two", "three"]);
+    assert.deepEqual(readRuns(root, 3).map((run) => run.command), ["two", "three"]);
+    // KNOWN QUIRK, pinned rather than wished away: `last` bounds LINES, and an
+    // append-only file always ends in a newline, so the empty final line spends
+    // one of them. The window is therefore `last - 1` entries. It is a display
+    // cap on `kragg status`, so being one short is harmless — but a reader of
+    // this test should not be surprised by it.
+    assert.deepEqual(readRuns(root, 2).map((run) => run.command), ["three"]);
+  });
+
+  it("skips a half-written line and keeps the history around it", () => {
+    // The interrupted-run case. Losing the whole file to it would be worse
+    // than losing the entry.
+    const root = journalRoot([
+      JSON.stringify({ command: "good" }),
+      '{"command":"truncated"',
+      "",
+      JSON.stringify({ command: "later" }),
+    ]);
+    assert.deepEqual(readRuns(root, 10).map((run) => run.command), ["good", "later"]);
+  });
+
+  it("skips a well-formed line that is not an object", () => {
+    // `JSON.parse` succeeds on all three; none of them is a run.
+    const root = journalRoot(["[1,2]", '"a string"', "7", JSON.stringify({ command: "real" })]);
+    assert.deepEqual(readRuns(root, 10).map((run) => run.command), ["real"]);
+  });
+});
+
+describe("renderStatusLines", () => {
+  function entry(overrides: Partial<JournalEntry> = {}): JournalEntry {
+    return {
+      schema_version: 1,
+      ts: "2026-01-01T00:00:00+00:00",
+      command: "check",
+      mode: "full",
+      git_sha: null,
+      git_dirty: false,
+      passed: true,
+      exit_code: 0,
+      duration_ms: 2500,
+      gates: [],
+      ...overrides,
+    };
+  }
+
+  function gate(name: string, passed: boolean, durationMs: number, count = 0): JournalGate {
+    return {
+      name,
+      passed,
+      skipped: false,
+      duration_ms: durationMs,
+      violation_count: count,
+    };
+  }
+
+  it("says so when nothing has been recorded, rather than rendering a pass", () => {
+    // `runStatus` short-circuits this case itself, so nothing else reaches it:
+    // an empty history has no evidence either way and must not read as green.
+    assert.deepEqual(renderStatusLines([]), ["no runs recorded yet — run `kragg check`"]);
+  });
+
+  it("summarizes a passing run without inventing a failing-gates line", () => {
+    const lines = renderStatusLines([entry({ gates: [gate("lint", true, 1200)] })]);
+    assert.equal(lines[0], "last run: PASS (check, full mode, 2026-01-01T00:00:00+00:00, 2.5s)");
+    assert.equal(lines.some((line) => line.startsWith("failing gates:")), false);
+    assert.equal(lines.includes("pass streak: 1 of last 1 runs"), true);
+    assert.equal(lines.at(-1), "slowest gate: lint (1.2s)");
+  });
+
+  it("names the failing gates with their counts, and skips the skipped ones", () => {
+    const lines = renderStatusLines([
+      entry({
+        passed: false,
+        exit_code: 1,
+        gates: [
+          gate("lint", false, 900, 3),
+          { name: "secrets", passed: false, skipped: true, duration_ms: 0, violation_count: 0 },
+          gate("tsc", false, 4000, 1),
+        ],
+      }),
+    ]);
+    assert.match(lines[0] ?? "", /^last run: FAIL \(check, full mode/);
+    assert.equal(lines[1], "failing gates: lint (3 violations), tsc (1 violations)");
+    assert.equal(lines.at(-1), "slowest gate: tsc (4.0s)");
+  });
+
+  it("counts the pass streak backwards from the last run only", () => {
+    const runs = [
+      entry({ passed: true }),
+      entry({ passed: false }),
+      entry({ passed: true }),
+      entry({ passed: true }),
+    ];
+    assert.equal(
+      renderStatusLines(runs).find((line) => line.startsWith("pass streak:")),
+      "pass streak: 2 of last 4 runs",
+    );
+  });
+
+  it("omits the slowest-gate line when no gate was timed", () => {
+    // Every gate at 0ms means the durations were never recorded; naming one of
+    // them "slowest" would be a claim the journal does not support.
+    const lines = renderStatusLines([entry({ gates: [gate("a", true, 0), gate("b", true, 0)] })]);
+    assert.equal(lines.some((line) => line.startsWith("slowest gate:")), false);
+    assert.equal(lines.length, 2);
   });
 });

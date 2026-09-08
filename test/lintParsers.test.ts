@@ -19,7 +19,16 @@ import { describe, it } from "node:test";
 
 import { parseBiomeJson } from "../src/adapters/linters/biome.ts";
 import { parseEslintJson, PARSE_ERROR_CODE } from "../src/adapters/linters/eslint.ts";
-import type { LintParse } from "../src/adapters/linters/json.ts";
+import {
+  isJsonObject,
+  readArray,
+  readPosition,
+  readProp,
+  readString,
+  relativeToRoot,
+  type JsonObject,
+  type LintParse,
+} from "../src/adapters/linters/json.ts";
 import { parseOxlintJson } from "../src/adapters/linters/oxlint.ts";
 import {
   BIOME_CLEAN,
@@ -286,5 +295,76 @@ describe("parseEslintJson", () => {
     for (const bad of cases) {
       assert.equal(parseEslintJson(bad, ROOT).ok, false, bad);
     }
+  });
+});
+
+/**
+ * The narrowing helpers the three parsers above are built from.
+ *
+ * They are exercised indirectly by every case in this file, but the branches
+ * that matter most are the ones a well-formed fixture never reaches: a key
+ * inherited from `Object.prototype`, a position a Rust linter reports as `0`
+ * for "no span", and a path outside the repo root.
+ */
+describe("linter JSON readers", () => {
+  it("isJsonObject rejects arrays and null, which typeof calls objects", () => {
+    assert.equal(isJsonObject({ a: 1 }), true);
+    assert.equal(isJsonObject([]), false);
+    assert.equal(isJsonObject(null), false);
+    assert.equal(isJsonObject("{}"), false);
+  });
+
+  it("readProp reads own properties only", () => {
+    // A linter's JSON carries source text from the repo under check, so a
+    // `constructor` key must read as absent rather than yield a function.
+    const object: JsonObject = { severity: "error" };
+    assert.equal(readProp(object, "severity"), "error");
+    assert.equal(readProp(object, "constructor"), undefined);
+    assert.equal(readProp(object, "toString"), undefined);
+    assert.equal(readProp(object, "absent"), undefined);
+  });
+
+  it("readString rejects the empty string as well as the wrong type", () => {
+    // An empty `message` is no message; passing it through would produce a
+    // violation with nothing to read.
+    const object: JsonObject = { message: "no-debugger", empty: "", count: 3 };
+    assert.equal(readString(object, "message"), "no-debugger");
+    assert.equal(readString(object, "empty"), undefined);
+    assert.equal(readString(object, "count"), undefined);
+    assert.equal(readString(object, "absent"), undefined);
+  });
+
+  it("readArray degrades to an empty array rather than throwing", () => {
+    const object: JsonObject = { messages: [1, 2], scalar: "x" };
+    assert.deepEqual(readArray(object, "messages"), [1, 2]);
+    assert.deepEqual(readArray(object, "scalar"), []);
+    assert.deepEqual(readArray(object, "absent"), []);
+  });
+
+  it("readPosition rejects the out-of-band zero both Rust linters emit", () => {
+    // biome writes `{line: 0, column: 0}` for a diagnostic with no span and
+    // oxlint writes null; `file:0:0` points a reader at nothing.
+    const object: JsonObject = { line: 4, zero: 0, negative: -2, fractional: 1.5, missing: null };
+    assert.equal(readPosition(object, "line"), 4);
+    assert.equal(readPosition(object, "zero"), undefined);
+    assert.equal(readPosition(object, "negative"), undefined);
+    assert.equal(readPosition(object, "fractional"), undefined);
+    assert.equal(readPosition(object, "missing"), undefined);
+  });
+
+  it("relativeToRoot shortens an absolute path inside the root", () => {
+    assert.equal(relativeToRoot(`${ROOT}/src/a.ts`, ROOT), "src/a.ts");
+  });
+
+  it("relativeToRoot passes a relative path through", () => {
+    // oxlint and biome already report cwd-relative paths.
+    assert.equal(relativeToRoot("src/a.ts", ROOT), "src/a.ts");
+  });
+
+  it("relativeToRoot keeps a path outside the root absolute", () => {
+    // A `../../..` chain is longer and harder to read than the original, and
+    // Python's `is_relative_to` guard makes the same choice.
+    assert.equal(relativeToRoot("/elsewhere/src/a.ts", ROOT), "/elsewhere/src/a.ts");
+    assert.equal(relativeToRoot(ROOT, ROOT), ROOT);
   });
 });

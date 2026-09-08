@@ -40,6 +40,10 @@ import { parseVitestJson } from "../src/adapters/support/vitestReport.ts";
 import { artifacts, buildCommand, RUNS_DIR } from "../src/adapters/support/testCommands.ts";
 import { fromReport } from "../src/catalog/results.ts";
 import { buildReport, EXIT_ENVIRONMENT, reportExitCode } from "../src/engine/report.ts";
+import {
+  relativeToRoot as reportRelativeToRoot,
+  stackLocation,
+} from "../src/adapters/support/testReport.ts";
 import { resolveProjectEnvironment } from "../src/environment/project.ts";
 
 const roots: string[] = [];
@@ -846,3 +850,74 @@ function exitCodeFor(gate: ReturnType<typeof fromReport>): number {
     }),
   );
 }
+// ── The runner-independent half: stack frames and path shortening ──────────
+//
+// `stackLocation` decides where a failed test's violation POINTS. Getting it
+// wrong is not cosmetic: the first frame of a vitest failure is usually inside
+// the assertion library, and an agent sent to `node_modules/@vitest/expect`
+// goes and edits the wrong codebase.
+
+test("stackLocation prefers a frame in the test file over the first frame", () => {
+  const stack = [
+    "AssertionError: expected 1 to be 2",
+    "    at Proxy.assert (/repo/node_modules/chai/chai.js:9192:11)",
+    "    at Object.<anonymous> (/repo/test/math.test.ts:12:3)",
+    "    at runNextTicks (node:internal/process/task_queues:60:5)",
+  ].join("\n");
+  assert.deepEqual(stackLocation(stack, "test/math.test.ts"), {
+    file: "/repo/test/math.test.ts",
+    line: 12,
+    column: 3,
+  });
+});
+
+test("stackLocation reads vitest's ❯ frames as well as node's `at` frames", () => {
+  const stack = "  ❯ test/a.test.ts:3:9\n  ❯ test/b.test.ts:4:1";
+  assert.deepEqual(stackLocation(stack, "test/b.test.ts"), {
+    file: "test/b.test.ts",
+    line: 4,
+    column: 1,
+  });
+});
+
+test("stackLocation falls back to the first frame outside node_modules", () => {
+  // No preferred file — the `bun test` case, where the report names no file.
+  const stack = [
+    "    at expect (/repo/node_modules/bun-types/expect.js:10:2)",
+    "    at /repo/src/math.ts:7:11",
+  ].join("\n");
+  assert.deepEqual(stackLocation(stack, undefined), {
+    file: "/repo/src/math.ts",
+    line: 7,
+    column: 11,
+  });
+});
+
+test("stackLocation returns undefined rather than a made-up position", () => {
+  // Every frame is vendored, or there is no frame at all. A violation with an
+  // invented `file:line` is worse than one with none.
+  assert.equal(
+    stackLocation("    at x (/repo/node_modules/vitest/dist/index.js:1:1)", undefined),
+    undefined,
+  );
+  assert.equal(stackLocation("Error: boom", "test/a.test.ts"), undefined);
+  assert.equal(stackLocation("", undefined), undefined);
+});
+
+test("stackLocation is not confused by a previous call's regex state", () => {
+  // STACK_FRAME is a module-level /g regex, so a leaked `lastIndex` would make
+  // the second read start halfway through the string and silently miss frames.
+  const stack = "    at Object.<anonymous> (/repo/test/a.test.ts:5:7)";
+  assert.deepEqual(stackLocation(stack, "test/a.test.ts"), stackLocation(stack, "test/a.test.ts"));
+});
+
+test("relativeToRoot shortens a path inside the root and leaves the rest alone", () => {
+  // Absolute paths embed a home directory, so a report full of them cannot be
+  // diffed between a laptop and CI.
+  const root = join("/repo");
+  assert.equal(reportRelativeToRoot(join(root, "test", "a.test.ts"), root), join("test", "a.test.ts"));
+  assert.equal(reportRelativeToRoot("test/a.test.ts", root), "test/a.test.ts");
+  // Outside the root: an absolute path reads better than a `../../..` chain.
+  assert.equal(reportRelativeToRoot("/elsewhere/a.test.ts", root), "/elsewhere/a.test.ts");
+  assert.equal(reportRelativeToRoot(root, root), root);
+});
