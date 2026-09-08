@@ -48,7 +48,9 @@ Harness integration:
   hook claude    hook adapter; reads hook JSON on stdin
 
 Options for check and security:
-  --file <path>          scope to this file (repeatable)
+  --file <path>          scope to this file or directory (repeatable; a
+                         directory scopes to the source files under it, and a
+                         path that does not exist is a usage error)
   --format text|json     output format (default: text)
   --max-violations <n>   cap violations shown per gate
   --no-journal           do not append to .kragg/history.jsonl
@@ -58,6 +60,13 @@ Options for check only:
   --since <ref>          only files changed since <ref>
   --fail-fast            stop at the first failing gate
   --all                  run slow gates even after a fast gate failed
+
+--changed and --since run a FULL check instead when the change set includes a
+configuration or dependency input (kragg.json, tsconfig*.json, package.json, a
+lockfile, a linter or test-runner config, the secret baseline) or when its only
+source change is a deletion: all of those change what every gate concludes.
+The report says mode "full", and the reason is printed on stderr. A change set
+with nothing to check is exit 0; git being unable to answer is exit 3.
 
 Options for fix:
   --file <path>          format and fix only this file (repeatable)

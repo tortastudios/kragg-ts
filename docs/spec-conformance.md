@@ -341,7 +341,9 @@ A conformance runner must not flag these; a suite that diffs the two
 implementations naively will flag every one. Rows 1–9 are this repository's
 original table, re-verified against both trees while the spec was written; rows
 10–12 were added by that verification and are also SPEC.md section 10's rows
-10–12; rows 13–19 were introduced by TOR-1358, TOR-1363, TOR-1361 and TOR-1369 on this branch. Fixtures that exercise a row carry a `divergences` entry naming its id.
+10–12; rows 13–19 were introduced by TOR-1358, TOR-1363, TOR-1361 and TOR-1369
+on this branch, and rows 20–23 by TOR-1365. Fixtures that exercise a row carry
+a `divergences` entry naming its id.
 
 | # | Divergence | Why it is intentional |
 | --- | --- | --- |
@@ -364,6 +366,10 @@ original table, re-verified against both trees while the spec was written; rows
 | 17 | `criticality --write --path` is exit 2 | Python writes whatever the scoped analysis produced. A partial `.kragg/criticality.json` is not read as partial: `critical-tests` and `critical-coverage` would treat every function outside the scope as uncritical. Refusing keeps the file whole-project by construction. |
 | 18 | `check --file` with `--changed`/`--since` is exit 2 | Python's `_check_targets` takes the git branch first and drops `--file` on the floor. Same file set either way; kragg-ts declines to guess which one the caller meant. |
 | 19 | `check` with an empty `--changed` set under `--format json` | Python prints `no changed Python files` in both formats. kragg-ts prints that only for text and emits the ordinary payload with `gates: []` for JSON, so every `--format json` path is parseable. No key is added, and the text path is byte-identical apart from the language name. |
+| 20 | a **configuration or dependency** change makes `--changed`/`--since` a FULL run | SPEC §4.4 defines `changed` as "git decides the file set", and both implementations filtered that set down to source files — so an edit to `kragg.json`, `tsconfig*.json`, `package.json`, a lockfile or a linter/test-runner config resolved to an empty selection and exited 0 without running a gate, even though those files decide what every gate concludes about every file. kragg-ts promotes the run: `mode` is `"full"`, `targets` is `source_paths`, and the reason goes to stderr. No key is added or changed, and no TypeScript golden covers `--changed`. |
+| 21 | a change set whose only source change is a **deletion** is likewise a FULL run | Both implementations drop deletions from the selection (a deleted file cannot be checked), which turned "the module half the tree imports is gone" into an empty selection and exit 0. A deleted file is still never handed to a per-file tool; it just stops being mistaken for "nothing changed". |
+| 22 | `check --file <path that does not exist>` is exit 2, naming the path | Python runs the pipeline over a selection that matches nothing, which reads as a clean pass: the linter errors about *itself* finding no files while every path-aware gate prints a `[PASS]` over zero files. `targets` for a path that DOES exist is unchanged — including a directory, which stays verbatim on the wire and is expanded only into the internal narrowing. |
+| 23 | git plumbing runs with `-z`; a git failure carries git's message | Python reads `git diff --name-only` with `core.quotePath` on, so `src/café.ts` arrives as `"src/caf\303\251.ts"`, fails the existence check and leaves the selection silently. It also treats any non-zero git exit as an empty diff, so a repository with no commit yet (`git diff HEAD` has no HEAD) reports only untracked files. kragg-ts parses NUL-separated records and reports a git failure as exit 3 with git's own diagnostic. |
 
 Four defects found in the Python implementation during the port are recorded in
 [KNOWN_LIMITATIONS.md](../KNOWN_LIMITATIONS.md#found-in-the-python-implementation-during-this-port).

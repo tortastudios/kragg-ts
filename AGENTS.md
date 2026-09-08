@@ -117,7 +117,11 @@ higher one, and the `boundaries` gate enforces that on this repo.
 - `src/commands/` — one module per command: `check`, `security`, `fix`,
   `map`, `spec`, `brief`, `status`, `policyShow`, `doctor`, `coverage`,
   `criticality`, `mutation`, `flaky`, `audit`, `new`, `gen`, `init`, `hook`,
-  plus `hookCheck.ts` (the `RunCheck` injected into the hook). The three
+  plus `hookCheck.ts` (the `RunCheck` injected into the hook) and `scope.ts`
+  (the one resolver for `full`/`changed`/`file`, shared by `check` and
+  `security`: what the external tools are invoked on, what the path-aware
+  gates narrow to, when a configuration change makes an incremental run a
+  full one, and which unresolvable selections are exit 2 or exit 3). The three
   commands too large for one file have their own directory: `map/`
   (`symbols`, `render`), `spec/` (`property`), `mutation/` (`targets`,
   `stryker`, `report`, `baseline`).
