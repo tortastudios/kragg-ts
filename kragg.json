@@ -1,4 +1,5 @@
 {
+  "$schema": "./kragg.schema.json",
   "profile": "strict-ai-typescript",
   "source_paths": ["src"],
   "test_paths": ["test"],

@@ -45,6 +45,7 @@
   "files": [
     "dist",
     "!dist/**/*.map",
+    "kragg.schema.json",
     "README.md",
     "KNOWN_LIMITATIONS.md",
     "LICENSE"

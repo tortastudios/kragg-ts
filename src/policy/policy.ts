@@ -20,11 +20,22 @@
  * same way. Domain fields are camelCase in TypeScript; the translation
  * happens here.
  *
- * FAIL CLOSED. Every reader below falls back to the DEFAULT on a type
- * mismatch, and `getStringPairs` goes further: it never drops a configured
- * restriction, no matter how malformed the value attached to it. A typo must
- * not silently disable an enforced ban — that is the failure mode this module
- * exists to prevent, where a project believes it is protected and is not.
+ * FAIL CLOSED. Every setting is in one of three states: ABSENT, and the
+ * default applies; CONFIGURED, and the value is honoured exactly, including
+ * deliberate opt-outs such as `[]`, `{}`, `0`, `null` and `"off"`; or
+ * INVALID — wrong type, out of range, wrong shape, or a key kragg does not
+ * know — and the whole load is rejected with a `PolicyError` naming the file
+ * and the setting. An invalid value NEVER becomes a default. Degrading would
+ * mean `forbidden_calls: ["node:child_process", 7]` reads as "no bans" and
+ * `forbiden_calls` configures nothing, with the project reporting green
+ * either way — the failure mode this module exists to prevent, where a
+ * project believes it is protected and is not.
+ *
+ * DIVERGES from Python, which degrades a mismatched value to its default and
+ * ignores unknown keys. Stricter in every case; documented in README.md and
+ * `docs/spec-conformance.md`. `kragg.schema.json` at the package root mirrors
+ * exactly these keys, types and ranges for editor validation, and a test
+ * keeps the two in lockstep.
  *
  * THIS MODULE PARSES UNTRUSTED INPUT. Everything arrives as `unknown` and is
  * narrowed explicitly. No casts, no assertions, no trusting the shape.
@@ -41,8 +52,10 @@ import {
   getStringPairs,
   isTable,
   own,
+  PolicyError,
   readTable,
-  type Table,
+  rejectUnknownKeys,
+  type Source,
 } from "./readers.ts";
 
 /**
@@ -208,15 +221,29 @@ export const DEFAULT_POLICY: KraggPolicy = {
 };
 
 
-/** Load policy from `kragg.json`, then `package.json#kragg`, then defaults. */
+/**
+ * Keys allowed in a config table that are not settings. `$schema` points an
+ * editor at `kragg.schema.json`; it configures nothing and is not an error.
+ */
+const NON_SETTING_KEYS: readonly string[] = ["$schema"];
+
+/**
+ * Load policy from `kragg.json`, then `package.json#kragg`, then defaults.
+ *
+ * Unknown keys are checked LAST, once every reader has recorded the key it
+ * consumed, so the set of accepted keys is exactly the set of keys read —
+ * there is no second list to drift from the readers.
+ */
 export function loadPolicy(root: string): KraggPolicy {
-  const table = loadKraggTable(root);
-  return {
-    ...readScopes(table),
-    ...readBudgets(table),
-    ...readRules(table),
-    ...readTools(table),
+  const source = loadSource(root);
+  const policy: KraggPolicy = {
+    ...readScopes(source),
+    ...readBudgets(source),
+    ...readRules(source),
+    ...readTools(source),
   };
+  rejectUnknownKeys(source, NON_SETTING_KEYS);
+  return policy;
 }
 
 /** The settings naming WHERE kragg looks: paths, layers and glob scopes. */
@@ -252,54 +279,66 @@ type PolicyTools = Pick<
   "lintTool" | "testRunner" | "secretScanner" | "auditSeverity"
 >;
 
-function readScopes(table: Table): PolicyScopes {
+function readScopes(source: Source): PolicyScopes {
   const base = DEFAULT_POLICY;
   return {
-    profile: getString(table, "profile", base.profile),
-    sourcePaths: getStringList(table, "source_paths", base.sourcePaths),
-    testPaths: getStringList(table, "test_paths", base.testPaths),
-    layers: getStringList(table, "layers", base.layers),
-    structureExclude: getStringList(table, "structure_exclude", base.structureExclude),
-    mutationInclude: getStringList(table, "mutation_include", base.mutationInclude),
-    mutationExclude: getStringList(table, "mutation_exclude", base.mutationExclude),
-    coverageReportPath: getString(table, "coverage_report_path", base.coverageReportPath),
+    profile: getString(source, "profile", base.profile),
+    sourcePaths: getStringList(source, "source_paths", base.sourcePaths),
+    testPaths: getStringList(source, "test_paths", base.testPaths),
+    layers: getStringList(source, "layers", base.layers),
+    structureExclude: getStringList(source, "structure_exclude", base.structureExclude),
+    mutationInclude: getStringList(source, "mutation_include", base.mutationInclude),
+    mutationExclude: getStringList(source, "mutation_exclude", base.mutationExclude),
+    coverageReportPath: getString(source, "coverage_report_path", base.coverageReportPath),
   };
 }
 
-function readBudgets(table: Table): PolicyBudgets {
+/**
+ * Every budget is a count or a percentage, so a negative value is invalid
+ * and `0` is a legitimate configured value: `coverage_fail_under: 0` and
+ * `max_violations_per_gate: 0` are the documented opt-outs ("do not ask for
+ * coverage", "no cap"), and a zero depth or length is simply the strictest
+ * setting. A percentage above 100 can never be met and is rejected too.
+ * These ranges are mirrored in `kragg.schema.json`.
+ */
+const COUNT = { min: 0 } as const;
+const PERCENT = { min: 0, max: 100 } as const;
+
+function readBudgets(source: Source): PolicyBudgets {
   const base = DEFAULT_POLICY;
   return {
-    coverageFailUnder: getInt(table, "coverage_fail_under", base.coverageFailUnder),
-    typeMaxNestingDepth: getInt(table, "type_max_nesting_depth", base.typeMaxNestingDepth),
-    typeMaxLength: getInt(table, "type_max_length", base.typeMaxLength),
-    maxViolationsPerGate: getInt(table, "max_violations_per_gate", base.maxViolationsPerGate),
-    maxFileLines: getInt(table, "max_file_lines", base.maxFileLines),
-    maxPublicSymbols: getInt(table, "max_public_symbols", base.maxPublicSymbols),
+    coverageFailUnder: getInt(source, "coverage_fail_under", base.coverageFailUnder, PERCENT),
+    typeMaxNestingDepth: getInt(source, "type_max_nesting_depth", base.typeMaxNestingDepth, COUNT),
+    typeMaxLength: getInt(source, "type_max_length", base.typeMaxLength, COUNT),
+    maxViolationsPerGate: getInt(source, "max_violations_per_gate", base.maxViolationsPerGate, COUNT),
+    maxFileLines: getInt(source, "max_file_lines", base.maxFileLines, COUNT),
+    maxPublicSymbols: getInt(source, "max_public_symbols", base.maxPublicSymbols, COUNT),
   };
 }
 
 /**
  * The enforced restrictions.
  *
- * `getStringPairs` is the fail-closed reader: it never drops a configured
- * entry, however malformed the hint attached to it. See its own doc.
+ * `getStringPairs` is the fail-closed reader: a configured ban is never
+ * dropped, and a malformed hint is rejected by name rather than repaired.
+ * See its own doc.
  */
-function readRules(table: Table): PolicyRules {
+function readRules(source: Source): PolicyRules {
   const base = DEFAULT_POLICY;
   return {
-    forbiddenCalls: getStringPairs(table, "forbidden_calls", base.forbiddenCalls),
-    secretNameSuffixes: getStringList(table, "secret_name_suffixes", base.secretNameSuffixes),
-    secretBaseline: getOptionalString(table, "secret_baseline", base.secretBaseline),
+    forbiddenCalls: getStringPairs(source, "forbidden_calls", base.forbiddenCalls),
+    secretNameSuffixes: getStringList(source, "secret_name_suffixes", base.secretNameSuffixes),
+    secretBaseline: getOptionalString(source, "secret_baseline", base.secretBaseline),
   };
 }
 
-function readTools(table: Table): PolicyTools {
+function readTools(source: Source): PolicyTools {
   const base = DEFAULT_POLICY;
   return {
-    lintTool: getEnum(table, "lint_tool", LINT_TOOLS, base.lintTool),
-    testRunner: getEnum(table, "test_runner", TEST_RUNNERS, base.testRunner),
-    secretScanner: getEnum(table, "secret_scanner", SCANNERS, base.secretScanner),
-    auditSeverity: getEnum(table, "audit_severity", SEVERITIES, base.auditSeverity),
+    lintTool: getEnum(source, "lint_tool", LINT_TOOLS, base.lintTool),
+    testRunner: getEnum(source, "test_runner", TEST_RUNNERS, base.testRunner),
+    secretScanner: getEnum(source, "secret_scanner", SCANNERS, base.secretScanner),
+    auditSeverity: getEnum(source, "audit_severity", SEVERITIES, base.auditSeverity),
   };
 }
 
@@ -344,18 +383,37 @@ export function policyAsDict(policy: KraggPolicy): Record<string, unknown> {
   };
 }
 
-/** Read the raw config table, or `{}` when the project configures nothing. */
-function loadKraggTable(root: string): Table {
-  const standalone = readTable(join(root, "kragg.json"));
+/**
+ * Read the raw config table and where it came from; an empty table when the
+ * project configures nothing.
+ *
+ * A `package.json#kragg` that is present but not an object is REJECTED, not
+ * read as "unconfigured" (which is what Python's `isinstance(kragg, dict)`
+ * guard does): the project wrote a policy block, and running the defaults in
+ * its place would be the silent fall-back this module refuses everywhere
+ * else. A `kragg.json` that is not an object is already rejected by
+ * `readTable`.
+ */
+function loadSource(root: string): Source {
+  const standalonePath = join(root, "kragg.json");
+  const standalone = readTable(standalonePath);
   if (standalone !== null) {
-    return standalone;
+    return { table: standalone, label: `${standalonePath}#`, consumed: new Set() };
   }
-  const pkg = readTable(join(root, "package.json"));
+  const pkgPath = join(root, "package.json");
+  const pkg = readTable(pkgPath);
+  const label = `${pkgPath}#kragg.`;
   if (pkg === null) {
-    return {};
+    return { table: {}, label, consumed: new Set() };
   }
   const kragg = own(pkg, "kragg");
-  // A `kragg` key of the wrong shape degrades to "unconfigured" rather than
-  // throwing, matching Python's `if not isinstance(kragg, dict): return {}`.
-  return isTable(kragg) ? kragg : {};
+  if (kragg === undefined) {
+    return { table: {}, label, consumed: new Set() };
+  }
+  if (!isTable(kragg)) {
+    throw new PolicyError(
+      `${pkgPath}#kragg must be a JSON object of kragg settings (got ${JSON.stringify(kragg)})`,
+    );
+  }
+  return { table: kragg, label, consumed: new Set() };
 }

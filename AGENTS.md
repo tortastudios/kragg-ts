@@ -250,5 +250,6 @@ accept is exit 2, not a silent no-op.
   functions.
 - Config is data (JSON), never executable. There is no `kragg.config.ts` and
   there will not be one.
-- Fail closed. A malformed config degrades to the stricter default and never
-  silently drops a restriction.
+- Fail closed. A malformed config value is rejected by name (`PolicyError`,
+  exit 2) and never silently drops a restriction; an absent key takes the
+  default, a configured opt-out (`[]`, `0`, `null`, `"off"`) is honoured.

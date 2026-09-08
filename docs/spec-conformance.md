@@ -187,6 +187,7 @@ naively will flag every one of them. They are enumerated with their evidence in
 | `secret_name_suffixes` includes `ServiceKey` | Python's default list lacks `_service_key`. Listed in KNOWN_LIMITATIONS as a Python gap found during the port. |
 | criticality freshness | kragg-ts refuses stale data via the sidecar stamp; Python consumes a stale `criticality.json` as if current. The *file* is identical; the trust decision is not. |
 | module naming in the syntax tier | kragg-ts names modules relative to the repo root, Python relative to the package root, because a TypeScript relative specifier is a filesystem path and a Python one is not. |
+| config values are validated, not defaulted | SPEC §8 describes Python: a type-mismatched value falls back to the default and a malformed `forbidden_calls` hint degrades to `""`. kragg-ts rejects a wrong type, an out-of-range budget, a non-string list element or hint, a wrong-shaped `package.json#kragg` and any unknown key with exit 2, naming the setting (`kragg.json#forbidden_calls[1] must be a string (got 7)`). A ban list read as *no bans* and a misspelled key that configures nothing are the fail-open cases this closes. Strictly narrower: everything Python reads as written loads identically. `kragg.schema.json` mirrors the rules for editors. |
 
 Four defects found in the Python implementation during the port are recorded in
 [KNOWN_LIMITATIONS.md](../KNOWN_LIMITATIONS.md#found-in-the-python-implementation-during-this-port).

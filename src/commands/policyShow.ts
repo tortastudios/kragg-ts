@@ -4,9 +4,10 @@
  *
  * Ported from `cmd_policy_show`. The value of this command is that it answers
  * "what is actually enforced here", which is not the same question as "what
- * does kragg.json say": defaults fill in, a `package.json#kragg` block may be
- * shadowed by a `kragg.json`, and a malformed value has already been resolved
- * one way or the other by the time a gate sees it.
+ * does kragg.json say": defaults fill in, and a `package.json#kragg` block may
+ * be shadowed by a `kragg.json`. A malformed value never gets this far — the
+ * load rejects it with `PolicyError` (exit 2, naming the setting), so what
+ * prints here is exactly what the gates enforce.
  *
  * Keys are sorted and the indent is 2, matching Python's
  * `json.dumps(..., indent=2, sort_keys=True)`, so the two siblings' output for

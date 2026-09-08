@@ -173,6 +173,24 @@ describe("a broken config is a USAGE error, not a broken environment", () => {
     }
   });
 
+  it("rejects a malformed restriction with exit 2 and NO report, naming the setting", async () => {
+    // `["node:child_process", 7]` used to load as an empty ban list and
+    // `check` ran green over an un-banned call. Now nothing runs at all.
+    const root = project({ "kragg.json": '{"forbidden_calls": ["node:child_process", 7]}' });
+    const result = await run(["check", "--no-journal", "--format", "json"], root);
+    assert.equal(result.code, EXIT_USAGE);
+    assert.match(result.err, /kragg\.json#forbidden_calls\[1\] must be a string \(got 7\)/);
+    assert.equal(result.out, "");
+  });
+
+  it("rejects a misspelled setting with exit 2, suggesting the right key", async () => {
+    const root = project({ "kragg.json": '{"forbiden_calls": {"a.b": "x"}}' });
+    const result = await run(["policy", "show"], root);
+    assert.equal(result.code, EXIT_USAGE);
+    assert.match(result.err, /forbiden_calls is not a kragg setting \(did you mean forbidden_calls\?\)/);
+    assert.equal(result.out, "");
+  });
+
   it("maps malformed JSON to exit 2 as well", async () => {
     const root = project({ "kragg.json": "{not json" });
     const result = await run(["policy", "show"], root);
