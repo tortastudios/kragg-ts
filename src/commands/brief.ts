@@ -46,6 +46,7 @@ import { changedFiles } from "../git/changes.ts";
 import { criticalFunctions } from "../gates/testDepth/criticalFunctions.ts";
 import type { TypeScriptApi } from "../analysis/sourceFile.ts";
 import { loadPolicy, PolicyError, type KraggPolicy } from "../policy/policy.ts";
+import { isTestPath, testScanDirectories } from "../util/testPaths.ts";
 
 /** What `cmd_brief` prints to stderr when git cannot answer. */
 export const NOT_A_REPOSITORY_MESSAGE = "not a git repository (required for brief)";
@@ -124,7 +125,7 @@ export async function buildBrief(options: BuildBriefOptions): Promise<string | n
   const { policy } = options;
   const changed = await changedFiles(options.root, options.since, [
     ...policy.sourcePaths,
-    ...policy.testPaths,
+    ...testScanDirectories(policy.testPaths),
     ".",
   ]);
   if (changed === null) {
@@ -191,7 +192,7 @@ function groupedSections(
  * section a reviewer checks first.
  */
 function area(name: string, policy: KraggPolicy): string {
-  if (isUnder(name, policy.testPaths) || /\.(?:test|spec)\.[cm]?[jt]sx?$/.test(name)) {
+  if (isTestPath(name, policy.testPaths) || /\.(?:test|spec)\.[cm]?[jt]sx?$/.test(name)) {
     return "Tests";
   }
   return isUnder(name, policy.sourcePaths) ? "Source" : "Other";

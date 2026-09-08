@@ -24,8 +24,50 @@
 import { statSync } from "node:fs";
 
 import type { CompletedCommand } from "../../engine/models.ts";
+import { testRunnerPatterns } from "../../util/testPaths.ts";
 import type { TestRunnerName } from "./detect.ts";
 import type { Artifacts } from "./testCommands.ts";
+
+/**
+ * The runner completed and found NOTHING to run.
+ *
+ * A third refusal, and the one that hid in plain sight the longest: a report
+ * saying "0 tests, 0 failed" parses cleanly, so the gate passed and the run
+ * was green. It is not a pass. Nothing was executed, nothing was verified, and
+ * the two ordinary causes are both configuration a reader can fix in one line
+ * — the tests are colocated and `test_paths` names only `test/`, or the suite
+ * needs a loader the reconstructed argv does not carry. The message therefore
+ * shows the argv that searched, what it searched for, and the three settings
+ * that change the answer, INCLUDING the one that says "I meant it, skip this
+ * gate" — a refusal with no way to opt out gets suppressed some other way.
+ */
+export function noTestsMessage(
+  runner: TestRunnerName,
+  note: string,
+  testPaths: readonly string[],
+): string {
+  return (
+    "the run completed and discovered NO TESTS, so it is evidence of nothing: " +
+    "kragg will not report a gate green because zero tests failed.\n" +
+    `${note}\n` +
+    `${searched(runner, testPaths)}\n` +
+    "Fix one of: point `test_paths` at the tests (an entry may be a directory or a " +
+    "pattern, so `src/**/*.test.ts` selects a colocated suite); set `test_command` to the " +
+    "argv that runs them, if the suite needs a loader, a setup file or a config flag; or " +
+    'set `test_runner` to "off" to skip this gate deliberately.'
+  );
+}
+
+/** What the runner was actually pointed at, in its own terms. */
+function searched(runner: TestRunnerName, testPaths: readonly string[]): string {
+  if (runner === "node") {
+    return `searched: ${testRunnerPatterns(testPaths).join(", ")}`;
+  }
+  return (
+    `searched: whatever ${runner} discovers from its own config — kragg does not pass ` +
+    "`test_paths` to it, so an empty result is that config's file selection"
+  );
+}
 
 /** kragg terminated the runner: nothing it wrote can be a complete report. */
 export function killedMessage(

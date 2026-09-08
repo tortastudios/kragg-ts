@@ -257,6 +257,45 @@ export function getStringList(
 }
 
 /**
+ * Read an ARGV ARRAY: one command-line element per item, never a shell string.
+ *
+ * Deliberately NOT {@link getStringList}, which accepts a bare string as a
+ * one-element list. That convenience is right for a list of paths and
+ * catastrophic here: `test_command: "node --import tsx --test"` would become
+ * the single program name `"node --import tsx --test"`, and kragg spawns with
+ * `shell: false` (`engine/runner.ts`), so nothing would ever split it. A
+ * string is rejected by name, with the argv form in the message, because the
+ * alternative — splitting it ourselves — would be reimplementing a shell
+ * lexer, quoting rules and all, in the one place this codebase has promised
+ * never to have one. `[]` is the honoured empty: no explicit command.
+ */
+export function getArgv(
+  source: Source,
+  key: string,
+  fallback: readonly string[],
+): readonly string[] {
+  const value = take(source, key);
+  if (value === undefined) {
+    return fallback;
+  }
+  const expected =
+    "a list of strings, one command-line argument per element " +
+    '(e.g. ["node", "--import", "tsx", "--test"]) — never a single shell ' +
+    "string, because kragg spawns without a shell and would look for a " +
+    "program with that whole name";
+  if (!Array.isArray(value)) {
+    return reject(source, key, expected, value);
+  }
+  const argv = value.map((item, index): string =>
+    typeof item === "string" ? item : reject(source, `${key}[${index}]`, "a string", item),
+  );
+  if (argv.length > 0 && argv[0]?.trim() === "") {
+    return reject(source, `${key}[0]`, "the program to run, not an empty string", argv[0]);
+  }
+  return argv;
+}
+
+/**
  * Read `[entry, hint]` pairs from an object, or a bare list of entries.
  *
  * FAIL CLOSED, and this is the single most important behaviour in the file.

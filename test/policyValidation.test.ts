@@ -208,3 +208,72 @@ describe("loadPolicy: the error names the file", () => {
     });
   });
 });
+
+describe("loadPolicy: test_command is an argv array kragg can read the output of", () => {
+  it("accepts the argv form and keeps every element separate", () => {
+    const policy = loadPolicy(
+      configured({ test_command: ["node", "--import", "tsx", "--test"] }),
+    );
+    assert.deepEqual(policy.testCommand, ["node", "--import", "tsx", "--test"]);
+    assert.deepEqual(policyAsDict(policy)["test_command"], [
+      "node",
+      "--import",
+      "tsx",
+      "--test",
+    ]);
+  });
+
+  it("rejects a shell string, and says why an argv array is required", () => {
+    assert.throws(
+      () => loadPolicy(configured({ test_command: "node --import tsx --test" })),
+      (error: unknown) => {
+        assert.ok(error instanceof PolicyError);
+        assert.match(error.message, /test_command must be a list of strings/u);
+        // The reason, not just the rule: kragg spawns with `shell: false`, so
+        // a string is one program name with spaces in it.
+        assert.match(error.message, /never a single shell string/u);
+        assert.match(error.message, /spawns without a shell/u);
+        return true;
+      },
+    );
+  });
+
+  it("rejects a non-string element by index rather than dropping it", () => {
+    assert.throws(
+      () => loadPolicy(configured({ test_command: ["node", 7] })),
+      /test_command\[1\] must be a string/u,
+    );
+  });
+
+  it("rejects an empty program name", () => {
+    assert.throws(
+      () => loadPolicy(configured({ test_command: ["", "--test"] })),
+      /test_command\[0\] must be the program to run/u,
+    );
+  });
+
+  it("honours `[]` as the explicit `kragg builds the argv itself`", () => {
+    assert.deepEqual(loadPolicy(configured({ test_command: [] })).testCommand, []);
+    assert.deepEqual(DEFAULT_POLICY.testCommand, []);
+  });
+
+  it("refuses a command whose report format it could not read, naming test_runner", () => {
+    // kragg parses the runner's report, and the three formats are unrelated.
+    // Exit 2 at load beats discovering it after a suite has run.
+    assert.throws(
+      () => loadPolicy(configured({ test_command: ["tsx", "--test"] })),
+      (error: unknown) => {
+        assert.ok(error instanceof PolicyError);
+        assert.match(error.message, /test_command runs "tsx"/u);
+        assert.match(error.message, /Set `test_runner`/u);
+        return true;
+      },
+    );
+    // …and accepts it once the project says which format it produces.
+    assert.deepEqual(
+      loadPolicy(configured({ test_command: ["tsx", "--test"], test_runner: "node" }))
+        .testCommand,
+      ["tsx", "--test"],
+    );
+  });
+});

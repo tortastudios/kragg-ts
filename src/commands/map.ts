@@ -46,6 +46,7 @@ import { criticalityCache } from "../catalog/criticalityCache.ts";
 import { EXIT_OK, EXIT_USAGE } from "../engine/report.ts";
 import { readJson } from "../gates/criticality.ts";
 import { loadPolicy, PolicyError, type KraggPolicy } from "../policy/policy.ts";
+import { testScanDirectories } from "../util/testPaths.ts";
 import { moduleSymbols, type MapSymbol } from "./map/symbols.ts";
 
 /** Where `--write` puts the map, matching `cmd_map`'s `.kragg/map.md`. */
@@ -107,7 +108,7 @@ export async function runMap(options: MapOptions = {}): Promise<number> {
     root,
     // Sources AND tests, matching `catalogContext`: both are in the program,
     // so both contribute call-graph nodes and either can change the answer.
-    scanPaths: [...policy.sourcePaths, ...policy.testPaths],
+    scanPaths: [...policy.sourcePaths, ...testScanDirectories(policy.testPaths)],
     analysis,
   }).ensure();
   const lines = buildMap(root, policy, analysis.compiler.api);

@@ -393,7 +393,11 @@ function completedRun(total: number, failed: readonly string[]): TestRunFindings
     coverage: null,
     passed: failed.length === 0,
     error: false,
-    output: `${total} tests: ${total - failed.length} passed, ${failed.length} failed`,
+    // Shaped like the adapter's own output, which leads with the argv: the
+    // rerun sweep quotes it back rather than rebuilding a command of its own.
+    output:
+      "invocation: /usr/bin/node --test test/**/*.{test,spec}.ts\n" +
+      `${total} tests: ${total - failed.length} passed, ${failed.length} failed`,
   };
 }
 
@@ -418,7 +422,11 @@ describe("runReruns", () => {
     writeFileSync(join(root, "package.json"), '{"scripts":{"test":"vitest run"}}', "utf8");
     writeFileSync(
       join(root, "kragg.json"),
-      JSON.stringify({ test_runner: "node", test_paths: ["suites", "tests"] }),
+      JSON.stringify({
+        test_runner: "node",
+        test_paths: ["suites", "src/**/*.test.ts"],
+        test_command: ["node", "--import", "tsx", "--test"],
+      }),
       "utf8",
     );
     const seen: TestRunnerOptions[] = [];
@@ -434,7 +442,11 @@ describe("runReruns", () => {
       // `check`; the selection is the policy's directories, which the adapter
       // turns into globs. Neither was passed before this fix.
       assert.equal(options.choice, "node");
-      assert.deepEqual(options.testPaths, ["suites", "tests"]);
+      assert.deepEqual(options.testPaths, ["suites", "src/**/*.test.ts"]);
+      // `test_command` too: a rerun that dropped the project's loader flags
+      // would re-run a DIFFERENT suite from the one `check` runs, and its
+      // stability verdict would be about that other suite.
+      assert.deepEqual(options.testCommand, ["node", "--import", "tsx", "--test"]);
       // Coverage off, violation cap lifted: no run can be silently truncated.
       assert.equal(options.coverageFailUnder, 0);
       assert.equal(options.maxViolations, 0);

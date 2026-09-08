@@ -48,6 +48,7 @@ import {
 } from "../gates/criticality.ts";
 import type { FunctionProfile } from "../gates/criticality.ts";
 import { DEFAULT_POLICY, loadPolicy } from "../policy/policy.ts";
+import { testScanDirectories } from "../util/testPaths.ts";
 
 export interface CriticalityCommandOptions {
   readonly root: string;
@@ -235,8 +236,8 @@ function errorText(error: unknown): string {
 function scanPaths(root: string): readonly string[] {
   try {
     const policy = loadPolicy(root);
-    return [...policy.sourcePaths, ...policy.testPaths];
+    return [...policy.sourcePaths, ...testScanDirectories(policy.testPaths)];
   } catch {
-    return [...DEFAULT_POLICY.sourcePaths, ...DEFAULT_POLICY.testPaths];
+    return [...DEFAULT_POLICY.sourcePaths, ...testScanDirectories(DEFAULT_POLICY.testPaths)];
   }
 }

@@ -148,7 +148,8 @@ mostly-deterministic signals:
   tests (property-based tests, via fast-check, kill more mutants).
 - **what's trustworthy** — `kragg flaky` mines the run journal for gates that
   flipped on an unchanged commit; `--rerun N` re-runs the suite N times under
-  the same `test_runner` and `test_paths` as `check`'s test gate and tallies
+  the same `test_runner`, `test_command` and `test_paths` as `check`'s test
+  gate — the same adapter call, so the two cannot drift — and tallies
   every test. A test whose outcome varies is flaky (exit 1); one that fails
   every time is a stable failure, reported as such (exit 1). A run that did not
   complete the intended suite — no runner, a crash, a timeout, zero tests
@@ -241,6 +242,49 @@ is written.
 }
 ```
 
+**Where the tests are, and how they are run.** A `test_paths` entry is either a
+directory (`"test"`) or a pattern (`"src/**/*.test.ts"`), so a colocated suite
+is expressible: `**` matches zero or more path segments, `*` and `?` stay
+inside one, `{a,b}` alternates, and `[a-z]` is a class. The same entries decide
+what the runner is told to discover, which files `test-quality` and `kragg
+spec` read, and what `critical-tests` counts as a test change — one answer, not
+three. A directory entry still contributes everything under it (a shared
+`test/helpers.ts` is part of the suite); a pattern contributes exactly what it
+matches, so pointing at `src/**/*.test.ts` does not pull `src/` into the test
+corpus.
+
+Runner detection reads `package.json#scripts.test` to learn **which runner** a
+project uses. It does not learn the project's *command*, and it never runs that
+script: kragg builds its own argv, so a script of
+`node --import tsx --test "src/**/*.test.ts"` yields "node" and nothing else —
+the loader and the file selection are gone. When the suite needs a loader, a
+setup file or a config flag, state the invocation instead:
+
+```json
+{
+  "test_command": ["node", "--import", "tsx", "--test"],
+  "test_paths": ["src/**/*.test.ts"]
+}
+```
+
+`test_command` is an **argv array, never a shell string**. kragg spawns with
+`shell: false`, so a string would name one program with spaces in it; a string
+value is rejected with exit 2 and a message saying so. kragg appends the
+reporter and coverage flags it has to parse, plus the `test_paths` patterns,
+and does not duplicate the runner's own run token if you include it. Element 0
+is resolved exactly like every other tool — the project's `node_modules/.bin`,
+or `node` / `bun` as runtimes — never from `PATH`, never a global install, and
+never a path; when it is not `vitest`, `node` or `bun`, `test_runner` must name
+the runner whose report format it produces. Whatever ran, the gate's output
+states the argv and where it came from, so kragg's reconstruction is never
+mistaken for the project's own script.
+
+**A run that discovered no tests is an error, not a pass.** Zero failures out
+of zero tests is arithmetic, not evidence, so `test-coverage` reports
+`error: true` and exit 3, naming the argv, the patterns it searched and the
+three settings that change the answer — `test_paths`, `test_command`, and
+`"test_runner": "off"` for a project that means to skip the gate.
+
 **Editor validation.** The package ships `kragg.schema.json`, a JSON Schema
 that mirrors exactly the keys, types and ranges the loader enforces (a test
 keeps the two in lockstep; nothing is validated by a dependency). Point your
@@ -292,6 +336,9 @@ Deliberate, and documented at each site:
 | criticality-dependent gates | Derived on demand when the data is missing or stale, so `critical-tests` and `test-quality` run; Python skips them visibly instead. |
 | SessionStart hook | Emits the `hookSpecificOutput` envelope, which is what injects `additionalContext`; Python prints plain-text context lines. |
 | hook output | Capped at 9000 characters with an in-band marker, because the harness spills longer output to a file the model never sees. Python does not cap. |
+| test discovery | A `test_paths` entry may be a pattern (`src/**/*.test.ts`) as well as a directory, and one rule answers "is this file part of the suite" for the runner, the test-depth gates and `critical-tests` alike. Python's `test_paths` are directories, and its pytest invocation does not pass them at all — pytest discovers by its own rootdir convention. |
+| test invocation | `test_command` states the exact argv, as an array; a shell string is rejected. Python has no counterpart and needs none: it builds one `pytest` command, and pytest reads Python without a loader flag. Runner detection here concludes only *which runner*, never an equivalent command. |
+| a zero-test run | `error: true` and exit 3, naming the argv and the settings that change it: a completed run that discovered nothing verifies nothing. Python passes `--cov-fail-under` to pytest and reads its exit code, so the case is not distinguished as its own outcome. |
 | test evidence | Python reads `.kragg/coverage.json` from a fixed path. kragg-ts gives every invocation its own `.kragg/runs/` directory, refuses anything incomplete, and hands `critical-coverage` the coverage in memory. Same gates, same wire format; only the provenance rule differs. |
 
 Each row is pinned by a fixture or a unit test, and the full list — with the

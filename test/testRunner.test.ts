@@ -54,8 +54,11 @@ after(() => {
   }
 });
 
-function project(files: Readonly<Record<string, string>>): string {
-  const root = mkdtempSync(join(tmpdir(), "kragg-testrunner-"));
+function project(
+  files: Readonly<Record<string, string>>,
+  prefix = "kragg-testrunner-",
+): string {
+  const root = mkdtempSync(join(tmpdir(), prefix));
   roots.push(root);
   for (const [name, contents] of Object.entries(files)) {
     const path = join(root, name);
@@ -436,7 +439,7 @@ const RUN_DIR = "/repo/.kragg/runs/test-abc123";
 
 test("vitest is told where to write both of its reports", () => {
   const layout = artifacts("/repo", "coverage/coverage-final.json", RUN_DIR);
-  const command = buildCommand("/repo/node_modules/.bin/vitest", "vitest", layout, true, []);
+  const command = buildCommand(["/repo/node_modules/.bin/vitest"], "vitest", layout, true, []);
   assert.ok(command.includes("--includeTaskLocation"), "location needs the explicit flag");
   // Both into THIS run's directory, never the shared location.
   assert.ok(command.includes(`--outputFile=${RUN_DIR}/test-report.json`));
@@ -451,7 +454,7 @@ test("vitest is told where to write both of its reports", () => {
 
 test("node pairs each reporter with the destination that follows it", () => {
   const layout = artifacts("/repo", "coverage/coverage-final.json", RUN_DIR);
-  const command = buildCommand("/usr/bin/node", "node", layout, true, ["test/"]);
+  const command = buildCommand(["/usr/bin/node"], "node", layout, true, ["test/"]);
   const tap = command.indexOf("--test-reporter=tap");
   const tapTo = command.indexOf("--test-reporter-destination=stdout");
   const lcov = command.indexOf("--test-reporter=lcov");
@@ -468,7 +471,7 @@ test("node pairs each reporter with the destination that follows it", () => {
 
 test("every configured test path becomes its own glob, trailing slash or not", () => {
   const layout = artifacts("/repo", "coverage/coverage-final.json", RUN_DIR);
-  const command = buildCommand("/usr/bin/node", "node", layout, false, ["test", "tests/"]);
+  const command = buildCommand(["/usr/bin/node"], "node", layout, false, ["test", "tests/"]);
   assert.deepEqual(command.slice(-2), [
     "test/**/*.{test,spec}.{ts,tsx,mts,cts,js,jsx,mjs,cjs}",
     "tests/**/*.{test,spec}.{ts,tsx,mts,cts,js,jsx,mjs,cjs}",
@@ -477,7 +480,7 @@ test("every configured test path becomes its own glob, trailing slash or not", (
 
 test("bun asks for lcov, the only coverage format it can write", () => {
   const layout = artifacts("/repo", "coverage/coverage-final.json", RUN_DIR);
-  const command = buildCommand("bun", "bun", layout, true, []);
+  const command = buildCommand(["bun"], "bun", layout, true, []);
   assert.deepEqual(command, [
     "bun",
     "test",
@@ -942,4 +945,290 @@ test("relativeToRoot shortens a path inside the root and leaves the rest alone",
   // Outside the root: an absolute path reads better than a `../../..` chain.
   assert.equal(reportRelativeToRoot("/elsewhere/a.test.ts", root), "/elsewhere/a.test.ts");
   assert.equal(reportRelativeToRoot(root, root), root);
+});
+
+// ── TOR-1372: the invocation is stated, and discovery is one answer ─────────
+//
+// Detection concludes WHICH RUNNER a project uses. It does not, and cannot,
+// reconstruct the project's own command: a script of
+// `node --import tsx --test "src/**/*.test.ts"` yields "node" and nothing
+// else, and the argv kragg built from that carried neither the loader nor the
+// file selection. The suite then discovered nothing and the gate reported a
+// green "0 tests". These tests pin all three halves of the fix — an explicit
+// argv, patterns in `test_paths`, and a zero-test run that is never a pass.
+
+test("`test_command` carries the project's loader flags, and `--test` is not doubled", () => {
+  const layout = artifacts("/repo", "coverage/coverage-final.json", RUN_DIR);
+  const command = buildCommand(
+    ["/usr/bin/node", "--import", "tsx", "--test"],
+    "node",
+    layout,
+    false,
+    ["src/**/*.test.ts"],
+  );
+  assert.deepEqual(command, [
+    "/usr/bin/node",
+    "--import",
+    "tsx",
+    "--test",
+    "--test-reporter=tap",
+    "--test-reporter-destination=stdout",
+    "src/**/*.test.ts",
+  ]);
+  // The loader has to precede the modules it loads, and kragg's own reporter
+  // flags have to survive: it parses their output.
+  assert.ok(command.indexOf("--import") < command.indexOf("--test-reporter=tap"));
+});
+
+test("a repeated subcommand is dropped for vitest and bun, and everything else is kept", () => {
+  const layout = artifacts("/repo", "coverage/coverage-final.json", RUN_DIR);
+  const vitest = buildCommand(
+    ["/repo/node_modules/.bin/vitest", "run", "--config", "vitest.ci.ts"],
+    "vitest",
+    layout,
+    false,
+    [],
+  );
+  assert.equal(vitest.filter((argument) => argument === "run").length, 1);
+  assert.deepEqual(vitest.slice(0, 4), [
+    "/repo/node_modules/.bin/vitest",
+    "run",
+    "--config",
+    "vitest.ci.ts",
+  ]);
+  const bun = buildCommand(["bun", "test", "--preload", "./setup.ts"], "bun", layout, false, []);
+  assert.deepEqual(bun, ["bun", "test", "--preload", "./setup.ts"]);
+});
+
+test("a colocated pattern reaches the runner verbatim; a directory still becomes a glob", () => {
+  const layout = artifacts("/repo", "coverage/coverage-final.json", RUN_DIR);
+  const command = buildCommand(["/usr/bin/node"], "node", layout, false, [
+    "test",
+    "src/**/*.test.ts",
+  ]);
+  assert.deepEqual(command.slice(-2), [
+    "test/**/*.{test,spec}.{ts,tsx,mts,cts,js,jsx,mjs,cjs}",
+    "src/**/*.test.ts",
+  ]);
+});
+
+test("a test path containing spaces is one argv element, never quoted or split", () => {
+  const layout = artifacts("/repo/my project", "coverage/coverage-final.json", RUN_DIR);
+  const command = buildCommand(["/usr/bin/node"], "node", layout, false, ["my tests"]);
+  assert.equal(command.at(-1), "my tests/**/*.{test,spec}.{ts,tsx,mts,cts,js,jsx,mjs,cjs}");
+  assert.ok(!command.some((argument) => argument.includes('"') || argument.includes("\\ ")));
+});
+
+test("an unsupported runner skips with BOTH remedies, and never passes", async () => {
+  const root = project({
+    "package.json": JSON.stringify({
+      packageManager: "pnpm@11.9.0",
+      scripts: { test: "jest --ci" },
+    }),
+  });
+  const outcome = await runTests({
+    env: resolveProjectEnvironment(root),
+    choice: "auto",
+    coverageFailUnder: 80,
+    maxViolations: 25,
+    testPaths: ["test"],
+  });
+  assert.equal(outcome.ok, false);
+  assert.equal(outcome.kind, "not-configured");
+  assert.match(outcome.message, /jest, which kragg does not drive yet/u);
+  assert.match(outcome.message, /jest --ci/u, "the script itself must be quoted back");
+  assert.match(outcome.message, /`test_runner`/u);
+  assert.match(outcome.message, /`test_command`/u);
+  const gate = fromReport(TEST_GATE, outcome);
+  assert.equal(gate.skipped, true);
+  assert.equal(gate.passed, false);
+});
+
+test('`test_runner: "off"` outranks `test_command`', async () => {
+  const outcome = await runTests({
+    env: resolveProjectEnvironment(project({ "package.json": "{}" })),
+    choice: "off",
+    coverageFailUnder: 80,
+    maxViolations: 25,
+    testPaths: ["test"],
+    testCommand: ["node", "--test"],
+  });
+  assert.equal(outcome.ok, false);
+  assert.match(outcome.message, /switched off/u);
+});
+
+test("a detected runner reports the argv kragg built, next to the script it is not", async () => {
+  const root = vitestProject(`${writeReport(GREEN)}\n${writeCoverage(FULL_COVERAGE)}\nexit 0`);
+  const outcome = await run(root);
+  assert.ok(outcome.ok, outcome.ok ? "" : outcome.message);
+  assert.equal(outcome.passed, true);
+  assert.match(outcome.output, /^invocation: .*\/node_modules\/\.bin\/vitest run /mu);
+  assert.match(outcome.output, /kragg BUILT this argv itself/u);
+  assert.match(
+    outcome.output,
+    /inferred from package\.json#scripts\.test, which reads `vitest run`/u,
+  );
+  assert.match(outcome.output, /that script was NOT run and this argv is not equivalent to it/u);
+  assert.match(outcome.output, /Set `test_command`/u);
+});
+
+test("`test_command` runs the stated argv, from the project's own node_modules/.bin", async () => {
+  const root = vitestProject(
+    [
+      'printf "%s\\n" "$@" > argv.txt',
+      writeReport(GREEN),
+      writeCoverage(FULL_COVERAGE),
+      "exit 0",
+    ].join("\n"),
+  );
+  const outcome = await runTests({
+    env: resolveProjectEnvironment(root),
+    choice: "auto",
+    coverageFailUnder: 80,
+    maxViolations: 25,
+    testPaths: ["test"],
+    testCommand: ["vitest", "--config", "vitest.ci.ts"],
+  });
+  assert.ok(outcome.ok, outcome.ok ? "" : outcome.message);
+  assert.equal(outcome.passed, true);
+  assert.equal(outcome.source, "test_command");
+  assert.equal(outcome.command[0], join(root, "node_modules", ".bin", "vitest"));
+  // The flags reached the process, in order, as separate argv elements.
+  const argv = readFileSync(join(root, "argv.txt"), "utf8").trimEnd().split("\n");
+  assert.deepEqual(argv.slice(0, 3), ["run", "--config", "vitest.ci.ts"]);
+  assert.match(outcome.output, /from `test_command` in kragg\.json/u);
+  assert.doesNotMatch(outcome.output, /kragg BUILT this argv/u);
+});
+
+test("`test_command` will not run a program from outside the project", async () => {
+  const root = vitestProject(`${writeReport(GREEN)}\nexit 0`);
+  const outcome = await runTests({
+    env: resolveProjectEnvironment(root),
+    choice: "auto",
+    coverageFailUnder: 80,
+    maxViolations: 25,
+    testPaths: ["test"],
+    testCommand: ["/usr/local/bin/vitest"],
+  });
+  assert.equal(outcome.ok, false);
+  assert.equal(outcome.kind, "missing-tool");
+  assert.match(outcome.message, /must start with a tool NAME, not the path/u);
+  assert.match(outcome.message, /never from PATH/u);
+});
+
+test("a `test_command` naming a tool the project does not have is an error, not a skip", async () => {
+  const root = project({
+    "package.json": JSON.stringify({ packageManager: "pnpm@11.9.0" }),
+    "pnpm-lock.yaml": "",
+  });
+  const outcome = await runTests({
+    env: resolveProjectEnvironment(root),
+    choice: "node",
+    coverageFailUnder: 80,
+    maxViolations: 25,
+    testPaths: ["test"],
+    testCommand: ["tsx", "--test"],
+  });
+  assert.equal(outcome.ok, false);
+  assert.equal(outcome.kind, "missing-tool");
+  assert.match(outcome.message, /pnpm add -D tsx/u);
+});
+
+test("a `test_command` kragg cannot map to a report format is refused", async () => {
+  const root = project({ "package.json": "{}" });
+  const outcome = await runTests({
+    env: resolveProjectEnvironment(root),
+    choice: "auto",
+    coverageFailUnder: 80,
+    maxViolations: 25,
+    testPaths: ["test"],
+    testCommand: ["tsx", "--test"],
+  });
+  assert.equal(outcome.ok, false);
+  assert.equal(outcome.kind, "missing-tool");
+  assert.match(outcome.message, /cannot tell which runner's report format/u);
+  assert.match(outcome.message, /Set `test_runner`/u);
+});
+
+test("a completed run that discovered NO TESTS is an error, never a green gate", async () => {
+  const root = vitestProject(
+    `${writeReport(vitestReport([]))}\n${writeCoverage(FULL_COVERAGE)}\nexit 0`,
+  );
+  const outcome = await run(root);
+  assert.ok(outcome.ok, outcome.ok ? "" : outcome.message);
+  assert.equal(outcome.summary.total, 0);
+  // The whole point: 0 failures out of 0 tests is arithmetic, not evidence.
+  assert.equal(outcome.passed, false);
+  assert.equal(outcome.error, true);
+  assert.match(outcome.output, /discovered NO TESTS/u);
+  assert.match(outcome.output, /`test_paths`/u);
+  assert.match(outcome.output, /`test_command`/u);
+  assert.match(outcome.output, /`test_runner`/u);
+  assert.match(outcome.output, /"off"/u);
+
+  const gate = fromReport(TEST_GATE, outcome);
+  assert.equal(gate.passed, false);
+  assert.equal(gate.error, true);
+  assert.equal(exitCodeFor(gate), EXIT_ENVIRONMENT);
+  // The explanation survives into the gate, which is where a reader sees it.
+  assert.match(gate.output, /discovered NO TESTS/u);
+});
+
+test("the zero-test error describes what the runner was actually pointed at", async () => {
+  const root = vitestProject(
+    `${writeReport(vitestReport([]))}\n${writeCoverage(FULL_COVERAGE)}\nexit 0`,
+  );
+  const outcome = await run(root);
+  assert.ok(outcome.ok, outcome.ok ? "" : outcome.message);
+  // vitest discovers its own files, so kragg must not claim it searched for it.
+  assert.match(outcome.output, /searched: whatever vitest discovers from its own config/u);
+});
+
+test("colocated tests and paths with spaces run end to end, under `node --test`", async () => {
+  const root = project(
+    {
+      "package.json": JSON.stringify({
+        type: "module",
+        packageManager: "pnpm@11.9.0",
+        scripts: { test: "node --test" },
+      }),
+      "pnpm-lock.yaml": "",
+      "src/a.js": "export const two = () => 2;\n",
+      "src/a.test.js":
+        'import assert from "node:assert/strict";\nimport { test } from "node:test";\n' +
+        'import { two } from "./a.js";\n\ntest("colocated", () => {\n  assert.equal(two(), 2);\n});\n',
+      "my tests/b.test.js":
+        'import assert from "node:assert/strict";\nimport { test } from "node:test";\n\n' +
+        'test("in a directory with a space", () => {\n  assert.ok(true);\n});\n',
+    },
+    "kragg test runner ",
+  );
+  assert.ok(root.includes(" "), "the project root itself must contain a space");
+  // See the runner-switch test above: a child `node --test` refuses to start
+  // while NODE_TEST_CONTEXT is inherited from this suite.
+  const testContext = process.env["NODE_TEST_CONTEXT"];
+  delete process.env["NODE_TEST_CONTEXT"];
+  let outcome: TestRunOutcome;
+  try {
+    outcome = await runTests({
+      env: resolveProjectEnvironment(root),
+      choice: "node",
+      coverageFailUnder: 0,
+      maxViolations: 25,
+      testPaths: ["src/**/*.test.js", "my tests"],
+    });
+  } finally {
+    if (testContext !== undefined) {
+      process.env["NODE_TEST_CONTEXT"] = testContext;
+    }
+  }
+  assert.ok(outcome.ok, outcome.ok ? "" : outcome.message);
+  assert.equal(outcome.runner, "node");
+  assert.equal(outcome.passed, true);
+  // Both files ran: the colocated one the old directory-only rule missed, and
+  // the one whose directory name has a space in it.
+  assert.equal(outcome.summary.total, 2);
+  assert.equal(outcome.summary.failed, 0);
+  assert.ok(outcome.command.includes("src/**/*.test.js"));
+  assert.ok(outcome.command.includes("my tests/**/*.{test,spec}.{ts,tsx,mts,cts,js,jsx,mjs,cjs}"));
 });

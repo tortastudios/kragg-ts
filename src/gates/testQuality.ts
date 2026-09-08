@@ -22,14 +22,18 @@
  * of which document their rules and their known gaps in full.
  *
  * FILE SELECTION IS BROADER THAN PYTHON'S, on purpose. Every TypeScript file
- * under the policy's `testPaths` is scanned, not only ones matching a
+ * a `testPaths` DIRECTORY entry covers is scanned, not only ones matching a
  * `*.test.ts` naming convention, and every one of them is part of the corpus
  * for the reference check. A shared `test/helpers.ts` IS part of the test
  * suite: excluding it would flag critical functions that the suite genuinely
  * exercises. Files holding no test calls contribute nothing to the first check,
  * so the wider net costs nothing but a parse. The one cost is a test-tree
  * FIXTURE that deliberately contains a broken test — mark it with
- * `// kragg: ignore`, which this gate honours per site.
+ * `// kragg: ignore`, which this gate honours per site. A PATTERN entry
+ * (`src/**\/*.test.ts`) selects exactly what it says instead: the walk it
+ * implies is wider than the pattern, and `testDepth/testFiles.ts` narrows it
+ * back, because a corpus that swallowed `src/` would make the reference check
+ * below true for every function in the codebase.
  *
  * ── WHEN THIS GATE DOES NOT RUN ────────────────────────────────────────────
  * No parsable file under any test path means the gate SKIPS with that reason.
@@ -39,7 +43,6 @@
  */
 
 import {
-  parsedSources,
   resolveTypeScript,
   type ParsedSource,
   type TypeScriptApi,
@@ -50,6 +53,7 @@ import { assertionContext, hasAssertion } from "./testDepth/assertions.ts";
 import { publicCriticalNames, simpleName } from "./testDepth/criticalFunctions.ts";
 import { ran, skipped, type TestDepthOutcome } from "./testDepth/outcome.ts";
 import { findTestCases } from "./testDepth/testCases.ts";
+import { parsedTestSources } from "./testDepth/testFiles.ts";
 
 /** `Violation.code` for a test case with no assertion. */
 export const NO_ASSERT_CODE = "no-assert";
@@ -85,7 +89,7 @@ export interface TestQualityOptions {
  */
 export function checkTestQuality(options: TestQualityOptions): TestDepthOutcome {
   const api = options.api ?? resolveTypeScript(options.root).api;
-  const sources = [...parsedSources(options.root, options.testPaths, { api })];
+  const sources = parsedTestSources(options.root, options.testPaths, api);
   if (sources.length === 0) {
     return skipped(
       `no test files found (looked in ${options.testPaths.join(", ")})`,

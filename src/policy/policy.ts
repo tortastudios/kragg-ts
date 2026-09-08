@@ -44,6 +44,7 @@
 import { join } from "node:path";
 
 import {
+  getArgv,
   getEnum,
   getInt,
   getOptionalString,
@@ -133,6 +134,16 @@ export interface KraggPolicy {
   readonly lintTool: LintToolSetting;
   /** Which test runner the coverage gate drives. */
   readonly testRunner: TestRunnerSetting;
+  /**
+   * The exact argv that runs this project's suite, WITHOUT file patterns —
+   * `["node", "--import", "tsx", "--test"]`. Empty (the default) means kragg
+   * infers the runner and builds the argv itself, which cannot carry a loader
+   * or setup flag it was never told about. kragg appends its own reporter and
+   * coverage flags and the `test_paths` patterns; element 0 is resolved like
+   * every other tool (the project's `node_modules/.bin`, or `node` / `bun` as
+   * runtimes) and is never looked up on `PATH`.
+   */
+  readonly testCommand: readonly string[];
   /** Which secret scanner the `detect-secrets` gate drives. */
   readonly secretScanner: SecretScannerSetting;
   /**
@@ -214,6 +225,7 @@ export const DEFAULT_POLICY: KraggPolicy = {
   ],
   lintTool: "auto",
   testRunner: "auto",
+  testCommand: [],
   secretScanner: "auto",
   secretBaseline: undefined,
   auditSeverity: "high",
@@ -243,7 +255,38 @@ export function loadPolicy(root: string): KraggPolicy {
     ...readTools(source),
   };
   rejectUnknownKeys(source, NON_SETTING_KEYS);
+  requireKnownRunner(source, policy);
   return policy;
+}
+
+/** Programs whose report format kragg recognises from the program name alone. */
+const RUNNER_PROGRAMS: readonly string[] = ["vitest", "node", "bun"];
+
+/**
+ * A `test_command` kragg could run but could not READ is rejected at load.
+ *
+ * kragg does not just spawn the suite, it parses the suite's report, and the
+ * three runners produce three unrelated formats. When `test_runner` is
+ * `"auto"` the only evidence of which format to expect is the program name,
+ * so a `test_command` starting with anything else — `tsx`, a wrapper script —
+ * has to say so with `test_runner`. Rejecting here, at exit 2 before any gate
+ * runs, rather than at gate time: the project can fix a config error it is
+ * told about immediately, and there is no run for the mistake to hide in.
+ */
+function requireKnownRunner(source: Source, policy: KraggPolicy): void {
+  const program = policy.testCommand[0];
+  if (program === undefined || policy.testRunner !== "auto") {
+    return;
+  }
+  const name = program.replaceAll("\\", "/").split("/").at(-1) ?? program;
+  if (RUNNER_PROGRAMS.includes(name)) {
+    return;
+  }
+  throw new PolicyError(
+    `${source.label}test_command runs ${JSON.stringify(program)}, and kragg cannot tell ` +
+      "which runner's report format that produces. Set `test_runner` to the runner it " +
+      `drives (${RUNNER_PROGRAMS.join(", ")}), or start the command with one of them.`,
+  );
 }
 
 /** The settings naming WHERE kragg looks: paths, layers and glob scopes. */
@@ -276,7 +319,7 @@ type PolicyRules = Pick<KraggPolicy, "forbiddenCalls" | "secretNameSuffixes" | "
 /** Which external tool each gate drives, and how strict it is. */
 type PolicyTools = Pick<
   KraggPolicy,
-  "lintTool" | "testRunner" | "secretScanner" | "auditSeverity"
+  "lintTool" | "testRunner" | "testCommand" | "secretScanner" | "auditSeverity"
 >;
 
 function readScopes(source: Source): PolicyScopes {
@@ -337,6 +380,7 @@ function readTools(source: Source): PolicyTools {
   return {
     lintTool: getEnum(source, "lint_tool", LINT_TOOLS, base.lintTool),
     testRunner: getEnum(source, "test_runner", TEST_RUNNERS, base.testRunner),
+    testCommand: getArgv(source, "test_command", base.testCommand),
     secretScanner: getEnum(source, "secret_scanner", SCANNERS, base.secretScanner),
     auditSeverity: getEnum(source, "audit_severity", SEVERITIES, base.auditSeverity),
   };
@@ -380,6 +424,7 @@ export function policyAsDict(policy: KraggPolicy): Record<string, unknown> {
     secret_baseline: policy.secretBaseline ?? null,
     audit_severity: policy.auditSeverity,
     coverage_report_path: policy.coverageReportPath,
+    test_command: [...policy.testCommand],
   };
 }
 

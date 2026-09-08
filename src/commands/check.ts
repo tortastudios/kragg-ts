@@ -36,6 +36,7 @@ import { toPayload } from "../engine/reportPayload.ts";
 import { resolveProjectEnvironment } from "../environment/project.ts";
 import { changedFiles, gitDirty, gitSha } from "../git/changes.ts";
 import { loadPolicy, type KraggPolicy } from "../policy/policy.ts";
+import { testScanDirectories } from "../util/testPaths.ts";
 
 /** How a run should be reported, shared by `check` and `security`. */
 export interface ReportFlags {
@@ -134,7 +135,7 @@ async function resolveScope(
   policy: KraggPolicy,
 ): Promise<Scope | null> {
   if (flags.changed || flags.since !== null) {
-    const allowed = [...policy.sourcePaths, ...policy.testPaths];
+    const allowed = [...policy.sourcePaths, ...testScanDirectories(policy.testPaths)];
     const files = await changedFiles(flags.root, flags.since, allowed);
     if (files === null) {
       return null;

@@ -275,8 +275,11 @@ Same key vocabulary, snake_case, on both sides; only the carrier differs —
 `kragg.toml` / `pyproject.toml [tool.kragg]` in Python, `kragg.json` /
 `package.json` `"kragg"` here. The standalone file wins outright; there is no
 merging. kragg-ts adds tool-selection keys (`lint_tool`, `test_runner`,
-`secret_scanner`, `audit_severity`) that have no Python analogue, where `"off"`
-is a deliberate, visible disable: the gate SKIPs with a reason saying so.
+`test_command`, `secret_scanner`, `audit_severity`) that have no Python
+analogue, where `"off"` is a deliberate, visible disable: the gate SKIPs with a
+reason saying so. `test_command` is an argv ARRAY, never a shell string, and
+`test_paths` entries may be patterns as well as directories — divergences 20
+and 21 below.
 Malformed *values* fail closed to the stricter default; a file that cannot be
 parsed at all is a usage error (exit 2).
 
@@ -344,7 +347,9 @@ A conformance runner must not flag these; a suite that diffs the two
 implementations naively will flag every one. Rows 1–9 are this repository's
 original table, re-verified against both trees while the spec was written; rows
 10–12 were added by that verification and are also SPEC.md section 10's rows
-10–12; rows 13–19 were introduced by TOR-1358, TOR-1363, TOR-1361 and TOR-1369 on this branch. Fixtures that exercise a row carry a `divergences` entry naming its id.
+10–12; rows 13–19 were introduced by TOR-1358, TOR-1363, TOR-1361 and TOR-1369,
+and rows 20–22 by TOR-1372, on this branch. Fixtures that exercise a row carry
+a `divergences` entry naming its id.
 
 | # | Divergence | Why it is intentional |
 | --- | --- | --- |
@@ -367,6 +372,9 @@ original table, re-verified against both trees while the spec was written; rows
 | 17 | `criticality --write --path` is exit 2 | Python writes whatever the scoped analysis produced. A partial `.kragg/criticality.json` is not read as partial: `critical-tests` and `critical-coverage` would treat every function outside the scope as uncritical. Refusing keeps the file whole-project by construction. |
 | 18 | `check --file` with `--changed`/`--since` is exit 2 | Python's `_check_targets` takes the git branch first and drops `--file` on the floor. Same file set either way; kragg-ts declines to guess which one the caller meant. |
 | 19 | `check` with an empty `--changed` set under `--format json` | Python prints `no changed Python files` in both formats. kragg-ts prints that only for text and emits the ordinary payload with `gates: []` for JSON, so every `--format json` path is parseable. No key is added, and the text path is byte-identical apart from the language name. |
+| 20 | `test_paths` entries may be PATTERNS, and one rule answers "is this a test file" everywhere | Python's `test_paths` are directories, and its pytest invocation does not pass them at all — pytest discovers by its own rootdir convention, so the setting only scopes `test_quality`. JavaScript has no such convention and half the ecosystem colocates `src/foo.test.ts`, so an entry may be a directory or a pattern (`src/**/*.test.ts`), and the runner's selection, the test-depth corpus and `critical-tests`' notion of a test change all come from the same two functions in `src/util/testPaths.ts`. No wire field changes. |
+| 21 | `test_command`: an explicit, argv-array test invocation | Python builds one `pytest` command and needs no equivalent — pytest reads Python with no loader flag. A JS suite frequently cannot be run without one (`node --import tsx --test`), and detection reading `package.json#scripts.test` concludes only WHICH RUNNER, never an equivalent command. The setting is a TypeScript-only tail key in `policy show`, exactly like `lint_tool` and `test_runner`; a shell string is rejected with exit 2, because `src/engine/runner.ts` spawns with `shell: false`. |
+| 22 | a completed run that discovered ZERO tests is `error: true` / exit 3 | "0 tests, 0 failed" parses cleanly, so it used to pass. Nothing was executed, so nothing was verified — the same rule TOR-1368 applies to a `flaky --rerun` sample, applied to the gate. Python passes `--cov-fail-under` to pytest and reads pytest's exit code, so it does not model this as its own outcome. `"test_runner": "off"` remains the way to say the gate should not run. |
 
 Four defects found in the Python implementation during the port are recorded in
 [KNOWN_LIMITATIONS.md](../KNOWN_LIMITATIONS.md#found-in-the-python-implementation-during-this-port).

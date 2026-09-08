@@ -48,6 +48,7 @@ import { resolveProjectEnvironment } from "../environment/project.ts";
 import { gitDirty, gitSha } from "../git/changes.ts";
 import type { HookCheckRequest } from "../hooks/claude.ts";
 import { loadPolicy } from "../policy/policy.ts";
+import { testScanDirectories } from "../util/testPaths.ts";
 
 /**
  * Run the check pipeline for a hook invocation.
@@ -113,7 +114,7 @@ export function hookCriticality(root: string): void {
   const policy = loadPolicy(root);
   criticalityCache({
     root,
-    scanPaths: [...policy.sourcePaths, ...policy.testPaths],
+    scanPaths: [...policy.sourcePaths, ...testScanDirectories(policy.testPaths)],
     analysis: analysisProgram({ root }),
   }).ensure();
 }

@@ -42,6 +42,7 @@
 import { changedFiles } from "../git/changes.ts";
 import type { Violation } from "../engine/models.ts";
 import type { TypeScriptApi } from "../analysis/sourceFile.ts";
+import { isTestPath, testScanDirectories } from "../util/testPaths.ts";
 import {
   criticalFunctions,
   hasCriticalityData,
@@ -87,9 +88,12 @@ export async function checkCriticalTests(
   if (!hasCriticalityData(options.root)) {
     return skipped(NO_CRITICALITY_REASON);
   }
+  // `testScanDirectories`, not `testPaths`: the change-set filter matches by
+  // path prefix, and a pattern entry (`src/**/*.test.ts`) is not a prefix of
+  // anything. Its directory is, and `isTestChange` applies the pattern.
   const changed = await changedFiles(options.root, options.since ?? null, [
     ...options.sourcePaths,
-    ...options.testPaths,
+    ...testScanDirectories(options.testPaths),
   ]);
   if (changed === null) {
     return skipped(NOT_A_REPOSITORY_REASON);
@@ -127,31 +131,18 @@ function toViolation(critical: CriticalFunction): Violation {
 /**
  * Whether a changed path counts as a test change.
  *
- * Prefix matching is segment-aware — `test` matches `test/a.ts` but not
- * `testing/a.ts` — mirroring `isAllowed` in `git/changes.ts`, which is what
- * produced this list in the first place.
+ * `isTestPath` is the shared answer — the same one the runner's file selection
+ * and `test-quality`'s corpus are built from, so a project cannot have a file
+ * that is a test for one of them and not for the others. Directory entries
+ * match by path SEGMENT (`test` matches `test/a.ts` but not `testing/a.ts`),
+ * pattern entries match the pattern.
+ *
+ * The naming convention is kept as an ADDITIONAL, wider rule, and this is the
+ * documented divergence from Python: `src/foo.test.ts` counts as a test change
+ * even when `test_paths` never mentions `src/`, because a repo that colocates
+ * its tests without telling kragg should not have every commit read as
+ * "critical code changed and no test moved".
  */
 function isTestChange(file: string, testPaths: readonly string[]): boolean {
-  const path = normalize(file);
-  if (TEST_FILE_PATTERN.test(path)) {
-    return true;
-  }
-  return testPaths.some((prefix) => {
-    const base = normalize(prefix);
-    if (base === "" || base === ".") {
-      return true;
-    }
-    return path === base || path.startsWith(`${base}/`);
-  });
-}
-
-function normalize(value: string): string {
-  let path = value.replaceAll("\\", "/");
-  while (path.startsWith("./")) {
-    path = path.slice(2);
-  }
-  while (path.endsWith("/") && path.length > 1) {
-    path = path.slice(0, -1);
-  }
-  return path;
+  return TEST_FILE_PATTERN.test(file.replaceAll("\\", "/")) || isTestPath(file, testPaths);
 }

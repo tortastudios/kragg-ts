@@ -47,6 +47,7 @@ import { renderText, reportPassed, type CheckReport } from "../engine/report.ts"
 import { DECLARATION_SUFFIXES, SOURCE_EXTENSIONS, changedFiles } from "../git/changes.ts";
 import { readJson as readCriticality } from "../gates/criticality.ts";
 import { loadPolicy } from "../policy/policy.ts";
+import { testScanDirectories } from "../util/testPaths.ts";
 import {
   blockPayload,
   parseHookInput,
@@ -302,7 +303,7 @@ async function editTargets(input: HookInput, root: string): Promise<string[]> {
     return isCheckableSource(input.filePath) ? [relativeToRoot(input.filePath, root)] : [];
   }
   const policy = loadPolicy(root);
-  const allowed = [...policy.sourcePaths, ...policy.testPaths];
+  const allowed = [...policy.sourcePaths, ...testScanDirectories(policy.testPaths)];
   // `changedFiles` returns null outside a git repository. Here — unlike in
   // `kragg check --changed`, which must report that loudly — null and "no
   // changes" are the same no-op: there is nothing to check either way.
