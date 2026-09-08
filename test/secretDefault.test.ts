@@ -77,6 +77,10 @@ function flagged(source: string, suffixes: readonly string[] = SUFFIXES): number
   return scan(source, suffixes).length;
 }
 
+function messages(source: string): readonly string[] {
+  return scan(source).map((violation) => violation.message);
+}
+
 describe("secret-default: environment reads", () => {
   it("flags a nullish fallback on process.env", () => {
     const violations = scan('export const t = process.env.API_TOKEN ?? "";');
@@ -369,10 +373,10 @@ describe("secret-default: name matching", () => {
 });
 
 describe("secret-default: suppression and outcome", () => {
-  it("honours a trailing `// kragg: ignore`", () => {
-    assert.equal(flagged('export const apiToken = ""; // kragg: ignore'), 0);
+  it("honours a trailing `// kragg: ignore -- <reason>`", () => {
+    assert.equal(flagged('export const apiToken = ""; // kragg: ignore -- test double, never a real credential'), 0);
     assert.equal(
-      flagged('export const t = process.env.API_TOKEN ?? ""; /* kragg: ignore */'),
+      flagged('export const t = process.env.API_TOKEN ?? ""; /* kragg: ignore -- validated non-empty at startup */'),
       0,
     );
   });
@@ -383,10 +387,20 @@ describe("secret-default: suppression and outcome", () => {
         [
           "export const t =",
           "  process.env.API_TOKEN ??",
-          '  ""; // kragg: ignore',
+          '  ""; // kragg: ignore -- validated non-empty at startup',
         ].join("\n"),
       ),
       0,
+    );
+  });
+
+  it("does NOT honour a bare marker, and reports the finding with the reason it was not", () => {
+    // TOR-1377: a security finding suppressed with no rationale stays a finding.
+    assert.equal(flagged('export const apiToken = ""; // kragg: ignore'), 1);
+    assert.equal(flagged('export const t = process.env.API_TOKEN ?? ""; /* kragg: ignore */'), 1);
+    assert.match(
+      messages('export const apiToken = ""; // kragg: ignore')[0] ?? "",
+      /^secret `apiToken` silently defaults to empty \(the `\/\/ kragg: ignore` on line 1 names no reason and is not honoured; write `\/\/ kragg: ignore -- <why this site is safe>`\)$/u,
     );
   });
 

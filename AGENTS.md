@@ -101,7 +101,7 @@ failed task, not a judgement call.
 
 ## Project Map
 
-176 modules under `src/`, listed top-down in the order `kragg.json`'s
+178 modules under `src/`, listed top-down in the order `kragg.json`'s
 `layers` declares — a module may import its own layer or a lower one, never a
 higher one, and the `boundaries` gate enforces that on this repo.
 
@@ -123,11 +123,12 @@ higher one, and the `boundaries` gate enforces that on this repo.
   gates narrow to, when a configuration change makes an incremental run a
   full one, and which unresolvable selections are exit 2 or exit 3) and
   `inventory.ts` (the filter and output-budget vocabulary `map`, `spec` and
-  `brief` share). The four commands too large for one file have their own
+  `brief` share). The five commands too large for one file have their own
   directory: `map/` (`symbols`, `render`, `select`), `spec/` (`property`,
   `select`), `mutation/` (`targets`, `stryker`, `report`, `baseline`),
   `flaky/` (`reruns` — the active `--rerun N` sweep, and the rule that only a
-  completed run of the intended suite counts as a sample).
+  completed run of the intended suite counts as a sample), `brief/`
+  (`exemptions` — the `## Suppressions` and `## Baseline` sections).
 - `src/hooks/` — `claude.ts` (event dispatch; the deliberate fail-**open**
   exception to everything else here) and `protocol.ts` (narrowing untrusted
   stdin, building the stdout JSON the harness reads).
@@ -180,8 +181,12 @@ higher one, and the `boundaries` gate enforces that on this repo.
   failed", which decides exit 3 vs. exit 1).
 - `src/git/changes.ts` — changed-file detection for `--changed` / `--since`.
 - `src/policy/` — `policy.ts` loads `kragg.json`, then `package.json#kragg`,
-  then defaults; `readers.ts` holds the narrowing readers it is built from.
-- `src/util/` — `globs.ts`, and `suppress.ts` for `// kragg: ignore`.
+  then defaults; `readers.ts` holds the narrowing readers it is built from;
+  `baseline.ts` is the reviewed legacy-debt baseline `kragg.json#baseline`
+  names — which gates may be recorded (and which never), the line-fingerprint
+  identity, and the apply/record/stale logic `check`, the hook and `brief` use.
+- `src/util/` — `globs.ts`, and `suppress.ts` for
+  `// kragg: ignore -- <reason>` (a bare marker is not honoured).
 - `src/engine/` — the bottom layer, importable by everything:
   - `models.ts` — `Violation`, `GateResult`, `CompletedCommand`,
     `ProjectContext` as plain interfaces.
@@ -268,7 +273,7 @@ authority; this list must match it.
 
 `check` and `security` share `--file`, `--format`, `--max-violations` and
 `--no-journal`; of the two, only `check` takes `--changed`, `--since`,
-`--fail-fast` and `--all`. The rest:
+`--fail-fast`, `--all` and `--update-baseline`. The rest:
 `fix --file`; `status --format --last`; `map`/`spec --path --symbol --changed
 --limit --all --format`, plus `map --write`; `brief --since --path --limit
 --all`; `criticality --write --path`; `mutation --path --since --all

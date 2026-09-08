@@ -116,6 +116,10 @@
     "coverage_report_path": {
       "type": "string",
       "description": "Where the test runner writes its istanbul JSON, relative to the project root. Default: \"coverage/coverage-final.json\"."
+    },
+    "baseline": {
+      "type": ["string", "null"],
+      "description": "Reviewed legacy-debt baseline, relative to the project root (conventionally \".kragg/baseline.json\"). Written only by `kragg check --update-baseline`; findings recorded in it are reported as advisories instead of failing the run. Security, compiler and evidence gates can never be baselined. null means none. Default: null."
     }
   }
 }

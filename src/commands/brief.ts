@@ -39,6 +39,14 @@
  *    informative thing on the Python line anyway — the reviewer is about to
  *    read the diff.
  *
+ * ── AND ONE ADDITION PYTHON DOES NOT HAVE (TOR-1377) ───────────────────────
+ * `## Suppressions` and `## Baseline`, between the critical section and the
+ * gate section, list every `// kragg: ignore -- <reason>` and every baseline
+ * entry this change set added, removed or left stale. Both are exemptions a
+ * reviewer cannot see from a file list. See `brief/exemptions.ts`. They read
+ * the SAME diff base the file list came from, so the two halves of one brief
+ * always describe one change set.
+ *
  * ── THE GATE SECTION IS EVIDENCE FROM ELSEWHERE, AND SAYS SO ───────────────
  * `## Last gate run` is not a run. It is a summary of `.kragg/history.jsonl`,
  * written by some earlier `kragg check` — possibly at a different commit, on
@@ -61,7 +69,8 @@
 
 import { EXIT_ENVIRONMENT, EXIT_OK, EXIT_USAGE } from "../engine/report.ts";
 import { readRuns, renderStatusLines, type JournalEntry } from "../engine/journal.ts";
-import { changedFiles, gitDirty, gitSha } from "../git/changes.ts";
+import { changedFiles, diffBase, gitDirty, gitSha } from "../git/changes.ts";
+import { baselineSection, suppressionSection } from "./brief/exemptions.ts";
 import { criticalFunctions } from "../gates/testDepth/criticalFunctions.ts";
 import type { TypeScriptApi } from "../analysis/sourceFile.ts";
 import { loadPolicy, PolicyError, type KraggPolicy } from "../policy/policy.ts";
@@ -169,13 +178,19 @@ export async function buildBrief(options: BuildBriefOptions): Promise<string | n
     ...policy.testPaths,
     ".",
   ]);
-  if (changed === null) {
+  const base = changed === null ? null : await diffBase(options.root, options.since);
+  if (changed === null || base === null || !base.ok) {
     return null;
   }
   const paths = options.paths ?? [];
   const visible = changed.filter(
     (file) => !isArtifact(file) && (paths.length === 0 || underAnyPath(file, paths)),
   );
+  // The two exemption sections (TOR-1377): a reviewer sees every suppression
+  // and every baseline entry this change set added, removed or left stale.
+  // `--path` narrows them exactly as it narrows everything else, because
+  // `visible` is what they are handed.
+  const exemptions = { root: options.root, base: base.stdout.trim(), policy };
   const lines = [
     "# Change brief",
     "",
@@ -186,6 +201,8 @@ export async function buildBrief(options: BuildBriefOptions): Promise<string | n
     // changes the count a reviewer is told or the risk analysis they get.
     ...groupedSections(applyBudget(visible, options.limit ?? 0), policy),
     ...criticalSection(options, visible),
+    ...(await suppressionSection(exemptions, visible)),
+    ...(await baselineSection(exemptions)),
     ...(await gateSection(options.root)),
   ];
   return `${lines.join("\n").replace(/\s+$/, "")}\n`;

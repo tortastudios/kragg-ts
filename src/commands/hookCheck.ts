@@ -47,6 +47,7 @@ import { toPayload } from "../engine/reportPayload.ts";
 import { resolveProjectEnvironment } from "../environment/project.ts";
 import { gitDirty, gitSha } from "../git/changes.ts";
 import type { HookCheckRequest } from "../hooks/claude.ts";
+import { applyBaseline, readBaseline } from "../policy/baseline.ts";
 import { loadPolicy } from "../policy/policy.ts";
 
 /**
@@ -73,7 +74,13 @@ export async function hookCheck(request: HookCheckRequest): Promise<CheckReport 
       incremental,
     });
 
-    const results = await runGates(specs, { failFast: false, forceSlow: false });
+    const raw = await runGates(specs, { failFast: false, forceSlow: false });
+    // The SAME baseline `kragg check` applies, or the hook blocks the agent on
+    // debt the command has accepted and the two teach different contracts.
+    const results =
+      policy.baseline === undefined
+        ? raw
+        : applyBaseline(root, raw, readBaseline(root, policy.baseline), incremental ? targets : undefined).results;
     const report = buildReport({
       command: "check",
       mode: incremental ? "changed" : "full",

@@ -119,7 +119,7 @@ type FlagTable = Readonly<Record<string, readonly string[]>>;
 
 /** Which flags each command accepts. Anything else is a usage error. */
 const ALLOWED: FlagTable = {
-  check: ["file", "format", "max-violations", "no-journal", "changed", "since", "fail-fast", "all"],
+  check: ["file", "format", "max-violations", "no-journal", "changed", "since", "fail-fast", "all", "update-baseline"],
   security: ["file", "format", "max-violations", "no-journal"],
   fix: ["file"],
   status: ["format", "last"],
@@ -256,6 +256,7 @@ function gateCommand(
         ...reportFlags(values, root),
         changed: values.changed === true,
         since: values.since ?? null,
+        updateBaseline: values["update-baseline"] === true,
       });
     case "security":
       return runSecurity(reportFlags(values, root));

@@ -107,7 +107,7 @@ const FIXTURE: Readonly<Record<string, string>> = {
     "  }",
     "  return !(config.enabled || true);",
     "}",
-    "export const suppressed = config.port || 3000; // kragg: ignore",
+    "export const suppressed = config.port || 3000; // kragg: ignore -- port 0 is not a valid listen port here",
   ].join("\n"),
 
   // Rule 2 — arithmetic on untyped payloads.
@@ -156,7 +156,7 @@ const FIXTURE: Readonly<Record<string, string>> = {
     "}",
     "export function ignored(): number {",
     "  const data = JSON.parse(body);",
-    "  return data.count * 2; // kragg: ignore",
+    "  return data.count * 2; // kragg: ignore -- validated upstream by the schema in ./schema.ts",
     "}",
   ].join("\n"),
 };
