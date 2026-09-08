@@ -20,6 +20,27 @@ a previously green run red — see [Gate additions](#gate-additions) below.
 
 ### Fixed
 
+- **TOR-1368: `kragg flaky --rerun N` verifies it ran the intended suite before
+  it reports stability.** The reruns built their own invocation and got both
+  halves of it wrong: they dropped the `test_runner` override, so a project
+  pinned to `node` was re-run under whatever inference guessed (or told to
+  install a vitest it had deliberately not chosen), and they passed
+  `test_paths` — bare directories — where `check` passes globs, so
+  `node --test test` died on `Cannot find module .../test` and the TAP reader
+  turned that into "1 test, 1 failed". The same phantom failed in every run,
+  `failures === runs` read as "not intermittent", and the command printed
+  `no flaky tests across N runs` and exit 0 about a suite that had never
+  executed. Reruns now go through the same adapter call as `check`'s test gate,
+  with the policy's runner and test paths; `adapters/support/testCommands.ts`
+  is the single place that expands `test_paths` into argv, and `runTests`
+  requires both settings so no caller can omit them again. Before any ratio is
+  computed, every rerun must be a COMPLETED run of that suite: a run that could
+  not start, was killed, produced no complete report, discovered zero tests, or
+  failed without naming a test is not a sample, and one such run ends the sweep
+  with exit 3 naming what happened. A test that fails in every run is now
+  reported as a stable failure (exit 1) rather than dropped, and the output
+  names the per-run totals and each test's pass/fail tally.
+
 - **TOR-1359** — `tsc` in incremental mode (`--changed`, `--file`, and
   therefore the Claude PostToolUse hook) no longer hides type errors outside
   the selected files. The whole project was already compiled through its own

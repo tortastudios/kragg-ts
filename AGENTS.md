@@ -101,7 +101,7 @@ failed task, not a judgement call.
 
 ## Project Map
 
-166 modules under `src/`, listed top-down in the order `kragg.json`'s
+168 modules under `src/`, listed top-down in the order `kragg.json`'s
 `layers` declares — a module may import its own layer or a lower one, never a
 higher one, and the `boundaries` gate enforces that on this repo.
 
@@ -114,10 +114,12 @@ higher one, and the `boundaries` gate enforces that on this repo.
 - `src/commands/` — one module per command: `check`, `security`, `fix`,
   `map`, `spec`, `brief`, `status`, `policyShow`, `doctor`, `coverage`,
   `criticality`, `mutation`, `flaky`, `audit`, `new`, `gen`, `init`, `hook`,
-  plus `hookCheck.ts` (the `RunCheck` injected into the hook). The three
+  plus `hookCheck.ts` (the `RunCheck` injected into the hook). The four
   commands too large for one file have their own directory: `map/`
   (`symbols`, `render`), `spec/` (`property`), `mutation/` (`targets`,
-  `stryker`, `report`, `baseline`).
+  `stryker`, `report`, `baseline`), `flaky/` (`reruns` — the active
+  `--rerun N` sweep, and the rule that only a completed run of the intended
+  suite counts as a sample).
 - `src/hooks/` — `claude.ts` (event dispatch; the deliberate fail-**open**
   exception to everything else here) and `protocol.ts` (narrowing untrusted
   stdin, building the stdout JSON the harness reads).

@@ -108,6 +108,13 @@ Options for status:
   --format text|json     output format (default: text)
   --last <n>             how many runs to read (default: 10)
 
+Options for flaky:
+  --last <n>             journal entries to mine (default: 10)
+  --rerun <n>            instead: re-run the suite n times, under the same
+                         test_runner and test_paths as check's test gate, and
+                         tally each test. Exit 3 if any run did not complete
+                         the suite; exit 1 if any test failed.
+
 Options for init:
   --dry-run              print the changes init would make, and write nothing
 
