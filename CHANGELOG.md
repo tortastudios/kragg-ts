@@ -29,6 +29,21 @@ a previously green run red — see [Gate additions](#gate-additions) below.
   failing. Nothing is dropped now: the whole-project verdict is the verdict.
   Diagnostics with no file come first, then those in the selected files, then
   the rest, and the report's existing dedupe and per-gate cap handle volume.
+- **TOR-1358**: a gate that SKIPS no longer counts as a failure in the
+  pipeline. A visible skip is `passed: false, skipped: true`, so one gate
+  stepping aside from inside its own run — no secret scanner installed, no
+  linter, no test files, no git repository — skipped every slow gate with
+  `static gates failed` and reported a green run that had never executed the
+  tests or the audit. On this repo, `kragg check` printed 14 passed, 0 failed
+  and exit 0 with `test-coverage`, `critical-coverage` and `audit` all
+  suppressed. Only a gate that ran and did not pass now halts the slow tier or
+  `--fail-fast`; `error: true` still counts, and exit 3 still outranks
+  everything. (`crag/spec/SPEC.md` §2.3, §4.1.)
+- **TOR-1358**: a gate whose `run` throws is now reported as that gate's
+  `error: true` (exit 3) with the exception's message in `raw_output`, instead
+  of propagating out of the pipeline and destroying the consolidated report.
+  The remaining gates still run, the report and the journal entry still list
+  every gate, and the exception is not swallowed.
 
 ## [0.0.0] — unreleased
 

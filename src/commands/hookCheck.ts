@@ -18,9 +18,19 @@
  *    stray text on stdout is either swallowed or, worse, parsed as the hook's
  *    JSON payload.
  *  - **`null` on failure, never a throw.** Hooks fail OPEN (see `claude.ts`):
- *    a broken guardrail must not become a broken editing session, so an
- *    unusable config or a crashed gate degrades to "no opinion" rather than
+ *    a broken guardrail must not become a broken editing session, so a
+ *    pipeline that could not be assembled or run at all — an unusable config,
+ *    a project that cannot be resolved — degrades to "no opinion" rather than
  *    blocking the user's work.
+ *
+ *    ONE GATE crashing is no longer one of those cases, and deliberately so.
+ *    `runGates` now catches a gate's exception and reports that gate as
+ *    `error: true` (see `engine/gate.ts`), so the run still produces a report
+ *    and this function still returns it. That is the same treatment a gate
+ *    which could not run already got — a missing `tsc` has always reached the
+ *    hook as an errored gate — and it closes a real fail-open hole: one gate
+ *    throwing used to discard every OTHER gate's findings and leave the hook
+ *    with no opinion about violations it had already found.
  *
  * Journaling DOES happen here, because this is the check — `SessionStart`
  * reads `.kragg/history.jsonl` back, so the two halves of the hook meet

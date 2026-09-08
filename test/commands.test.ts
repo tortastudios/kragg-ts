@@ -137,6 +137,29 @@ describe("runPipeline: exit codes", () => {
     ]);
     assert.equal(code, EXIT_ENVIRONMENT);
   });
+
+  it("keeps the whole report when a gate throws, and returns 3", async () => {
+    // THE LOST REPORT THIS CLOSES. An exception out of a gate's `run` used to
+    // propagate through `runGates` to `cli.ts`, which printed one stderr line
+    // and exited 3 — no report, no journal entry, and every other gate's
+    // result gone with it. The thrown gate is `error: true` instead, its
+    // message survives into the payload, and the pipeline still finishes.
+    const root = project();
+    const code = await pipeline(root, [
+      stub("a", () => nativeGate("a", [])),
+      stub("boom", () => {
+        throw new Error("ENOENT: no such file or directory, open 'src/gone.ts'");
+      }),
+      stub("c", () => nativeGate("c", [])),
+    ]);
+
+    assert.equal(code, EXIT_ENVIRONMENT);
+    const gates = readJournal(root)[0]?.gates ?? [];
+    assert.deepEqual(gates.map((gate) => gate.name), ["a", "boom", "c"]);
+    assert.equal(gates[1]?.passed, false);
+    assert.equal(gates[1]?.skipped, false, "a gate that threw is not a skip");
+    assert.equal(gates[2]?.passed, true, "the gates after it still ran");
+  });
 });
 
 describe("runPipeline: the journal", () => {

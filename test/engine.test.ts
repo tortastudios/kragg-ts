@@ -6,7 +6,9 @@
  *
  * These cover the two behaviours the cross-language contract actually turns
  * on: the tier/skip semantics of `runGates`, and the exit code a report
- * resolves to. Both must stay identical to the Python implementation.
+ * resolves to. Both are pinned by `crag/spec/SPEC.md`, which is the authority
+ * where the Python implementation and the spec disagree — see
+ * docs/spec-conformance.md for the two places they do here.
  */
 
 import assert from "node:assert/strict";
@@ -94,6 +96,146 @@ describe("runGates", () => {
 
     assert.deepEqual(ran, ["fast", "slow"]);
     assert.equal(byName(results, "slow").skipped, false);
+  });
+
+  it("does not skip slow gates for a spec-level skip either", async () => {
+    // The spec-level skip (`skipReason` on the `GateSpec`) never reached the
+    // halt decision, because the gate never ran. Pinned so the two kinds of
+    // skip cannot drift apart again: an unconfigured gate and a gate that
+    // discovered it had nothing to check are the same fact.
+    const ran: string[] = [];
+    const results = await runGates([
+      { ...spec("fast", FAST, true, ran), skipReason: "no layers configured" },
+      spec("slow", SLOW, true, ran),
+    ]);
+
+    assert.deepEqual(ran, ["slow"]);
+    assert.equal(byName(results, "slow").skipped, false);
+    assert.equal(byName(results, "fast").skipReason, "no layers configured");
+  });
+
+  it("does not skip slow gates when a fast gate skipped from inside its run", async () => {
+    // THE FALSE GREEN THIS CLOSES. A visible skip is `passed: false,
+    // skipped: true`, and a gate can only discover it has nothing to check
+    // ONCE IT RUNS — `detect-secrets` with no scanner installed, `lint` with
+    // no linter, `critical-tests` outside a git repository. Reading that as a
+    // failure skipped the entire slow tier with "static gates failed": on
+    // this repo, 14 green gates, exit 0, and the tests never run.
+    const ran: string[] = [];
+    const results = await runGates([
+      spec("fast", FAST, false, ran, {
+        skipped: true,
+        skipReason: "no secret scanner available",
+      }),
+      spec("slow", SLOW, true, ran),
+    ]);
+
+    assert.deepEqual(ran, ["fast", "slow"], "the slow gate must still run");
+    assert.equal(byName(results, "slow").skipped, false);
+    assert.equal(byName(results, "slow").passed, true);
+    assert.equal(byName(results, "fast").skipReason, "no secret scanner available");
+  });
+
+  it("does not halt under failFast on a gate that skipped from inside its run", async () => {
+    const ran: string[] = [];
+    const results = await runGates(
+      [
+        spec("a", FAST, false, ran, { skipped: true, skipReason: "nothing configured" }),
+        spec("b", FAST, true, ran),
+        spec("c", SLOW, true, ran),
+      ],
+      { failFast: true },
+    );
+
+    assert.deepEqual(ran, ["a", "b", "c"]);
+    assert.equal(byName(results, "b").skipReason, null);
+    assert.equal(byName(results, "c").skipReason, null);
+  });
+
+  it("still skips slow gates when a fast gate errored", async () => {
+    // `error: true` is NOT a skip: the gate tried and could not, so nothing
+    // was learned about the code and the slow tier would be measuring the
+    // same broken environment. Fail closed.
+    const ran: string[] = [];
+    const results = await runGates([
+      spec("fast", FAST, false, ran, { error: true, output: "tsc is not installed" }),
+      spec("slow", SLOW, true, ran),
+    ]);
+
+    assert.deepEqual(ran, ["fast"]);
+    assert.equal(byName(results, "slow").skipReason, "static gates failed");
+  });
+
+  it("turns a gate that throws into an errored gate, and keeps going", async () => {
+    // `run` is arbitrary code over an untrusted tree. An exception used to
+    // propagate out of `runGates`, so `cli.ts` printed one stderr line and
+    // the whole consolidated report — every other gate's result included —
+    // was lost. The gate is `error: true` instead, and the pipeline finishes.
+    const ran: string[] = [];
+    const results = await runGates([
+      spec("first", FAST, true, ran),
+      { name: "boom", tier: FAST, run: () => { ran.push("boom"); throw new Error("ENOENT: src/gone.ts"); } },
+      spec("later", FAST, true, ran),
+      spec("slow", SLOW, true, ran),
+    ]);
+
+    assert.deepEqual(ran, ["first", "boom", "later"], "the fast tier must finish");
+    assert.equal(results.length, 4);
+    const boom = byName(results, "boom");
+    assert.equal(boom.error, true);
+    assert.equal(boom.passed, false);
+    assert.equal(boom.skipped, false, "a thrown gate is never a skip");
+    assert.match(boom.output, /ENOENT: src\/gone\.ts/u, "the message must not be swallowed");
+    // Fail closed, like any other error: the slow tier is not run on top of it.
+    assert.equal(byName(results, "slow").skipReason, "static gates failed");
+  });
+
+  it("reports a non-Error throw without inventing a message", async () => {
+    const results = await runGates([
+      { name: "boom", tier: FAST, run: () => { throw "just a string"; } },
+    ]);
+
+    assert.equal(byName(results, "boom").error, true);
+    assert.match(byName(results, "boom").output, /just a string/u);
+  });
+
+  it("halts the rest of the pipeline under failFast when a gate throws", async () => {
+    const ran: string[] = [];
+    const results = await runGates(
+      [
+        { name: "boom", tier: FAST, run: () => { ran.push("boom"); throw new Error("nope"); } },
+        spec("b", FAST, true, ran),
+      ],
+      { failFast: true },
+    );
+
+    assert.deepEqual(ran, ["boom"]);
+    assert.equal(byName(results, "b").skipReason, "fail-fast");
+  });
+
+  it("runs the slow tier under forceSlow even when a fast gate threw", async () => {
+    // `--all` means "run them anyway". An error must not quietly re-acquire
+    // the veto the flag just took away.
+    const ran: string[] = [];
+    const results = await runGates(
+      [
+        { name: "boom", tier: FAST, run: () => { ran.push("boom"); throw new Error("nope"); } },
+        spec("slow", SLOW, true, ran),
+      ],
+      { forceSlow: true },
+    );
+
+    assert.deepEqual(ran, ["boom", "slow"]);
+    assert.equal(byName(results, "slow").skipped, false);
+  });
+
+  it("times a gate that threw like any other", async () => {
+    const results = await runGates([
+      { name: "boom", tier: FAST, run: () => { throw new Error("nope"); } },
+    ]);
+
+    assert.equal(Number.isInteger(byName(results, "boom").durationMs), true);
+    assert.ok(byName(results, "boom").durationMs >= 0);
   });
 
   it("does not skip slow gates when only a slow gate failed", async () => {
@@ -205,6 +347,68 @@ describe("exit-code selection", () => {
       gateResult({ name: "b", passed: false, error: true }),
     ]);
     assert.equal(reportExitCode(r), EXIT_ENVIRONMENT);
+  });
+
+  it("keeps the three states apart in one report: skip 0, failure 1, error 3", async () => {
+    // The whole priority order in one pipeline, from `runGates` rather than
+    // hand-built results: a runtime skip must not lift the exit code, a
+    // failure must, and an error — here, a gate that threw — must outrank it.
+    const ran: string[] = [];
+    const r = report(
+      await runGates([
+        spec("skipper", FAST, false, ran, { skipped: true, skipReason: "nothing configured" }),
+        spec("failer", FAST, false, ran, { violationCount: 2 }),
+        { name: "thrower", tier: FAST, run: () => { throw new Error("boom"); } },
+      ]),
+    );
+
+    assert.equal(reportExitCode(r), EXIT_ENVIRONMENT);
+    assert.equal(reportExitCode(report(await runGates([
+      spec("skipper", FAST, false, ran, { skipped: true, skipReason: "nothing configured" }),
+      spec("failer", FAST, false, ran, { violationCount: 2 }),
+    ]))), EXIT_GATE_FAILURES);
+    assert.equal(reportExitCode(report(await runGates([
+      spec("skipper", FAST, false, ran, { skipped: true, skipReason: "nothing configured" }),
+      spec("passer", FAST, true, ran),
+    ]))), EXIT_OK);
+  });
+
+  it("puts a thrown gate's message on the wire and into next_actions", async () => {
+    // "Do not swallow the exception" is only true if a reader can see it. It
+    // reaches `raw_output` because an errored gate with no parsed violations
+    // is exactly the case `processGate` keeps raw output for, and the `Fix:`
+    // line is what `next_actions` lifts out of an errored gate.
+    const payload = toPayload(
+      report(
+        await runGates([
+          { name: "boom", tier: FAST, run: () => { throw new Error("ENOENT: src/gone.ts"); } },
+        ]),
+      ),
+    );
+
+    assert.equal(payload.exit_code, EXIT_ENVIRONMENT);
+    assert.equal(payload.gates[0]?.error, true);
+    assert.match(payload.gates[0]?.raw_output ?? "", /ENOENT: src\/gone\.ts/u);
+    assert.match(payload.next_actions.join("\n"), /^boom: Fix: /mu);
+    // And it is not dressed up as a finding about the project's code.
+    assert.equal(payload.gates[0]?.violation_count, 0);
+    assert.deepEqual(payload.gates[0]?.violations, []);
+  });
+
+  it("counts a gate that threw as failed in the summary, never as skipped", () => {
+    const r = report([
+      gateResult({ name: "a", passed: true }),
+      gateResult({ name: "b", passed: false, error: true, output: "threw" }),
+      gateResult({ name: "c", passed: false, skipped: true, skipReason: "x" }),
+    ]);
+    assert.deepEqual(toPayload(r).summary, {
+      gates_total: 3,
+      gates_passed: 1,
+      gates_failed: 1,
+      gates_skipped: 1,
+      violations_total: 0,
+      violations_shown: 0,
+    });
   });
 });
 

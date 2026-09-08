@@ -98,6 +98,14 @@ that ran and found nothing (`passed`), a gate that deliberately did not run
 (`skipped: true` with a `skip_reason`), and a gate that *could not* run
 (`error: true`) are three different facts and must stay three.
 
+"Has failed", above, means **ran and did not pass** — `!passed && !skipped`,
+the same arithmetic `summary.gates_failed` uses. A skip never halts the SLOW
+tier and never trips `--fail-fast`; an error does both, because nothing was
+learned and the slow tier would be measuring the same broken environment. This
+is where the two implementations differ today: Python's `run_gates` branches on
+`if not result.passed`, which counts a visible skip as a failure. See the
+divergence table below.
+
 ### 4. `.kragg/history.jsonl`
 
 Append-only JSON Lines, one entry per run, rotated at 1000 lines down to the
@@ -187,8 +195,10 @@ naively will flag every one of them. They are enumerated with their evidence in
 | `secret_name_suffixes` includes `ServiceKey` | Python's default list lacks `_service_key`. Listed in KNOWN_LIMITATIONS as a Python gap found during the port. |
 | criticality freshness | kragg-ts refuses stale data via the sidecar stamp; Python consumes a stale `criticality.json` as if current. The *file* is identical; the trust decision is not. |
 | module naming in the syntax tier | kragg-ts names modules relative to the repo root, Python relative to the package root, because a TypeScript relative specifier is a filesystem path and a Python one is not. |
+| a SKIP does not halt the SLOW tier or `--fail-fast` | Python's `run_gates` branches on `if not result.passed`, and a visible skip is `passed=False, skipped=True`, so one gate stepping aside from inside its own run skips every slow gate with `static gates failed`. `crag/spec/SPEC.md` §2.3/§4.1 make the three states a contract and define `gates_failed` as not-passed-and-not-skipped; kragg-ts follows the spec. Recorded as a Python gap in KNOWN_LIMITATIONS. |
+| a gate that THROWS is an errored gate, not a dead process | Python's `run_gates` has no `try`, so an exception inside a gate kills the process and takes the consolidated report with it. `crag/spec/SPEC.md` §4.3 already names the outcome for a gate that could not run — `error: true`, `passed: false`, remediation in `raw_output`, exit 3 — and kragg-ts produces exactly that, so the remaining gates still run and still report. Recorded as a Python gap in KNOWN_LIMITATIONS. |
 
-Four defects found in the Python implementation during the port are recorded in
+Six defects found in the Python implementation during the port are recorded in
 [KNOWN_LIMITATIONS.md](../KNOWN_LIMITATIONS.md#found-in-the-python-implementation-during-this-port).
 They are gaps to fix upstream, not divergences to encode.
 
