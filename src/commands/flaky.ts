@@ -23,25 +23,38 @@
  *
  * ── ACTIVE (`--rerun N`) ───────────────────────────────────────────────────
  * Re-runs the suite N times and ranks tests by failure ratio, the Meta-style
- * approach. This is a CRON/CI SURFACE AND NEVER AN INNER-LOOP GATE, and that
- * is a design boundary rather than a default that could be flipped later:
- * running the suite N times is N times the latency, and a gate whose verdict
- * depends on a sampling process is not a deterministic gate. `kragg check`
- * must never invoke this, and the command says so in its own output so nobody
- * wires it into a pre-commit hook by accident.
+ * approach. It lives in `flaky/reruns.ts`; read that file for the rule it
+ * turns on — every sample must be a COMPLETED run of the same suite
+ * `kragg check` would have run, or the sweep is an error rather than a verdict.
  *
- * A test that fails in EVERY run is not flaky, it is broken; only
- * `0 < failures < runs` is reported. That distinction is why this mode is
- * useful at all — a broken test is already visible from one run.
+ * This is a CRON/CI SURFACE AND NEVER AN INNER-LOOP GATE, and that is a design
+ * boundary rather than a default that could be flipped later: running the
+ * suite N times is N times the latency, and a gate whose verdict depends on a
+ * sampling process is not a deterministic gate. `kragg check` must never
+ * invoke this, and the command says so in its own output so nobody wires it
+ * into a pre-commit hook by accident.
  */
 
-import type { Violation } from "../engine/models.ts";
 import type { JournalEntry } from "../engine/journal.ts";
 import { readRuns } from "../engine/journal.ts";
 import { EXIT_ENVIRONMENT, EXIT_GATE_FAILURES, EXIT_OK } from "../engine/report.ts";
-import { resolveProjectEnvironment } from "../environment/project.ts";
-import { loadPolicy } from "../policy/policy.ts";
-import { runTests } from "../adapters/testRunner.ts";
+import { renderReruns, runReruns } from "./flaky/reruns.ts";
+import type { RunSuite } from "./flaky/reruns.ts";
+
+export type {
+  FlakyTest,
+  RerunOptions,
+  RerunOutcome,
+  RerunTally,
+  RunSuite,
+} from "./flaky/reruns.ts";
+export {
+  aggregateReruns,
+  failureRatio,
+  renderReruns,
+  runReruns,
+  testIdentity,
+} from "./flaky/reruns.ts";
 
 /** Journal entries scanned by default, matching Python's `--last`. */
 export const DEFAULT_LAST = 50;
@@ -53,21 +66,6 @@ export interface FlakyGate {
   readonly passed: number;
   readonly failed: number;
 }
-
-/** A test that failed intermittently across repeated runs. */
-export interface FlakyTest {
-  /** `file::test name` — see {@link testIdentity} for how it is derived. */
-  readonly testId: string;
-  readonly failures: number;
-  readonly runs: number;
-}
-
-/** Failure ratio in `[0, 1]`; `0` when no runs were recorded. */
-export function failureRatio(test: FlakyTest): number {
-  return test.runs === 0 ? 0 : test.failures / test.runs;
-}
-
-/* --- Passive mode -------------------------------------------------------- */
 
 interface Tally {
   readonly sha: string;
@@ -159,143 +157,6 @@ export function renderPassive(flaky: readonly FlakyGate[]): string[] {
   return lines;
 }
 
-/* --- Active mode --------------------------------------------------------- */
-
-/**
- * A stable identity for one failed test, across runs.
- *
- * The test-runner adapters do not expose test IDs; they expose `Violation`s
- * whose message `support/testReport.ts` builds as `` `${name} — ${detail}` ``
- * (or `` `${name} failed` `` when there is no detail). The DETAIL is exactly
- * what differs between two runs of the same flaky test — a different timeout,
- * a different received value — so it must be stripped or every run would look
- * like a different test and nothing would ever be counted twice.
- *
- * COUPLING, stated rather than hidden: this reconstruction depends on that
- * message format. If the adapters ever expose a real test id, this should be
- * replaced by it rather than extended. The em-dash separator is used because
- * it is what the adapters emit and it is vanishingly rare inside a test name.
- *
- * A suite-level failure (`test file failed to run — …`) yields an identity of
- * that phrase against the file, which is correct: a file that intermittently
- * fails to load IS flaky, and there is no test name to attribute it to.
- */
-export function testIdentity(violation: Violation): string {
-  const name = stripDetail(violation.message);
-  return violation.file === undefined ? name : `${violation.file}::${name}`;
-}
-
-const DETAIL_SEPARATOR = " — ";
-const FAILED_SUFFIX = " failed";
-
-function stripDetail(message: string): string {
-  const index = message.indexOf(DETAIL_SEPARATOR);
-  if (index >= 0) {
-    return message.slice(0, index);
-  }
-  return message.endsWith(FAILED_SUFFIX)
-    ? message.slice(0, message.length - FAILED_SUFFIX.length)
-    : message;
-}
-
-/**
- * Flag tests that failed in SOME BUT NOT ALL runs.
- *
- * `failures === runs` is a deterministically broken test, which one ordinary
- * run already reports; surfacing it here would drown the intermittent ones.
- * Duplicate identities within a single run are collapsed, so a parameterised
- * test reported twice does not count as two failures of one run.
- */
-export function aggregateReruns(failedPerRun: readonly (readonly string[])[]): readonly FlakyTest[] {
-  const runs = failedPerRun.length;
-  const counts = new Map<string, number>();
-  for (const failed of failedPerRun) {
-    for (const testId of new Set(failed)) {
-      counts.set(testId, (counts.get(testId) ?? 0) + 1);
-    }
-  }
-  const flaky: FlakyTest[] = [];
-  for (const [testId, failures] of counts) {
-    if (failures > 0 && failures < runs) {
-      flaky.push({ testId, failures, runs });
-    }
-  }
-  flaky.sort((a, b) => b.failures - a.failures || a.testId.localeCompare(b.testId));
-  return flaky;
-}
-
-/** Render active-rerun findings as token-efficient lines. */
-export function renderReruns(tests: readonly FlakyTest[], count: number): string[] {
-  if (tests.length === 0) {
-    return [`no flaky tests across ${count} runs`];
-  }
-  const lines = [`flaky: ${tests.length} tests failed intermittently across ${count} runs`];
-  for (const test of tests) {
-    const percent = Math.round(failureRatio(test) * 100);
-    lines.push(`  ${test.testId}: ${test.failures}/${test.runs} failed (${percent}%)`);
-  }
-  return lines;
-}
-
-/** The suite ran `count` times, or it could not be run at all. */
-export type RerunOutcome =
-  | { readonly ok: true; readonly tests: readonly FlakyTest[] }
-  | { readonly ok: false; readonly message: string };
-
-export interface RerunOptions {
-  readonly root: string;
-  /** How many times to run the whole suite. */
-  readonly count: number;
-  /** Progress sink, one line per completed run. Silent when omitted. */
-  readonly onRun?: ((line: string) => void) | undefined;
-}
-
-/**
- * Run the suite `count` times and rank tests by failure ratio.
- *
- * Runs are SEQUENTIAL, not parallel, and deliberately so: the shared state
- * that makes a suite flaky (a port, a temp directory, a database, a clock) is
- * exactly what concurrent runs would collide over, and a manufactured
- * collision is not the flakiness anyone is looking for.
- *
- * Coverage is switched off (`coverageFailUnder: 0`) — it is pure cost here and
- * its threshold verdict is not a test outcome. The violation cap is lifted
- * (`maxViolationsPerGate: 0`, which `capped()` reads as "no cap") because a
- * truncated failure list would silently under-count a run.
- *
- * A run that could not produce a readable report aborts the whole sweep. Nine
- * good runs and one unknown is not a nine-sample dataset; the ratio it would
- * produce is wrong in the direction that hides flakiness.
- */
-export async function runReruns(options: RerunOptions): Promise<RerunOutcome> {
-  const env = resolveProjectEnvironment(options.root);
-  const policy = loadPolicy(options.root);
-  const failedPerRun: string[][] = [];
-  for (let index = 0; index < options.count; index += 1) {
-    const outcome = await runTests({
-      env,
-      coverageFailUnder: 0,
-      maxViolations: 0,
-      testPatterns: policy.testPaths,
-    });
-    if (!outcome.ok) {
-      return {
-        ok: false,
-        message:
-          `run ${index + 1} of ${options.count} could not complete ` +
-          `(${outcome.kind}), so no failure ratio is trustworthy:\n${outcome.message}`,
-      };
-    }
-    const failed = outcome.violations.map(testIdentity);
-    failedPerRun.push(failed);
-    options.onRun?.(
-      `  run ${index + 1}/${options.count}: ${outcome.summary.failed} failed ` +
-        `of ${outcome.summary.total}`,
-    );
-  }
-  return { ok: true, tests: aggregateReruns(failedPerRun) };
-}
-
 /* --- Command ------------------------------------------------------------- */
 
 export interface FlakyOptions {
@@ -306,6 +167,8 @@ export interface FlakyOptions {
   readonly rerun?: number | undefined;
   readonly log?: ((line: string) => void) | undefined;
   readonly logError?: ((line: string) => void) | undefined;
+  /** The suite runner, injected for tests. See {@link RunSuite}. */
+  readonly runSuite?: RunSuite | undefined;
 }
 
 /**
@@ -314,10 +177,14 @@ export interface FlakyOptions {
  * PASSIVE mode always exits 0. A flipped gate is a report about history, not a
  * verdict on the working tree, and failing the process on it would make the
  * command unusable in the very CI job that would benefit from running it.
- * Python's `cmd_flaky` does the same.
+ * Python's `cmd_flaky` does the same. "No journal to mine" and "a journal with
+ * no flips in it" are printed as different sentences: the first means nothing
+ * was measured, and reporting it as a clean bill of health would be the same
+ * mistake `--rerun` used to make.
  *
- * ACTIVE mode exits 1 when intermittent tests were found, so a nightly job can
- * gate on it, and 3 when the suite could not be run.
+ * ACTIVE mode exits 1 when tests failed — intermittently or every time — so a
+ * nightly job can gate on it, and 3 when any of the N runs was not a completed
+ * run of the intended suite.
  */
 export async function flakyCommand(options: FlakyOptions): Promise<number> {
   const log = options.log ?? defaultLog;
@@ -327,7 +194,7 @@ export async function flakyCommand(options: FlakyOptions): Promise<number> {
   }
   const runs = readRuns(options.root, options.last ?? DEFAULT_LAST);
   if (runs.length === 0) {
-    log("no recorded runs to mine (run `kragg check` first)");
+    log("no recorded runs to mine, so nothing was compared (run `kragg check` first)");
     return EXIT_OK;
   }
   for (const line of renderPassive(passiveFlaky(runs))) {
@@ -347,15 +214,24 @@ async function flakyRerun(
     `re-running the suite ${count} times — this is a cron/CI surface, ` +
       "never the inner loop, and `kragg check` never does this",
   );
-  const outcome = await runReruns({ root: options.root, count, onRun: log });
+  const outcome = await runReruns({
+    root: options.root,
+    count,
+    onRun: log,
+    runSuite: options.runSuite,
+  });
   if (!outcome.ok) {
     logError(outcome.message);
     return EXIT_ENVIRONMENT;
   }
-  for (const line of renderReruns(outcome.tests, count)) {
+  for (const line of renderReruns(outcome.tally, outcome.runs)) {
     log(line);
   }
-  return outcome.tests.length > 0 ? EXIT_GATE_FAILURES : EXIT_OK;
+  // A stable failure is exit 1 too. It is not flakiness, and the output says
+  // so in its own section, but a sweep that found failing tests has not found
+  // a healthy suite and must not report one.
+  const found = outcome.tally.flaky.length + outcome.tally.stable.length;
+  return found > 0 ? EXIT_GATE_FAILURES : EXIT_OK;
 }
 
 /** A parsed JSON object, before any of its fields have been checked. */

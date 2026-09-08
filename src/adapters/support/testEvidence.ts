@@ -19,13 +19,77 @@
  * crash during it, and a TAP stream without its summary at a process that died
  * mid-suite. Then the tail of the runner's own output, which is where the
  * actual cause is.
+ *
+ * The coverage headline lives here too, because it has the same job: it says
+ * what was COUNTED. A file the run never loaded is in the denominator with
+ * every statement line uncovered (`support/coverage.ts`, `projectTotals`),
+ * and a number that moved because of that must name the files, or a reader
+ * is left hunting for a regression in code that was never the problem.
  */
 
 import { statSync } from "node:fs";
 
-import type { CompletedCommand } from "../../engine/models.ts";
-import type { TestRunnerName } from "./detect.ts";
+import type { CompletedCommand, Violation } from "../../engine/models.ts";
+import {
+  missingTool as missingToolName,
+  missingToolMessage,
+  remediation,
+} from "../../environment/project.ts";
+import type { ProjectEnvironment } from "../../environment/project.ts";
+import type { ProjectTotals } from "./coverage.ts";
+import type { RunnerDetection, TestRunnerName } from "./detect.ts";
+import { missingTool } from "./outcome.ts";
+import type { Unavailable } from "./outcome.ts";
 import type { Artifacts } from "./testCommands.ts";
+
+/** `code` for the coverage threshold, distinct from any test failure. */
+export const COVERAGE_BELOW_THRESHOLD = "coverage-below-threshold";
+
+/** How each runner is made to write its coverage artifact, for the error arm. */
+export const COVERAGE_ADVICE: Readonly<Record<TestRunnerName, string>> = {
+  vitest:
+    "vitest writes it via its `json` coverage reporter; check that " +
+    "`coverage.provider` is installed (@vitest/coverage-v8 or -istanbul).",
+  node: "node --test writes lcov via `--test-reporter=lcov`; coverage needs Node 20.1+.",
+  bun: "bun test writes lcov via `--coverage-reporter=lcov`.",
+};
+
+/** How many never-loaded files the headline names before `+N more`. */
+const UNLOADED_PREVIEW = 5;
+
+/** The coverage headline: the number, then what was counted to reach it. */
+export function coverageLine(totals: ProjectTotals): string {
+  return (
+    `line coverage ${totals.pct}% ` +
+    `(${totals.coveredLines}/${totals.totalLines} lines${unloadedNote(totals)})`
+  );
+}
+
+/** The floor was not met. Line coverage only: no branch is claimed or checked. */
+export function belowThreshold(totals: ProjectTotals, failUnder: number): Violation {
+  return {
+    message:
+      `line coverage ${totals.pct}% is below the required ${failUnder}% ` +
+      `(${totals.coveredLines}/${totals.totalLines} lines${unloadedNote(totals)})`,
+    code: COVERAGE_BELOW_THRESHOLD,
+    fixHint: "run `kragg coverage` for the uncovered lines of the highest-fan-in functions",
+  };
+}
+
+/** The files in the denominator that no test loaded, by name. */
+function unloadedNote(totals: ProjectTotals): string {
+  if (totals.unloaded.length === 0) {
+    return "";
+  }
+  const lines = totals.unloaded.reduce((sum, entry) => sum + entry.statementLines, 0);
+  const shown = totals.unloaded.slice(0, UNLOADED_PREVIEW).map((entry) => entry.path);
+  const more = totals.unloaded.length - shown.length;
+  return (
+    `; ${totals.unloaded.length} of ${totals.sourceFiles} source files never loaded by ` +
+    `the test run, counted as uncovered (${lines} statement lines read from the source): ` +
+    `${shown.join(", ")}${more > 0 ? `, +${more} more` : ""}`
+  );
+}
 
 /** kragg terminated the runner: nothing it wrote can be a complete report. */
 export function killedMessage(
@@ -97,4 +161,67 @@ function tail(text: string, maxLines = 20): string {
   return lines.length <= maxLines
     ? text
     : [`… ${lines.length - maxLines} earlier lines`, ...lines.slice(-maxLines)].join("\n");
+}
+
+/**
+ * Was the RUNNER ITSELF missing?
+ *
+ * The `_is_tool_module` twin. `missingToolName` reports whatever name the
+ * output said could not be found; only when that name IS the runner does this
+ * become an environment failure. A test file that cannot import
+ * `./helpers.ts` produces the same class of message and is a test failure —
+ * reported through the normal parse path, against the file that failed.
+ */
+export function runnerMissing(
+  gate: string,
+  env: ProjectEnvironment,
+  runner: TestRunnerName,
+  stdout: string,
+  stderr: string,
+): Unavailable | undefined {
+  const missing = missingToolName({
+    name: gate,
+    command: [],
+    cwd: env.root,
+    returncode: 127,
+    stdout,
+    stderr,
+  });
+  if (missing === null) {
+    return undefined;
+  }
+  const binName = runner === "vitest" ? "vitest" : runner;
+  if (missing !== binName && !missing.endsWith(`/${binName}`)) {
+    return undefined;
+  }
+  if (runner === "vitest") {
+    return missingTool(missingToolMessage(env, "vitest", "vitest"));
+  }
+  return missingTool(
+    `${binName} could not be started, so no tests ran.\n` +
+      (runner === "bun"
+        ? "Install bun (https://bun.com) or set `test_runner` to a runner this project has."
+        : "kragg runs `node --test` on its own interpreter; this should not happen.") +
+      `\n${remediation(env.packageManager, binName)}`,
+  );
+}
+
+/** Why no runner ran, with the commands that would make one available. */
+export function skipReason(detection: RunnerDetection, env: ProjectEnvironment): string {
+  if (detection.source.startsWith("policy:")) {
+    return `${detection.source} — the test gate is switched off in kragg.json`;
+  }
+  if (detection.unsupported !== undefined) {
+    return (
+      `this project's test script runs ${detection.unsupported}, which kragg does not ` +
+      "drive yet. Nothing was checked — set `test_runner` explicitly if one of " +
+      "vitest / node / bun can run this suite."
+    );
+  }
+  return (
+    "no test runner detected (looked at package.json#scripts.test, vitest.config.*, " +
+    "a vitest dependency, and bunfig.toml). No tests were run, so nothing was verified.\n" +
+    `${remediation(env.packageManager, "vitest @vitest/coverage-v8")}\n` +
+    "or use Node's built-in runner: set `\"test\": \"node --test\"` in package.json."
+  );
 }

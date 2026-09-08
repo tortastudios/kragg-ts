@@ -50,7 +50,9 @@ syntax-tier gate accepts the `--changed` narrowing. `typing-strictness`,
 `maintainability`, `halstead`, `boundaries` and `structure` take
 `policy.sourcePaths` and walk the whole tree regardless. `boundaries` has to —
 a layering contract is a property of the import graph, not of a file — and the
-metric gates simply have not been given the parameter.
+metric gates simply have not been given the parameter. The full table, gate by
+gate, is in section 3 under "Which gates honour the narrowing, and which must
+not"; the selection itself is resolved once, in `src/commands/scope.ts`.
 
 A deliberate asymmetry with Python lives here too: `ast.parse` *raises* on bad
 syntax, while `ts.createSourceFile` recovers and hands back a partial tree.
@@ -63,10 +65,14 @@ matching Python's behaviour rather than the compiler's.
 One `ts.Program`, one `ts.TypeChecker`, for the whole run. Two properties, both
 structural rather than optimizations to add later:
 
-- **One per run.** The handle is memoized per tsconfig path, and
-  `catalog/context.ts` additionally creates it once and hands the same object
-  to every gate — so the sharing is a property of the pipeline, not an accident
-  of a cache.
+- **One per run — and per *run*, not per process.** `catalog/context.ts`
+  creates the handle once and hands the same object to every gate, and that is
+  the only thing sharing it. `analysisProgram` keeps no module-level cache:
+  it used to memoize per tsconfig path, so a long-lived host (the library API,
+  a watcher, an MCP server) that ran, saw an edit and ran again was handed the
+  first run's `ts.Program` with every file parsed from the pre-edit bytes. The
+  sharing is a property of the pipeline; it must not be an accident of a cache
+  that nothing invalidates.
 - **Lazy.** Construction happens on the first `load()`, never at handle
   creation. `kragg check --changed` over three files where no type-aware gate
   fires must not pay a millisecond of program cost, and does not.
@@ -98,6 +104,15 @@ This creates the rule that governs every gate in the repo:
 
 `compiler.ts` holds the only value import of `typescript` in the codebase — for
 the types and for the fallback instance. Everywhere else it is `import type`.
+
+The resolution is memoized per root, but on the compiler's **identity** rather
+than merely on the root: the resolved entry path plus that file's size and
+mtime, all obtainable without executing anything. A project that upgrades or
+relinks its `typescript` between two runs of a long-lived host gets resolved
+again instead of being analyzed with the compiler the first run happened to
+load. The residual limit is Node's own CJS module cache — a compiler replaced
+*in place*, at the same path, still `require`s to the module object already in
+this process.
 
 Two consequences that are easy to miss: loading the project's `typescript`
 executes code from the project under check (a real trust boundary, and the same
@@ -260,6 +275,69 @@ fingerprint; see `src/gates/criticality/freshness.ts` and
 [spec-conformance.md](spec-conformance.md) for why the fingerprint is a
 separate file.
 
+The fingerprint has to cover everything the analysis *reads*, or the data can
+be wrong while the check says "fresh". It walks the source tree with the same
+`analysis/walk.ts` the syntax tier uses (so a real `src/coverage/` is watched,
+while a repo-root `dist/` is not), **hashes the bytes** rather than trusting a
+size and an mtime, and includes the other analysis inputs: `kragg.json`,
+`package.json#kragg`, `tsconfig.json` and the resolved compiler's version and
+path. A read-only `.kragg` cannot land the artifacts, and that is reported —
+never silently converted into a fresh answer.
+
+### What a run is scoped to — `src/commands/scope.ts`
+
+One resolver, called once, by both `check` and `security`. It produces two
+different things and conflating them is the bug it exists to prevent:
+
+- **`targets`** — what the per-file EXTERNAL tools are invoked on. It is on the
+  wire (`ReportPayload.targets`), and the cross-language contract pins it as
+  "the paths/files checked, **as given**", so a `--file src` stays `src` there.
+- **`paths`** — the narrowing the path-aware gates compare file paths against.
+  Internal, and therefore free to be the *expansion* of `--file src` into the
+  files under it. `undefined` means "the whole project" and is **not** the same
+  as `[]`, which is a run with nothing to check.
+
+The three modes are `full` (no scoping), `changed` (`--changed`/`--since`) and
+`file` (`--file`). Two rules make an incremental run honest:
+
+1. **A configuration or dependency input in the change set promotes the run to
+   `full`.** `kragg.json`, `tsconfig*.json`, `package.json`, the lockfiles,
+   `pnpm-workspace.yaml`, the linter and test-runner configs the adapters read,
+   and the configured `secret_baseline` — the exact list is
+   `CONFIGURATION_INPUTS` and `CONFIGURATION_PREFIXES` in that module. The
+   blunt rule is chosen over "run the gates whose inputs changed" on purpose:
+   nobody keeps that mapping honest as gates are added, and a wrong mapping is
+   a silent pass. Before this, editing only `kragg.json` made `check --changed`
+   print "no changed TypeScript files" and exit 0 having run no gate at all.
+2. **A removal is a change.** A deleted file is never a target — there is no
+   file — but a change set whose only source change is a removal is promoted to
+   `full` too. A rename needs no promotion: its destination is in the selection.
+
+Everything else stays as it was: an empty change set is exit 0 with the
+documented clean-run report, and git failing to answer (not a repository, an
+unknown ref, no commit yet) is exit 3 carrying git's own message. `changes.ts`
+runs every plumbing command with `-z`, so a non-ASCII path is not silently lost
+to `core.quotePath` escaping.
+
+### Which gates honour the narrowing, and which must not
+
+`ctx.paths` narrows a gate; `ctx.targets` scopes an external tool's invocation;
+several gates take neither and walk the whole tree, because their verdict is
+not a per-file fact.
+
+| Gate | Reads | Note |
+| --- | --- | --- |
+| `lint` | `ctx.targets` | per-file, and the linter takes directories |
+| `tsc` | `ctx.paths` as an **order**, never a scope | see section 4 |
+| `typing-strictness` | `ctx.paths` for the source scan | the `tsconfig.json` audit always runs |
+| `type-complexity`, `forbidden-calls`, `nullable-default`, `secret-default` | `ctx.paths` | per-file |
+| `detect-secrets` | `ctx.paths`, else the whole project | secrets are not only in `source_paths` |
+| `complexity`, `maintainability`, `halstead`, `structure` | `policy.sourcePaths` | whole tree; the parameter is simply not plumbed, and keeping it whole cannot under-report |
+| `boundaries` | `policy.sourcePaths` | must — a layering contract is a property of the import graph |
+| `critical-tests` | whole tree, plus its own `--since` diff | it compares critical functions against test changes |
+| `test-quality` | whole tree | "is this critical function referenced by a test" is not bounded by a selection |
+| `test-coverage`, `critical-coverage`, `audit` | whole project | SLOW; they skip wholesale in incremental mode |
+
 ---
 
 ## 4. How an external tool becomes a gate
@@ -305,6 +383,19 @@ override outranks inference, and an override we cannot honour is an error":
   linted when it is not.
 - `lint_tool: "off"` → **skip**. A deliberate opt-out.
 
+The same three-way rule governs `test_runner` and `secret_scanner`:
+`"auto"` is optional autodetection, `"off"` is a deliberate opt-out, and a
+NAMED tool is required — `secret_scanner: "gitleaks"` with no gitleaks is exit
+3, not the skip that exits 0 and lets the project believe it was scanned.
+`kragg doctor` reports the same split up front, so the diagnostic and the run
+cannot disagree.
+
+A fourth case sits outside the rule: a tool that is **installed and then
+misbehaves** is an error under *every* setting, `"auto"` included. `gitleaks`
+crashing on its version probe used to count as "unusable", so `"auto"` fell
+through to secretlint and the crash disappeared behind the second tool's green
+result. Absence may fall through; a failure may not.
+
 ### Step 3 — parse the tool's own machine-readable output
 
 Each adapter parses the format the tool documents: oxlint's miette-derived
@@ -319,6 +410,26 @@ Normalization is the point: `src/coverage/model.ts` is the one line-coverage
 model that both istanbul JSON and lcov are reduced to, so
 `critical-coverage` has one shape to reason about regardless of which runner
 the project uses.
+
+**A report describes only what the run loaded, and the gates say so.** No
+JavaScript runner reports a file no test imported; it is absent, not 0%. So
+`src/coverage/inventory.ts` walks `source_paths` and `test-coverage`
+reconciles its number against that inventory (`projectTotals` in
+`src/adapters/support/coverage.ts`): an unloaded file counts with every
+statement line uncovered — the count is read off the source with the
+project's compiler, the same "a statement starts on this line" rule the
+model applies to what a report states — and files outside the source paths
+do not count at all. `critical-coverage` reconciles per function: one whose
+file has no entry, whose extent nothing can bound, or whose body the report
+is silent on is UNMEASURED, and unmeasured is a violation
+(`critical-unmeasured`, with the cause in the message), never a pass. Extents
+come from `src/coverage/spans.ts`, whose index is keyed the way
+`criticality.json` spells a name (`Reader.close`, `Client.get token`), so
+same-named methods on two classes resolve to their own bodies; overload
+signatures and abstract members, which have no body, are not indexed; and a
+class that is itself a node owns its own lines with its member functions cut
+out. A document that names no file under the source paths is an error, not a
+list of findings. All of it is line coverage, and nothing pretends otherwise.
 
 **A report is evidence only for the run that produced it.** The test runner
 is pointed at a directory created for this invocation alone

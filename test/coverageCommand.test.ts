@@ -1,22 +1,28 @@
 /**
  * Tests for `kragg coverage`.
  *
- * Four things have to hold:
+ * Five things have to hold:
  *
  *  - NO DATA IS NOT A FAILURE. Python's `cmd_coverage` prints one line and
  *    exits 0, because this is a report and not a gate. A non-zero here would
  *    make a repo that has simply never run its tests look broken, and the
- *    gate that DOES fail on this data is `critical-coverage`.
+ *    gate that DOES fail on this data is `critical-coverage`. The line names
+ *    the path that was expected, so "no data" is never a mystery.
+ *  - A REPORT THAT IS THERE AND UNUSABLE IS AN ERROR, exit 3, naming the
+ *    file. Printing "no coverage data" for a truncated tracefile would send
+ *    the reader to re-run a suite that already ran.
+ *  - IT READS THE RUNNER'S OWN ARTIFACT, at `coverage_report_path` (istanbul,
+ *    vitest) or the `lcov.info` beside it (node, bun) — never "whichever
+ *    report exists", which after a runner switch is the other runner's.
  *  - THE RANK IS THE PRODUCT. Rows come back highest-fan-in first, so the
- *    truncation the renderer applies removes the least important rows and the
- *    reader can stop after the first line and still have acted correctly.
- *  - CLEAN FUNCTIONS ARE COUNTED, NOT LISTED. A repo with forty critical
- *    functions and three gaps prints four lines. That economy is the whole
- *    reason this fits in an agent's context window.
- *  - UNMEASURED IS ITS OWN CATEGORY, never folded into "covered".
+ *    truncation the renderer applies removes the least important rows.
+ *  - CLEAN FUNCTIONS ARE COUNTED, NOT LISTED, and UNMEASURED is its own
+ *    category with its cause, never folded into "covered".
  *
  * The istanbul report is a literal, exactly as `criticalCoverage.test.ts`
- * does it — no vitest, no c8, no fixture artifact on disk.
+ * does it — no vitest, no c8. `runCoverage` is driven directly with stdout and
+ * stderr captured: it performs no asynchronous work before it returns, so a
+ * synchronous capture around the call sees every write.
  */
 
 import assert from "node:assert/strict";
@@ -28,12 +34,16 @@ import { after, describe, it } from "node:test";
 import ts from "typescript";
 
 import {
+  coverageSource,
   NO_COVERAGE_DATA_MESSAGE,
-  readReport,
   renderGaps,
+  runCoverage,
 } from "../src/commands/coverage.ts";
+import { EXIT_ENVIRONMENT, EXIT_OK } from "../src/engine/report.ts";
 import { criticalCoverageGaps } from "../src/gates/criticalCoverage.ts";
 import type { CriticalCoverageGap } from "../src/gates/criticalCoverage.ts";
+import { writeStamp } from "../src/gates/criticality.ts";
+import { loadPolicy } from "../src/policy/policy.ts";
 
 const roots: string[] = [];
 
@@ -77,56 +87,156 @@ function report(root: string, hits: Readonly<Record<string, number>>): unknown {
 }
 
 const SOURCE = "export function run(flag: boolean): number {\n  const a = 1;\n  return a;\n}\n";
+const CRITICALITY = JSON.stringify([
+  { name: "src/a#run", fan_in: 9, is_critical: true, risk: "HIGH" },
+]);
+const NODE_MANIFEST = JSON.stringify({ scripts: { test: "node --test" } });
+const VITEST_MANIFEST = JSON.stringify({ scripts: { test: "vitest run" } });
+
+/** lcov for `src/a.ts` with line 3 never run. */
+const LCOV_LINE_3_UNCOVERED = [
+  "SF:src/a.ts", "FN:1,run", "FNDA:1,run", "DA:2,1", "DA:3,0", "end_of_record", "",
+].join("\n");
+
+interface Captured {
+  readonly code: number;
+  readonly out: string;
+  readonly err: string;
+}
+
+/** Run the command with both streams captured. See the module docs. */
+async function run(root: string): Promise<Captured> {
+  let out = "";
+  let err = "";
+  const stdout = process.stdout.write;
+  const stderr = process.stderr.write;
+  process.stdout.write = (chunk: string | Uint8Array): boolean => {
+    out += String(chunk);
+    return true;
+  };
+  process.stderr.write = (chunk: string | Uint8Array): boolean => {
+    err += String(chunk);
+    return true;
+  };
+  try {
+    const code = await runCoverage({ root, api: ts });
+    return { code, out, err };
+  } finally {
+    process.stdout.write = stdout;
+    process.stderr.write = stderr;
+  }
+}
+
+/** A project whose criticality names `run`, stamped as current. */
+function ranked(files: Readonly<Record<string, string>>): string {
+  const root = project({ "src/a.ts": SOURCE, ".kragg/criticality.json": CRITICALITY, ...files });
+  writeStamp(root, ["src", "test"]);
+  return root;
+}
 
 describe("coverage: no data is a state, not a failure", () => {
   it("uses the message cmd_coverage prints, verbatim", () => {
     assert.equal(NO_COVERAGE_DATA_MESSAGE, "no coverage data (run `kragg check` first)");
   });
 
-  it("returns null when no report exists at any default path", () => {
-    assert.equal(readReport(project({})), null);
+  it("prints that line, and the path it expected, when the runner's artifact is missing", async () => {
+    const result = await run(project({ "package.json": NODE_MANIFEST }));
+    assert.equal(result.code, EXIT_OK);
+    assert.equal(
+      result.out,
+      `${NO_COVERAGE_DATA_MESSAGE}\n  expected coverage/lcov.info, the lcov report ` +
+        "`kragg check` publishes for node\n",
+    );
+    assert.equal(result.err, "");
   });
 
-  it("returns null for a file that is not JSON", () => {
-    const root = project({ "coverage/coverage-final.json": "{ truncated" });
-    assert.equal(readReport(root), null);
-  });
-
-  it("returns null for JSON that is not an object", () => {
-    // An empty model would otherwise render as "everything is unmeasured",
-    // which reads as a finding when it is really a broken input.
-    const root = project({ "coverage/coverage-final.json": "[]" });
-    assert.equal(readReport(root), null);
-  });
-
-  it("reads vitest's default path", () => {
-    const root = project({ "coverage/coverage-final.json": '{"a":{}}' });
-    assert.notEqual(readReport(root), null);
-  });
-
-  it("falls back to .kragg/coverage-final.json", () => {
-    const root = project({ ".kragg/coverage-final.json": '{"a":{}}' });
-    assert.notEqual(readReport(root), null);
-  });
-
-  it("honours an explicit path and does not fall back from it", () => {
+  it("names the configured coverage_report_path when that is what is missing", async () => {
     const root = project({
-      "coverage/coverage-final.json": '{"a":{}}',
-      "other/report.json": '{"b":{}}',
+      "package.json": VITEST_MANIFEST,
+      "kragg.json": '{"coverage_report_path": "reports/cov.json"}',
     });
-    assert.notEqual(readReport(root, "other/report.json"), null);
-    assert.equal(readReport(root, "missing/report.json"), null);
+    const result = await run(root);
+    assert.equal(result.code, EXIT_OK);
+    assert.match(result.out, /expected reports\/cov\.json, the istanbul report/u);
+  });
+
+  it("is an error when no runner is configured or detected, since nothing publishes coverage", async () => {
+    const result = await run(project({ "package.json": "{}" }));
+    assert.equal(result.code, EXIT_ENVIRONMENT);
+    assert.match(result.err, /no test runner detected/u);
+    assert.equal(result.out, "");
+  });
+});
+
+describe("coverage: an unusable report is an error, never 'no data'", () => {
+  it("rejects a tracefile that ends inside a record, naming the file", async () => {
+    const root = ranked({ "package.json": NODE_MANIFEST, "coverage/lcov.info": "SF:src/a.ts\nDA:1,1\n" });
+    const result = await run(root);
+    assert.equal(result.code, EXIT_ENVIRONMENT);
+    assert.match(result.err, /coverage report unusable: .*coverage\/lcov\.info/u);
+    assert.equal(result.out, "");
+  });
+
+  it("rejects an istanbul file that is not a JSON object", async () => {
+    const root = ranked({ "package.json": VITEST_MANIFEST, "coverage/coverage-final.json": "[]" });
+    const result = await run(root);
+    assert.equal(result.code, EXIT_ENVIRONMENT);
+    assert.match(result.err, /not a JSON object/u);
+  });
+
+  it("rejects a report that names no file under the source paths", async () => {
+    const root = ranked({
+      "package.json": VITEST_MANIFEST,
+      "coverage/coverage-final.json": JSON.stringify(report("/elsewhere", { "0": 1, "1": 1 })),
+    });
+    const result = await run(root);
+    assert.equal(result.code, EXIT_ENVIRONMENT);
+    assert.match(result.err, /coverage\/coverage-final\.json — the coverage report names 1 files but none under src/u);
+  });
+});
+
+describe("coverage: reads the runner's own artifact", () => {
+  it("reads the lcov beside coverage_report_path for node, not the istanbul file a previous runner left", async () => {
+    const root = ranked({
+      "package.json": NODE_MANIFEST,
+      "kragg.json": '{"coverage_report_path": "reports/cov.json"}',
+      "reports/lcov.info": LCOV_LINE_3_UNCOVERED,
+    });
+    // The stale istanbul report says everything is covered. It must not be read.
+    writeFileSync(join(root, "reports/cov.json"), JSON.stringify(report(root, { "0": 1, "1": 1 })));
+    const source = coverageSource(root, loadPolicy(root));
+    assert.deepEqual(source, { runner: "node", format: "lcov", path: join(root, "reports/lcov.info") });
+    const result = await run(root);
+    assert.equal(result.code, EXIT_OK);
+    assert.equal(
+      result.out,
+      "critical coverage: 1 functions, 1 with gaps, 0 clean, 0 unmeasured\n" +
+        "  src/a.ts:3 src/a#run (fan-in 9) — uncovered: 3\n",
+    );
+  });
+
+  it("reads coverage_report_path itself for vitest, ignoring the lcov beside it", async () => {
+    const root = ranked({
+      "package.json": VITEST_MANIFEST,
+      "kragg.json": '{"coverage_report_path": "reports/cov.json"}',
+      "reports/lcov.info": LCOV_LINE_3_UNCOVERED,
+    });
+    writeFileSync(join(root, "reports/cov.json"), JSON.stringify(report(root, { "0": 1, "1": 1 })));
+    assert.equal(coverageSource(root, loadPolicy(root))?.format, "istanbul");
+    const result = await run(root);
+    assert.equal(result.code, EXIT_OK);
+    assert.equal(result.out, "critical coverage: 1 functions, 0 with gaps, 1 clean, 0 unmeasured\n");
+  });
+
+  it("follows `test_runner` over the manifest when the policy names the runner", () => {
+    const root = project({ "package.json": VITEST_MANIFEST, "kragg.json": '{"test_runner": "node"}' });
+    assert.equal(coverageSource(root, loadPolicy(root))?.format, "lcov");
   });
 });
 
 describe("coverage: ranked gaps", () => {
   it("reports the uncovered lines of a critical function as a file:line pointer", () => {
-    const root = project({
-      "src/a.ts": SOURCE,
-      ".kragg/criticality.json": JSON.stringify([
-        { name: "src/a#run", fan_in: 9, is_critical: true, risk: "HIGH" },
-      ]),
-    });
+    const root = ranked({});
     const gaps = criticalCoverageGaps({
       root,
       sourcePaths: ["src"],
@@ -140,12 +250,7 @@ describe("coverage: ranked gaps", () => {
   });
 
   it("counts a fully covered function without listing it", () => {
-    const root = project({
-      "src/a.ts": SOURCE,
-      ".kragg/criticality.json": JSON.stringify([
-        { name: "src/a#run", fan_in: 9, is_critical: true, risk: "HIGH" },
-      ]),
-    });
+    const root = ranked({});
     const gaps = criticalCoverageGaps({
       root,
       sourcePaths: ["src"],
@@ -157,7 +262,7 @@ describe("coverage: ranked gaps", () => {
     ]);
   });
 
-  it("keeps unmeasured functions in their own category", () => {
+  it("keeps unmeasured functions in their own category, with the cause", () => {
     const root = project({
       "src/a.ts": SOURCE,
       "src/b.ts": "export function other(): void {}\n",
@@ -166,6 +271,7 @@ describe("coverage: ranked gaps", () => {
         { name: "src/b#other", fan_in: 4, is_critical: true, risk: "MED" },
       ]),
     });
+    writeStamp(root, ["src", "test"]);
     const gaps = criticalCoverageGaps({
       root,
       sourcePaths: ["src"],
@@ -174,7 +280,8 @@ describe("coverage: ranked gaps", () => {
     });
     assert.deepEqual(renderGaps(gaps), [
       "critical coverage: 2 functions, 0 with gaps, 1 clean, 1 unmeasured",
-      "  src/b.ts src/b#other (fan-in 4) — no coverage entry",
+      "  src/b.ts:1 src/b#other (fan-in 4) — unmeasured: the test run never loaded " +
+        "src/b.ts (no entry in the coverage report)",
     ]);
   });
 

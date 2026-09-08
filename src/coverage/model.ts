@@ -62,6 +62,15 @@ export interface FileCoverage {
   readonly path: string;
   /** 1-based executable lines that never ran, ascending. */
   readonly uncoveredLines: readonly number[];
+  /**
+   * 1-based executable lines that ran at least once, ascending.
+   *
+   * Kept beside `uncoveredLines` so a consumer can tell "every line in this
+   * span ran" from "this span holds no line the report knows about" — the
+   * difference between a function that executed and one the report is silent
+   * on, which `critical-coverage` must not confuse.
+   */
+  readonly coveredLines: readonly number[];
   /** Function spans, in the report's own order. */
   readonly functions: readonly FunctionSpan[];
 }
@@ -143,6 +152,11 @@ export function uncoveredWithin(
   endLine: number,
 ): readonly number[] {
   return file.uncoveredLines.filter((line) => line >= startLine && line <= endLine);
+}
+
+/** Whether any executable line inside the span ran. */
+export function ranWithin(file: FileCoverage, startLine: number, endLine: number): boolean {
+  return file.coveredLines.some((line) => line >= startLine && line <= endLine);
 }
 
 /**

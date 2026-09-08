@@ -39,22 +39,57 @@
  *    informative thing on the Python line anyway — the reviewer is about to
  *    read the diff.
  *
- * And ONE ADDITION Python does not have (TOR-1377): `## Suppressions` and
- * `## Baseline`, between the critical section and the gate section, listing
- * every `// kragg: ignore -- <reason>` and every baseline entry this change
- * set added, removed or left stale. See `brief/exemptions.ts`.
+ * ── AND ONE ADDITION PYTHON DOES NOT HAVE (TOR-1377) ───────────────────────
+ * `## Suppressions` and `## Baseline`, between the critical section and the
+ * gate section, list every `// kragg: ignore -- <reason>` and every baseline
+ * entry this change set added, removed or left stale. Both are exemptions a
+ * reviewer cannot see from a file list. See `brief/exemptions.ts`. They read
+ * the SAME diff base the file list came from, so the two halves of one brief
+ * always describe one change set.
+ *
+ * ── THE GATE SECTION IS EVIDENCE FROM ELSEWHERE, AND SAYS SO ───────────────
+ * `## Last gate run` is not a run. It is a summary of `.kragg/history.jsonl`,
+ * written by some earlier `kragg check` — possibly at a different commit, on
+ * a different working tree, before every file listed above it existed. Read
+ * without that context, "last run: PASS" under a list of twelve changed files
+ * reads as "these twelve files passed", which is the single most dangerous
+ * sentence this document could imply. So the section names its source, says
+ * nothing was re-run for the brief, and prints the recorded commit against
+ * the current one whenever the two disagree. It never carries a gate's raw
+ * tool output either: a scanner's stdout pasted into a review digest is how
+ * an untrusted string ends up read as a finding.
+ *
+ * ── A CHANGE SET CAN ALSO BE TOO BIG TO READ ───────────────────────────────
+ * `--path` narrows the digest to one area and `--limit` bounds the file
+ * lists, with `--limit 0` / `--all` restoring the full listing. The budget is
+ * DISPLAY ONLY: the stats line and the critical-function analysis both use
+ * the whole (path-filtered) change set, and a trimmed list says so on its own
+ * line. See `commands/inventory.ts`.
  */
 
 import { EXIT_ENVIRONMENT, EXIT_OK, EXIT_USAGE } from "../engine/report.ts";
-import { readRuns, renderStatusLines } from "../engine/journal.ts";
-import { changedFiles, diffBase } from "../git/changes.ts";
+import { readRuns, renderStatusLines, type JournalEntry } from "../engine/journal.ts";
+import { changedFiles, diffBase, gitDirty, gitSha } from "../git/changes.ts";
 import { baselineSection, suppressionSection } from "./brief/exemptions.ts";
 import { criticalFunctions } from "../gates/testDepth/criticalFunctions.ts";
 import type { TypeScriptApi } from "../analysis/sourceFile.ts";
 import { loadPolicy, PolicyError, type KraggPolicy } from "../policy/policy.ts";
+import {
+  applyBudget,
+  DEFAULT_LIMIT,
+  normalizePath,
+  truncationNote,
+  underAnyPath,
+  type Budgeted,
+} from "./inventory.ts";
 
 /** What `cmd_brief` prints to stderr when git cannot answer. */
 export const NOT_A_REPOSITORY_MESSAGE = "not a git repository (required for brief)";
+
+/** Where the gate section's numbers come from, stated in the document itself. */
+export const JOURNAL_PROVENANCE =
+  "From `.kragg/history.jsonl`, recorded by an earlier `kragg check`. " +
+  "Nothing was re-run for this brief.";
 
 /** How many journal entries the gate section summarises, as in Python. */
 const JOURNAL_WINDOW = 10;
@@ -73,6 +108,10 @@ export interface BriefOptions {
   readonly policy?: KraggPolicy | undefined;
   /** Compiler used to map modules to files. Defaults to the project's own. */
   readonly api?: TypeScriptApi | undefined;
+  /** `--path`: narrow the digest to changed files under these prefixes. */
+  readonly paths?: readonly string[] | undefined;
+  /** `--limit`: changed files to list. `0` lists them all. */
+  readonly limit?: number | undefined;
 }
 
 /**
@@ -102,6 +141,8 @@ export async function runBrief(options: BriefOptions = {}): Promise<number> {
     root,
     since: options.since ?? null,
     policy,
+    paths: options.paths ?? [],
+    limit: options.limit ?? DEFAULT_LIMIT,
     ...apiOption,
   });
   if (text === null) {
@@ -118,6 +159,10 @@ export interface BuildBriefOptions {
   readonly since: string | null;
   readonly policy: KraggPolicy;
   readonly api?: TypeScriptApi | undefined;
+  /** Path prefixes to keep. Absent or empty keeps the whole change set. */
+  readonly paths?: readonly string[] | undefined;
+  /** Changed files to list; `0` lists them all. Absent means no budget. */
+  readonly limit?: number | undefined;
 }
 
 /**
@@ -134,23 +179,31 @@ export async function buildBrief(options: BuildBriefOptions): Promise<string | n
     ".",
   ]);
   const base = changed === null ? null : await diffBase(options.root, options.since);
-  if (changed === null || base === null) {
+  if (changed === null || base === null || !base.ok) {
     return null;
   }
-  const visible = changed.filter((file) => !isArtifact(file));
+  const paths = options.paths ?? [];
+  const visible = changed.filter(
+    (file) => !isArtifact(file) && (paths.length === 0 || underAnyPath(file, paths)),
+  );
   // The two exemption sections (TOR-1377): a reviewer sees every suppression
   // and every baseline entry this change set added, removed or left stale.
-  const exemptions = { root: options.root, base, policy };
+  // `--path` narrows them exactly as it narrows everything else, because
+  // `visible` is what they are handed.
+  const exemptions = { root: options.root, base: base.stdout.trim(), policy };
   const lines = [
     "# Change brief",
     "",
     statsLine(visible.length, options.since),
     "",
-    ...groupedSections(visible, policy),
+    // The budget applies to the LISTING only. `statsLine` above and
+    // `criticalSection` below both read `visible`, so a trimmed list never
+    // changes the count a reviewer is told or the risk analysis they get.
+    ...groupedSections(applyBudget(visible, options.limit ?? 0), policy),
     ...criticalSection(options, visible),
     ...(await suppressionSection(exemptions, visible)),
     ...(await baselineSection(exemptions)),
-    ...gateSection(options.root),
+    ...(await gateSection(options.root)),
   ];
   return `${lines.join("\n").replace(/\s+$/, "")}\n`;
 }
@@ -170,7 +223,7 @@ function statsLine(count: number, since: string | null): string {
  * reshuffles its own sections is useless as a PR description you re-generate.
  */
 function groupedSections(
-  changed: readonly string[],
+  changed: Budgeted<string>,
   policy: KraggPolicy,
 ): string[] {
   const groups = new Map<string, string[]>([
@@ -178,7 +231,7 @@ function groupedSections(
     ["Tests", []],
     ["Other", []],
   ]);
-  for (const name of changed) {
+  for (const name of changed.entries) {
     groups.get(area(name, policy))?.push(name);
   }
   const lines: string[] = [];
@@ -190,6 +243,10 @@ function groupedSections(
     lines.push(`## ${title}`);
     lines.push(...members.map((name) => `- ${name}`));
     lines.push("");
+  }
+  const note = truncationNote(changed, "changed files");
+  if (note !== null) {
+    lines.push(note, "");
   }
   return lines;
 }
@@ -203,10 +260,10 @@ function groupedSections(
  * section a reviewer checks first.
  */
 function area(name: string, policy: KraggPolicy): string {
-  if (isUnder(name, policy.testPaths) || /\.(?:test|spec)\.[cm]?[jt]sx?$/.test(name)) {
+  if (underAnyPath(name, policy.testPaths) || /\.(?:test|spec)\.[cm]?[jt]sx?$/.test(name)) {
     return "Tests";
   }
-  return isUnder(name, policy.sourcePaths) ? "Source" : "Other";
+  return underAnyPath(name, policy.sourcePaths) ? "Source" : "Other";
 }
 
 /**
@@ -256,16 +313,61 @@ function criticalSection(
   return lines;
 }
 
-/** The last recorded gate run, from `.kragg/history.jsonl`. */
-function gateSection(root: string): string[] {
+/**
+ * The last recorded gate run, from `.kragg/history.jsonl`, labelled as such.
+ *
+ * Reading the journal is the whole point — `brief` must never run a gate, or
+ * a review digest becomes a minutes-long build — but a recorded verdict is
+ * evidence about the commit it was recorded at, not about the change set
+ * above it. The provenance line and {@link staleness} are what keep the two
+ * apart, so a stale PASS cannot be read as this change having been checked.
+ */
+async function gateSection(root: string): Promise<string[]> {
   const runs = readRuns(root, JOURNAL_WINDOW);
-  const lines = ["## Last gate run"];
-  if (runs.length === 0) {
+  const lines = ["## Last gate run", JOURNAL_PROVENANCE];
+  const last = runs.at(-1);
+  if (last === undefined) {
     lines.push("no recorded runs (run `kragg check`)");
-  } else {
-    lines.push(...renderStatusLines(runs));
+    return lines;
+  }
+  lines.push(...renderStatusLines(runs));
+  const note = staleness(last, await gitSha(root), await gitDirty(root));
+  if (note !== null) {
+    lines.push(note);
   }
   return lines;
+}
+
+/**
+ * Why the recorded verdict may not describe the change set above, or `null`.
+ *
+ * Three ways it can fail to, in the order they mislead: a different commit, a
+ * commit nobody can identify, and the same commit checked with the tree in a
+ * different state. A clean tree at the recorded commit is the one case where
+ * the verdict really does describe what is here, and then this says nothing.
+ */
+function staleness(
+  last: JournalEntry,
+  head: string | null,
+  dirty: boolean,
+): string | null {
+  const recorded = last.git_sha;
+  if (recorded === null || head === null) {
+    return "stale: recorded against an unidentified commit — re-run `kragg check`.";
+  }
+  if (recorded !== head) {
+    return (
+      `stale: recorded at ${recorded}, but HEAD is ${head} — ` +
+      "that verdict predates the change set above. Re-run `kragg check`."
+    );
+  }
+  if (last.git_dirty || dirty) {
+    return (
+      `stale: recorded at ${recorded} with uncommitted changes in the tree — ` +
+      "what was checked is not necessarily what is listed above."
+    );
+  }
+  return null;
 }
 
 /* --- Helpers -------------------------------------------------------------- */
@@ -279,30 +381,5 @@ function gateSection(root: string): string[] {
  * reason.
  */
 function isArtifact(name: string): boolean {
-  return normalize(name).startsWith(".kragg/");
-}
-
-/** Segment-aware prefix test, matching `isAllowed` in `git/changes.ts`. */
-function isUnder(name: string, prefixes: readonly string[]): boolean {
-  const path = normalize(name);
-  return prefixes.some((prefix) => {
-    const base = normalize(prefix);
-    if (base === "" || base === ".") {
-      // A policy naming the repo root covers everything under it, matching
-      // Python's `path.is_relative_to(".")`.
-      return true;
-    }
-    return path === base || path.startsWith(`${base}/`);
-  });
-}
-
-function normalize(value: string): string {
-  let path = value.replaceAll("\\", "/");
-  while (path.startsWith("./")) {
-    path = path.slice(2);
-  }
-  while (path.endsWith("/") && path.length > 1) {
-    path = path.slice(0, -1);
-  }
-  return path;
+  return normalizePath(name).startsWith(".kragg/");
 }

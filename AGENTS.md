@@ -101,7 +101,7 @@ failed task, not a judgement call.
 
 ## Project Map
 
-166 modules under `src/`, listed top-down in the order `kragg.json`'s
+177 modules under `src/`, listed top-down in the order `kragg.json`'s
 `layers` declares — a module may import its own layer or a lower one, never a
 higher one, and the `boundaries` gate enforces that on this repo.
 
@@ -117,11 +117,18 @@ higher one, and the `boundaries` gate enforces that on this repo.
 - `src/commands/` — one module per command: `check`, `security`, `fix`,
   `map`, `spec`, `brief`, `status`, `policyShow`, `doctor`, `coverage`,
   `criticality`, `mutation`, `flaky`, `audit`, `new`, `gen`, `init`, `hook`,
-  plus `hookCheck.ts` (the `RunCheck` injected into the hook). The three
-  commands too large for one file have their own directory: `map/`
-  (`symbols`, `render`), `spec/` (`property`), `mutation/` (`targets`,
-  `stryker`, `report`, `baseline`), `brief/` (`exemptions` — the
-  `## Suppressions` and `## Baseline` sections).
+  plus `hookCheck.ts` (the `RunCheck` injected into the hook), `scope.ts`
+  (the one resolver for `full`/`changed`/`file`, shared by `check` and
+  `security`: what the external tools are invoked on, what the path-aware
+  gates narrow to, when a configuration change makes an incremental run a
+  full one, and which unresolvable selections are exit 2 or exit 3) and
+  `inventory.ts` (the filter and output-budget vocabulary `map`, `spec` and
+  `brief` share). The five commands too large for one file have their own
+  directory: `map/` (`symbols`, `render`, `select`), `spec/` (`property`,
+  `select`), `mutation/` (`targets`, `stryker`, `report`, `baseline`),
+  `flaky/` (`reruns` — the active `--rerun N` sweep, and the rule that only a
+  completed run of the intended suite counts as a sample), `brief/`
+  (`exemptions` — the `## Suppressions` and `## Baseline` sections).
 - `src/hooks/` — `claude.ts` (event dispatch; the deliberate fail-**open**
   exception to everything else here) and `protocol.ts` (narrowing untrusted
   stdin, building the stdout JSON the harness reads).
@@ -157,7 +164,10 @@ higher one, and the `boundaries` gate enforces that on this repo.
   `naming.ts`, `agents.ts`, `guardrails.ts`, `supplyChain.ts`, and
   `templates/` (`cli`, `api`, `mcp`, `common`).
 - `src/coverage/` — `model.ts` is the one line-coverage model; `istanbul.ts`
-  and `lcov.ts` normalize into it; `spans.ts` bounds a function from source.
+  and `lcov.ts` normalize into it; `spans.ts` bounds a function (or a class
+  node) from source, keyed the way `criticality.json` spells its name;
+  `inventory.ts` is the source files a report is expected to describe, so a
+  file the run never loaded counts as uncovered instead of vanishing.
 - `src/analysis/` — the two analysis tiers. `compiler.ts` resolves which
   TypeScript compiler to analyze with; `sourceFile.ts` is the syntax tier's
   entry point, built from `walk.ts`, `modulePath.ts` and `imports.ts`;
@@ -188,7 +198,7 @@ higher one, and the `boundaries` gate enforces that on this repo.
   - `journal.ts` — `.kragg/history.jsonl`, append-only.
   - `runner.ts` — the only approved external-command wrapper, and the one
     legitimate `node:child_process` import in the repo.
-- `test/` — 47 test files using `node:test`, flat, plus `test/fixtures/`
+- `test/` — 53 test files using `node:test`, flat, plus `test/fixtures/`
   and one non-test helper, `conformanceContract.ts`. `conformance.test.ts`
   drives the versioned fixtures under `test/fixtures/conformance/` that pin
   the cross-language contract; see `docs/spec-conformance.md`.
@@ -261,11 +271,19 @@ authority; this list must match it.
 | `hook claude` | hook adapter; reads hook JSON on stdin |
 
 `check` and `security` share `--file`, `--format`, `--max-violations` and
-`--no-journal`. `--changed`, `--since`, `--fail-fast`, `--all` and
-`--update-baseline` are `check`-only. The rest: `fix --file`; `status --format
---last`; `map --write`;
-`brief --since`; `criticality --write --path`; `mutation --path --since --all
+`--no-journal`; of the two, only `check` takes `--changed`, `--since`,
+`--fail-fast`, `--all` and `--update-baseline`. The rest:
+`fix --file`; `status --format --last`; `map`/`spec --path --symbol --changed
+--limit --all --format`, plus `map --write`; `brief --since --path --limit
+--all`; `criticality --write --path`; `mutation --path --since --all
 --update-baseline`; `flaky --last --rerun`.
+
+The three inventories (`map`, `spec`, `brief`) share one filter and budget
+vocabulary in `src/commands/inventory.ts`. Its rule is that a display budget
+is never a scope: `map` derives the whole criticality graph however narrow the
+printed map, `map --write` always persists the complete `.kragg/map.md` (and
+refuses the content filters, as `criticality --write --path` does), and a
+truncated render always names the total it withheld.
 
 Everything the CLI accepts must act, and `--help` (`src/cli/usage.ts`) is the
 list of what it accepts — `test/cli.test.ts` walks the help text against the

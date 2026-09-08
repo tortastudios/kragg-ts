@@ -26,7 +26,12 @@ import { after, describe, it } from "node:test";
 
 import ts from "typescript";
 
-import { buildBrief, NOT_A_REPOSITORY_MESSAGE } from "../src/commands/brief.ts";
+import {
+  buildBrief,
+  JOURNAL_PROVENANCE,
+  NOT_A_REPOSITORY_MESSAGE,
+} from "../src/commands/brief.ts";
+import { gitSha } from "../src/git/changes.ts";
 import { lineFingerprint } from "../src/policy/baseline.ts";
 import { DEFAULT_POLICY, type KraggPolicy } from "../src/policy/policy.ts";
 
@@ -135,7 +140,9 @@ describe("brief: the change set", () => {
       ".kragg/history.jsonl": "{}\n",
     });
     const text = await brief(root);
-    assert.ok(!text.includes(".kragg/"), text);
+    // Not as a changed file. The gate section names `.kragg/history.jsonl` as
+    // its source, which is the opposite problem — see "provenance" below.
+    assert.ok(!text.includes("- .kragg/"), text);
     assert.ok(text.includes("1 source file changed vs HEAD"), text);
   });
 
@@ -218,7 +225,9 @@ describe("brief: the gate section", () => {
   it("says there are no recorded runs when the journal is missing", async () => {
     const text = await brief(repository({}));
     assert.ok(
-      text.includes("## Last gate run\nno recorded runs (run `kragg check`)"),
+      text.includes(
+        `## Last gate run\n${JOURNAL_PROVENANCE}\nno recorded runs (run \`kragg check\`)`,
+      ),
       text,
     );
   });
@@ -239,7 +248,10 @@ describe("brief: the gate section", () => {
       })}\n`,
     });
     const text = await brief(root);
-    assert.ok(text.includes("## Last gate run\nlast run: PASS (check, full mode"), text);
+    assert.ok(
+      text.includes(`## Last gate run\n${JOURNAL_PROVENANCE}\nlast run: PASS (check, full mode`),
+      text,
+    );
   });
 
   it("ends with exactly one trailing newline", async () => {
@@ -345,5 +357,129 @@ describe("brief: exemptions (TOR-1377)", () => {
     const order = headings.map((heading) => text.indexOf(heading));
     assert.ok(order.every((index) => index !== -1), text);
     assert.deepEqual([...order].sort((a, b) => a - b), order, text);
+  });
+});
+
+/**
+ * Where the gate section's numbers come from, and when they stopped applying.
+ *
+ * The section summarises `.kragg/history.jsonl` — a verdict recorded by some
+ * earlier run, at some earlier commit. Printed bare under a list of changed
+ * files it reads as "these files passed", which is a conclusion nobody
+ * reached. So the document has to say what it is reading and, whenever the
+ * recorded run does not describe this tree, that it does not.
+ */
+describe("brief: the gate section names its source and its staleness", () => {
+  /** A journal holding one PASS, recorded at `sha`. */
+  function journal(sha: string | null, dirty = false): string {
+    return `${JSON.stringify({
+      schema_version: 1,
+      ts: "2026-08-06T00:00:00Z",
+      command: "check",
+      mode: "full",
+      git_sha: sha,
+      git_dirty: dirty,
+      passed: true,
+      exit_code: 0,
+      duration_ms: 1500,
+      gates: [],
+    })}\n`;
+  }
+
+  /** A repository that ignores `.kragg/`, so a journal does not dirty the tree. */
+  function quiet(): string {
+    const root = repository({ ".gitignore": ".kragg/\n" });
+    git(root, ["add", "-A"]);
+    git(root, ["commit", "-m", "ignore artifacts"]);
+    return root;
+  }
+
+  it("labels the summary as read from the journal, not run for this brief", async () => {
+    const root = repository({ ".kragg/history.jsonl": journal("abc1234") });
+    const text = await brief(root);
+    assert.ok(text.includes(JOURNAL_PROVENANCE), text);
+    assert.match(JOURNAL_PROVENANCE, /history\.jsonl/);
+    assert.match(JOURNAL_PROVENANCE, /Nothing was re-run/);
+  });
+
+  it("says the recorded PASS predates this change set when the commit differs", async () => {
+    // The dangerous read: `last run: PASS` sitting under files it never saw.
+    const root = repository({
+      "src/a.ts": "export const a = 1;\n",
+      ".kragg/history.jsonl": journal("abc1234"),
+    });
+    const text = await brief(root);
+    assert.ok(text.includes("last run: PASS"), text);
+    assert.match(text, /stale: recorded at abc1234, but HEAD is \w+ — that verdict predates/);
+  });
+
+  it("says so when the journal cannot name the commit it ran against", async () => {
+    const root = repository({ ".kragg/history.jsonl": journal(null) });
+    const text = await brief(root);
+    assert.match(text, /stale: recorded against an unidentified commit/);
+  });
+
+  it("flags a run recorded on a dirty tree even at this very commit", async () => {
+    const root = quiet();
+    const sha = await gitSha(root);
+    assert.ok(sha !== null);
+    write(root, { ".kragg/history.jsonl": journal(sha, true) });
+    const text = await brief(root);
+    assert.match(text, /stale: recorded at \w+ with uncommitted changes/);
+  });
+
+  it("stays quiet when the recorded run really is this commit, cleanly", async () => {
+    const root = quiet();
+    const sha = await gitSha(root);
+    assert.ok(sha !== null);
+    write(root, { ".kragg/history.jsonl": journal(sha) });
+    const text = await brief(root);
+    assert.ok(text.includes("last run: PASS"), text);
+    assert.ok(!text.includes("stale:"), text);
+  });
+});
+
+/**
+ * Narrowing and bounding a large change set.
+ *
+ * Both are DISPLAY concerns, and the assertions below are mostly about what
+ * they must NOT touch: the count in the stats line, and the critical-function
+ * analysis, both read the whole (path-filtered) change set.
+ */
+describe("brief: --path and --limit", () => {
+  const CHANGE: Readonly<Record<string, string>> = {
+    "src/a.ts": "export const a = 1;\n",
+    "src/b.ts": "export const b = 2;\n",
+    "test/a.test.ts": 'it("a", () => {});\n',
+  };
+
+  it("narrows the whole digest to the named paths", async () => {
+    const root = repository(CHANGE);
+    const text = await buildBrief({ root, since: null, policy: POLICY, api: ts, paths: ["test"] });
+    assert.ok(text !== null);
+    assert.ok(text.includes("1 source file changed vs HEAD"), text);
+    assert.ok(text.includes("- test/a.test.ts"), text);
+    assert.ok(!text.includes("- src/a.ts"), text);
+    assert.ok(!text.includes("## Source"), text);
+  });
+
+  it("bounds the listing while the count above it stays the real one", async () => {
+    const root = repository(CHANGE);
+    const text = await buildBrief({ root, since: null, policy: POLICY, api: ts, limit: 1 });
+    assert.ok(text !== null);
+    assert.ok(text.includes("3 source files changed vs HEAD"), text);
+    assert.equal(text.match(/^- /gm)?.length, 1, text);
+    assert.ok(
+      text.includes("showing 1 of 3 changed files — pass --limit 0 for everything"),
+      text,
+    );
+  });
+
+  it("lists everything, and says nothing was withheld, at limit 0", async () => {
+    const root = repository(CHANGE);
+    const text = await buildBrief({ root, since: null, policy: POLICY, api: ts, limit: 0 });
+    assert.ok(text !== null);
+    assert.equal(text.match(/^- /gm)?.length, 3, text);
+    assert.ok(!text.includes("showing"), text);
   });
 });

@@ -37,7 +37,9 @@
 
 import { readFileSync } from "node:fs";
 
+import type { SourceFileEntry } from "../../coverage/inventory.ts";
 import { normalizeIstanbul } from "../../coverage/istanbul.ts";
+import { relativeKey } from "../../coverage/model.ts";
 import type {
   LineCoverageReport,
   MeasuredFile,
@@ -259,6 +261,71 @@ export function coverageTotals(report: LineCoverageReport): CoverageTotals {
     }
   }
   return { totalLines: total, coveredLines: covered, pct: percent(covered, total) };
+}
+
+/**
+ * Totals reconciled against the PROJECT: the number `coverage_fail_under` is
+ * a floor for.
+ *
+ * Two corrections to the raw aggregate, both stated in the result so the
+ * gate's output can say what was counted:
+ *
+ *  - only files under `sourcePaths` count. A runner that instruments the test
+ *    files, or a vendored tree, must not move the project's number;
+ *  - every source file the report does NOT mention counts with all of its
+ *    statement lines uncovered. Every runner reports only what the test run
+ *    loaded, so a file no test imports is absent — not 0% — and a percentage
+ *    over the present files alone is a percentage over whichever files
+ *    happened to load. `coverage/inventory.ts` says where the line count
+ *    for such a file comes from and why that is the honest choice.
+ */
+export interface ProjectTotals extends CoverageTotals {
+  /** Files in the report that lie under the source paths; only these count. */
+  readonly measuredFiles: number;
+  /** Files in the report altogether, for the message when none counts. */
+  readonly reportFiles: number;
+  /** Source files the report does not mention, in inventory order. */
+  readonly unloaded: readonly SourceFileEntry[];
+  /** Source files in the inventory. */
+  readonly sourceFiles: number;
+}
+
+export function projectTotals(
+  report: LineCoverageReport,
+  root: string,
+  sourcePaths: readonly string[],
+  inventory: readonly SourceFileEntry[],
+): ProjectTotals {
+  const prefixes = sourcePaths.map((path) => `${path.replace(/\/+$/u, "")}/`);
+  const measured = new Set<string>();
+  let total = 0;
+  let covered = 0;
+  for (const file of report.files) {
+    const key = relativeKey(file.path, root);
+    if (!prefixes.some((prefix) => key.startsWith(prefix))) {
+      continue;
+    }
+    measured.add(key);
+    for (const count of file.lineHits.values()) {
+      total += 1;
+      if (count > 0) {
+        covered += 1;
+      }
+    }
+  }
+  const unloaded = inventory.filter((entry) => !measured.has(entry.path));
+  for (const entry of unloaded) {
+    total += entry.statementLines;
+  }
+  return {
+    totalLines: total,
+    coveredLines: covered,
+    pct: percent(covered, total),
+    measuredFiles: measured.size,
+    reportFiles: report.files.length,
+    unloaded,
+    sourceFiles: inventory.length,
+  };
 }
 
 /**
