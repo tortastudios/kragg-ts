@@ -609,12 +609,12 @@ describe("temp fixtures", () => {
 /**
  * The writer under every scaffold command.
  *
- * Two of its rules are what make `kragg init` safe to run on a project that
- * already exists: an existing file is left alone unless the caller asked for
- * an overwrite, and a template slot with nothing in it is skipped rather than
- * written as the string `undefined`. `init` above only ever exercises the
- * first; both are pinned here, because "we replaced your file" is the failure
- * that loses work.
+ * It writes what it is handed, and only that: a template slot with nothing in
+ * it is skipped rather than written as the string `undefined`, and the
+ * decision whether a file may be written at all is made BEFORE this function
+ * (`initPlan.ts` for `init`, the empty-directory check for `new`). Both halves
+ * are pinned here, because "we replaced your file" is the failure that loses
+ * work.
  */
 describe("writeFiles", () => {
   it("creates parent directories and returns the paths in sorted order", () => {
@@ -625,20 +625,20 @@ describe("writeFiles", () => {
         "src/deep/nested/mod.ts": "export const a = 1;\n",
         "README.md": "# demo\n",
       },
-      false,
     );
     assert.deepEqual(written, [join(root, "README.md"), join(root, "src/deep/nested/mod.ts")]);
     assert.equal(readFileSync(join(root, "src/deep/nested/mod.ts"), "utf8"), "export const a = 1;\n");
   });
 
-  it("leaves an existing file alone unless the caller asked for an overwrite", () => {
+  it("writes exactly what it is handed, so the caller decides what reaches it", () => {
+    // `writeFiles` has no overwrite switch any more: `init` plans around
+    // existing files before anything is written (see `initPlan.ts`), and
+    // `new` refuses a non-empty directory, so by the time a record reaches
+    // this function every entry in it is meant to land on disk.
     const root = temporaryRoot();
     writeFileSync(join(root, "keep.txt"), "mine");
 
-    assert.deepEqual(writeFiles(root, { "keep.txt": "theirs" }, false), []);
-    assert.equal(readFileSync(join(root, "keep.txt"), "utf8"), "mine");
-
-    assert.deepEqual(writeFiles(root, { "keep.txt": "theirs" }, true), [join(root, "keep.txt")]);
+    assert.deepEqual(writeFiles(root, { "keep.txt": "theirs" }), [join(root, "keep.txt")]);
     assert.equal(readFileSync(join(root, "keep.txt"), "utf8"), "theirs");
   });
 
@@ -651,7 +651,7 @@ describe("writeFiles", () => {
     Object.assign(files, { "gap.ts": undefined });
     assert.deepEqual(Object.keys(files).sort(), ["gap.ts", "keep.ts"]);
 
-    assert.deepEqual(writeFiles(root, files, true), [join(root, "keep.ts")]);
+    assert.deepEqual(writeFiles(root, files), [join(root, "keep.ts")]);
     assert.equal(existsSync(join(root, "gap.ts")), false, "an empty slot must not become a file");
   });
 });

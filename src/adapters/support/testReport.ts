@@ -101,10 +101,9 @@ export function stackLocation(
   let fallback: StackLocation | undefined;
   STACK_FRAME.lastIndex = 0;
   for (const match of stack.matchAll(STACK_FRAME)) {
-    const [, file, line, column] = match;
-    if (file === undefined || line === undefined || column === undefined) {
-      continue;
-    }
+    // Every capture group in `STACK_FRAME` is mandatory, so a match always
+    // carries all three; the defaults only satisfy `noUncheckedIndexedAccess`.
+    const [, file = "", line = "0", column = "0"] = match;
     const found: StackLocation = {
       file,
       line: Number.parseInt(line, 10),

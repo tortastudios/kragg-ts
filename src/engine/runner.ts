@@ -255,7 +255,8 @@ export function runCommand(
   cwd: string,
   options: RunCommandOptions = {},
 ): Promise<CompletedCommand> {
-  if (command[0] === undefined) {
+  const first = command[0];
+  if (first === undefined) {
     throw new TypeError(`runCommand(${name}): command must not be empty`);
   }
 
@@ -277,10 +278,10 @@ export function runCommand(
   // `command` below is the ORIGINAL argv — what callers asked for and what
   // reports quote. `plan.command` is what the OS is given, and differs only
   // on Windows, and only in argv[0]. See `launchPlan`.
-  const [file, ...args] = plan.command;
-  if (file === undefined) {
-    throw new TypeError(`runCommand(${name}): command must not be empty`);
-  }
+  // `launchPlan` never shortens the argv, so argv[0] is always there; the
+  // default only satisfies `noUncheckedIndexedAccess` without a second guard
+  // that could never run.
+  const [file = first, ...args] = plan.command;
 
   return new Promise<CompletedCommand>((resolve) => {
     // THE one sanctioned subprocess call in the codebase. `kragg.json` bans
