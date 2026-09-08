@@ -40,6 +40,7 @@ import {
   MAP_RELATIVE,
   runMap,
   writeMap,
+  type MapOptions,
 } from "../src/commands/map.ts";
 import { callSignature, clamp, compact, typeParameters } from "../src/commands/map/render.ts";
 import { criticalityFreshness } from "../src/gates/criticality.ts";
@@ -65,6 +66,43 @@ function project(files: Readonly<Record<string, string>>): string {
 }
 
 const POLICY: KraggPolicy = { ...DEFAULT_POLICY, sourcePaths: ["src"] };
+
+/** Exit code plus both streams from one in-process `runMap`. */
+interface MapRun {
+  readonly code: number;
+  readonly out: string;
+  readonly err: string;
+}
+
+/**
+ * Run `runMap` with both streams captured.
+ *
+ * In-process rather than spawned, because these cases are about the document
+ * `map` produces; `test/cli.test.ts` covers the flags and exit codes through
+ * a real process. Capturing stderr matters as much as stdout here: the
+ * `--write` refusal and the JSON-safe `Wrote` notice both live there.
+ */
+async function runMapCapturing(options: MapOptions): Promise<MapRun> {
+  const out: string[] = [];
+  const err: string[] = [];
+  const realOut = process.stdout.write;
+  const realErr = process.stderr.write;
+  process.stdout.write = (chunk: string | Uint8Array): boolean => {
+    out.push(String(chunk));
+    return true;
+  };
+  process.stderr.write = (chunk: string | Uint8Array): boolean => {
+    err.push(String(chunk));
+    return true;
+  };
+  try {
+    const code = await runMap(options);
+    return { code, out: out.join(""), err: err.join("") };
+  } finally {
+    process.stdout.write = realOut;
+    process.stderr.write = realErr;
+  }
+}
 
 function mapOf(files: Readonly<Record<string, string>>): string[] {
   return buildMap(project(files), POLICY, ts);
@@ -197,10 +235,11 @@ describe("map: signatures", () => {
     const lines = body({
       "src/a.ts": `export type Small = "a" | "b";\nexport type Big = ${long};\n`,
     });
+    // Alphabetical, not source order — see "map: ordering" below.
     assert.deepEqual(lines, [
       "src/a",
-      '  type Small = "a" | "b"',
       "  type Big",
+      '  type Small = "a" | "b"',
     ]);
   });
 
@@ -229,7 +268,7 @@ describe("map: docs and risk flags", () => {
       "src/a.ts":
         "/** @internal */\nexport function tagged(): void {}\n// plain\nexport function plain(): void {}\n",
     });
-    assert.deepEqual(lines, ["src/a", "  fn tagged(): void", "  fn plain(): void"]);
+    assert.deepEqual(lines, ["src/a", "  fn plain(): void", "  fn tagged(): void"]);
   });
 
   it("does not attribute a file header comment to the first declaration", () => {
@@ -313,20 +352,11 @@ describe("map: criticality derivation", () => {
     include: ["src"],
   });
 
-  /** Run `runMap` with stdout captured, so a suite run stays readable. */
+  /** Run `runMap` unbudgeted with stdout captured, so a suite run stays readable. */
   async function mapOutput(root: string): Promise<string> {
-    const chunks: string[] = [];
-    const real = process.stdout.write;
-    process.stdout.write = (chunk: string | Uint8Array): boolean => {
-      chunks.push(String(chunk));
-      return true;
-    };
-    try {
-      assert.equal(await runMap({ root, policy: POLICY }), 0);
-    } finally {
-      process.stdout.write = real;
-    }
-    return chunks.join("");
+    const result = await runMapCapturing({ root, policy: POLICY, limit: 0 });
+    assert.equal(result.code, 0);
+    return result.out;
   }
 
   it("derives the flags rather than showing none, and again after an edit", async () => {
@@ -384,6 +414,233 @@ describe("map: writing", () => {
     const output = join(root, MAP_RELATIVE);
     writeMap(["one", "two"], output);
     assert.equal(readFileSync(output, "utf8"), "one\ntwo\n");
+  });
+});
+
+/**
+ * Filters and the output budget.
+ *
+ * The failure being fixed is that a 95,000-character map is one nobody reads,
+ * so the whole point is a SMALLER answer — which makes the dangerous mistake
+ * an answer that is smaller than it claims. Three properties therefore run
+ * through every case here: the header counts the SELECTION and not the
+ * printed window, a trimmed render says on its own line that it was trimmed,
+ * and nothing outside stdout is narrowed by any of it — the derived
+ * criticality graph and `.kragg/map.md` stay whole.
+ */
+describe("map: filters, ordering and the output budget", () => {
+  const TSCONFIG = JSON.stringify({
+    compilerOptions: { target: "ES2022", module: "ESNext", strict: true, noEmit: true },
+    include: ["src"],
+  });
+
+  /** Two modules, declared out of alphabetical order on purpose. */
+  const FILES: Readonly<Record<string, string>> = {
+    "tsconfig.json": TSCONFIG,
+    "src/alpha.ts": "export function zulu(): void {}\nexport function alpha(): void {}\n",
+    "src/nested/beta.ts": "export const beta = 1;\nexport const acacia = 2;\n",
+  };
+
+  it("orders by path and then by name, in text and in JSON alike", async () => {
+    const root = project(FILES);
+    const text = await runMapCapturing({ root, policy: POLICY, limit: 0 });
+    assert.equal(text.code, 0);
+    assert.deepEqual(text.out.trimEnd().split("\n"), [
+      "map: 4 exported symbols across 2 modules",
+      "src/alpha",
+      "  fn alpha(): void",
+      "  fn zulu(): void",
+      "src/nested/beta",
+      "  const acacia",
+      "  const beta",
+    ]);
+
+    // The JSON entry order is the text order, and a second run is byte-identical.
+    const json = await runMapCapturing({ root, policy: POLICY, limit: 0, format: "json" });
+    const parsed = JSON.parse(json.out) as { entries: { name: string; file: string }[] };
+    assert.deepEqual(
+      parsed.entries.map((entry) => `${entry.file}#${entry.name}`),
+      ["src/alpha.ts#alpha", "src/alpha.ts#zulu", "src/nested/beta.ts#acacia", "src/nested/beta.ts#beta"],
+    );
+    const again = await runMapCapturing({ root, policy: POLICY, limit: 0 });
+    assert.equal(again.out, text.out);
+  });
+
+  it("selects by --path, whether the caller names the file or the module", async () => {
+    const root = project(FILES);
+    for (const path of ["src/nested", "src/nested/beta", "src/nested/beta.ts"]) {
+      const result = await runMapCapturing({ root, policy: POLICY, limit: 0, paths: [path] });
+      assert.equal(result.code, 0, path);
+      assert.match(result.out, /^map: 2 exported symbols across 1 modules\n/, path);
+      assert.ok(!result.out.includes("src/alpha"), path);
+    }
+  });
+
+  it("unions repeated --path values and intersects them with --symbol", async () => {
+    const root = project(FILES);
+    const both = await runMapCapturing({
+      root,
+      policy: POLICY,
+      limit: 0,
+      paths: ["src/alpha", "src/nested"],
+    });
+    assert.match(both.out, /^map: 4 exported symbols/);
+    const narrowed = await runMapCapturing({
+      root,
+      policy: POLICY,
+      limit: 0,
+      paths: ["src/alpha", "src/nested"],
+      symbols: ["beta"],
+    });
+    assert.match(narrowed.out, /^map: 1 exported symbols across 1 modules\n/);
+    assert.ok(narrowed.out.includes("const beta"), narrowed.out);
+  });
+
+  it("matches --symbol by bare name and by the exact module#name", async () => {
+    const root = project(FILES);
+    const bare = await runMapCapturing({ root, policy: POLICY, limit: 0, symbols: ["zulu"] });
+    assert.match(bare.out, /^map: 1 exported symbols across 1 modules\n/);
+    const qualified = await runMapCapturing({
+      root,
+      policy: POLICY,
+      limit: 0,
+      symbols: ["src/nested/beta#acacia"],
+    });
+    assert.match(qualified.out, /^map: 1 exported symbols across 1 modules\n/);
+    assert.ok(qualified.out.includes("const acacia"), qualified.out);
+    // The `#` form is exact: the same name under another module matches nothing.
+    const wrong = await runMapCapturing({
+      root,
+      policy: POLICY,
+      limit: 0,
+      symbols: ["src/alpha#acacia"],
+    });
+    assert.equal(wrong.out, "no symbols match the selection\n");
+  });
+
+  it("says nothing matched, and exits 0, rather than looking like an empty repo", async () => {
+    const root = project(FILES);
+    const text = await runMapCapturing({ root, policy: POLICY, symbols: ["nosuchthing"] });
+    assert.equal(text.code, 0);
+    assert.equal(text.out, "no symbols match the selection\n");
+
+    // An empty repository is a different sentence, because it calls for a
+    // different next move than a filter that missed.
+    const empty = await runMapCapturing({ root: project({ "tsconfig.json": TSCONFIG }), policy: POLICY });
+    assert.equal(empty.out, "no exported symbols found\n");
+  });
+
+  it("still answers in JSON when the selection is empty", async () => {
+    const root = project(FILES);
+    const result = await runMapCapturing({
+      root,
+      policy: POLICY,
+      format: "json",
+      symbols: ["nosuchthing"],
+    });
+    assert.equal(result.code, 0);
+    assert.deepEqual(JSON.parse(result.out), {
+      command: "map",
+      total: 0,
+      shown: 0,
+      truncated: false,
+      modules: 0,
+      entries: [],
+    });
+  });
+
+  it("reports the total it withheld, in both formats", async () => {
+    const root = project(FILES);
+    const text = await runMapCapturing({ root, policy: POLICY, limit: 1 });
+    assert.match(text.out, /^map: 4 exported symbols across 2 modules\n/);
+    assert.ok(
+      text.out.trimEnd().endsWith("showing 1 of 4 exported symbols — pass --limit 0 for everything"),
+      text.out,
+    );
+
+    const json = await runMapCapturing({ root, policy: POLICY, limit: 1, format: "json" });
+    const parsed = JSON.parse(json.out) as {
+      total: number;
+      shown: number;
+      truncated: boolean;
+      entries: unknown[];
+    };
+    assert.equal(parsed.total, 4);
+    assert.equal(parsed.shown, 1);
+    assert.equal(parsed.truncated, true);
+    assert.equal(parsed.entries.length, 1);
+  });
+
+  it("prints everything, and says nothing was withheld, at --limit 0", async () => {
+    const root = project(FILES);
+    const text = await runMapCapturing({ root, policy: POLICY, limit: 0 });
+    assert.ok(!text.out.includes("showing"), text.out);
+    const json = await runMapCapturing({ root, policy: POLICY, limit: 0, format: "json" });
+    const parsed = JSON.parse(json.out) as { shown: number; truncated: boolean };
+    assert.equal(parsed.shown, 4);
+    assert.equal(parsed.truncated, false);
+  });
+
+  it("writes the COMPLETE .kragg/map.md even when the terminal was budgeted", async () => {
+    // The point of the whole change: a display budget is not a scope. What a
+    // session start loads must not shrink because someone ran with --limit 1.
+    const root = project(FILES);
+    const result = await runMapCapturing({ root, policy: POLICY, limit: 1, write: true });
+    assert.equal(result.code, 0);
+    assert.match(result.out, /showing 1 of 4 exported symbols/);
+    const written = readFileSync(join(root, MAP_RELATIVE), "utf8");
+    assert.deepEqual(written.trimEnd().split("\n"), [
+      "map: 4 exported symbols across 2 modules",
+      "src/alpha",
+      "  fn alpha(): void",
+      "  fn zulu(): void",
+      "src/nested/beta",
+      "  const acacia",
+      "  const beta",
+    ]);
+    assert.ok(!written.includes("showing"), written);
+  });
+
+  it("keeps the `Wrote` notice off a JSON stdout", async () => {
+    const root = project(FILES);
+    const result = await runMapCapturing({ root, policy: POLICY, write: true, format: "json" });
+    JSON.parse(result.out); // throws if the notice leaked onto the document
+    assert.match(result.err, /^Wrote .*map\.md\n$/);
+  });
+
+  it("refuses --write beside a content filter instead of persisting a partial map", async () => {
+    const root = project(FILES);
+    const result = await runMapCapturing({ root, policy: POLICY, write: true, paths: ["src/alpha"] });
+    assert.equal(result.code, 2);
+    assert.match(result.err, /--write cannot be combined with --path, --symbol or --changed/);
+    assert.throws(() => readFileSync(join(root, MAP_RELATIVE), "utf8"));
+  });
+
+  it("derives the WHOLE project's criticality graph for a one-path map", async () => {
+    // Enforcement reads `.kragg/criticality.json`. If a `--path` narrowed the
+    // derivation, `critical-tests` and `critical-coverage` would go quiet
+    // about everything outside it — a display filter silently weakening a gate.
+    const callers = ["one", "two", "three", "four", "five"];
+    const root = project({
+      "tsconfig.json": TSCONFIG,
+      "src/hub.ts":
+        "export function helper(): number {\n  return 1;\n}\n" +
+        callers
+          .map((name) => `export function ${name}(): number {\n  return helper();\n}\n`)
+          .join(""),
+      "src/other.ts": "export const other = 1;\n",
+    });
+    const result = await runMapCapturing({ root, policy: POLICY, paths: ["src/other"] });
+    assert.equal(result.code, 0);
+    assert.ok(!result.out.includes("src/hub"), result.out);
+
+    const derived = JSON.parse(
+      readFileSync(join(root, ".kragg", "criticality.json"), "utf8"),
+    ) as { name: string }[];
+    assert.ok(
+      derived.some((record) => record.name === "src/hub#helper"),
+      "the filtered-out module must still be in the derived graph",
+    );
   });
 });
 

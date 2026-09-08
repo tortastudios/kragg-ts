@@ -31,12 +31,19 @@ import { after, describe, it } from "node:test";
 
 import ts from "typescript";
 
-import { buildSpec, renderPropertyReport, renderSpec } from "../src/commands/spec.ts";
+import {
+  buildSpec,
+  renderPropertyReport,
+  renderSpec,
+  runSpec,
+  type SpecOptions,
+} from "../src/commands/spec.ts";
 import {
   propertyCoverage,
   usesFastCheck,
   type PropertyReport,
 } from "../src/commands/spec/property.ts";
+import { DEFAULT_POLICY, type KraggPolicy } from "../src/policy/policy.ts";
 
 const roots: string[] = [];
 
@@ -59,6 +66,43 @@ function project(files: Readonly<Record<string, string>>): string {
 
 function specLines(files: Readonly<Record<string, string>>): string[] {
   return renderSpec(buildSpec(project(files), ["test"], ts));
+}
+
+const POLICY: KraggPolicy = { ...DEFAULT_POLICY, sourcePaths: ["src"], testPaths: ["test"] };
+
+/** Exit code plus both streams from one in-process `runSpec`. */
+interface SpecRun {
+  readonly code: number;
+  readonly out: string;
+  readonly err: string;
+}
+
+/**
+ * Run `runSpec` with both streams captured.
+ *
+ * In-process: these cases are about the document, and `test/cli.test.ts`
+ * drives the same flags through a real process for the exit codes.
+ */
+async function runSpecCapturing(options: SpecOptions): Promise<SpecRun> {
+  const out: string[] = [];
+  const err: string[] = [];
+  const realOut = process.stdout.write;
+  const realErr = process.stderr.write;
+  process.stdout.write = (chunk: string | Uint8Array): boolean => {
+    out.push(String(chunk));
+    return true;
+  };
+  process.stderr.write = (chunk: string | Uint8Array): boolean => {
+    err.push(String(chunk));
+    return true;
+  };
+  try {
+    const code = await runSpec({ policy: POLICY, api: ts, ...options });
+    return { code, out: out.join(""), err: err.join("") };
+  } finally {
+    process.stdout.write = realOut;
+    process.stderr.write = realErr;
+  }
 }
 
 describe("spec: the documentation tree", () => {
@@ -364,3 +408,153 @@ function available(
   assert.ok(report.available, "expected a measurable project");
   return report.rows;
 }
+
+/**
+ * Filters and the output budget.
+ *
+ * `spec` said outright that nothing here was capped, and on this repository
+ * that came to 1,335 cases and ~86,000 characters — a document whose only
+ * possible reader is one who never opens it. The cases below pin the three
+ * properties that make a smaller answer safe: the header counts the
+ * SELECTION, a trimmed tree says so on its own line, and an empty selection
+ * is a sentence rather than a suite that looks like it has no tests.
+ */
+describe("spec: filters and the output budget", () => {
+  const FILES: Readonly<Record<string, string>> = {
+    "test/a.test.ts": [
+      'describe("widgets", () => {',
+      '  it("keeps the widget", () => {});',
+      '  it("drops the widget", () => {});',
+      "});",
+      'it("unrelated", () => {});',
+      "",
+    ].join("\n"),
+    "test/nested/b.test.ts": 'it.skip("lonely", () => {});\n',
+  };
+
+  /** Just the spec tree, without the always-present property section. */
+  function tree(out: string): string[] {
+    return out
+      .trimEnd()
+      .split("\n")
+      .filter((line) => !line.startsWith("property-based coverage:"));
+  }
+
+  it("selects by --path, by directory or by file", async () => {
+    const root = project(FILES);
+    for (const path of ["test/nested", "test/nested/b.test.ts"]) {
+      const result = await runSpecCapturing({ root, limit: 0, paths: [path] });
+      assert.equal(result.code, 0, path);
+      assert.deepEqual(
+        tree(result.out),
+        [
+          "spec: 1 tests across 1 files (1 skipped)",
+          "test/nested/b.test.ts",
+          "  - lonely  [skip]",
+        ],
+        path,
+      );
+    }
+  });
+
+  it("matches --symbol as a case-insensitive substring of a case title", async () => {
+    const root = project(FILES);
+    const result = await runSpecCapturing({ root, limit: 0, symbols: ["KEEPS THE"] });
+    assert.deepEqual(tree(result.out), [
+      "spec: 1 tests across 1 files",
+      "test/a.test.ts",
+      "  widgets",
+      "    - keeps the widget",
+    ]);
+  });
+
+  it("matches --symbol against an enclosing describe, so a group comes back whole", async () => {
+    const root = project(FILES);
+    const result = await runSpecCapturing({ root, limit: 0, symbols: ["widgets"] });
+    // Both cases inside `describe("widgets")`, and not the top-level one.
+    assert.deepEqual(tree(result.out), [
+      "spec: 2 tests across 1 files",
+      "test/a.test.ts",
+      "  widgets",
+      "    - keeps the widget",
+      "    - drops the widget",
+    ]);
+  });
+
+  it("says nothing matched, and exits 0, without claiming the suite is empty", async () => {
+    const root = project(FILES);
+    const result = await runSpecCapturing({ root, symbols: ["nosuchtest"] });
+    assert.equal(result.code, 0);
+    assert.deepEqual(tree(result.out), ["no tests match the selection"]);
+    // A project with no tests at all is a different sentence.
+    assert.deepEqual(tree((await runSpecCapturing({ root: project({}) })).out), ["no tests found"]);
+  });
+
+  it("counts the selection in the header and names what it withheld", async () => {
+    const root = project(FILES);
+    const result = await runSpecCapturing({ root, limit: 1 });
+    assert.deepEqual(tree(result.out), [
+      "spec: 4 tests across 2 files (1 skipped)",
+      "test/a.test.ts",
+      "  widgets",
+      "    - keeps the widget",
+      "showing 1 of 4 tests — pass --limit 0 for everything",
+    ]);
+  });
+
+  it("keeps the JSON entry order identical to the text order, run after run", async () => {
+    const root = project(FILES);
+    const text = await runSpecCapturing({ root, limit: 0 });
+    const json = await runSpecCapturing({ root, limit: 0, format: "json" });
+    const parsed = JSON.parse(json.out) as { entries: { file: string; title: string }[] };
+    assert.deepEqual(
+      parsed.entries.map((entry) => `${entry.file}: ${entry.title}`),
+      [
+        "test/a.test.ts: keeps the widget",
+        "test/a.test.ts: drops the widget",
+        "test/a.test.ts: unrelated",
+        "test/nested/b.test.ts: lonely",
+      ],
+    );
+    assert.equal((await runSpecCapturing({ root, limit: 0 })).out, text.out);
+  });
+
+  it("carries the totals, the suites and the property summary in JSON", async () => {
+    const root = project(FILES);
+    const result = await runSpecCapturing({ root, limit: 2, format: "json" });
+    const parsed = JSON.parse(result.out) as {
+      command: string;
+      total: number;
+      shown: number;
+      truncated: boolean;
+      files: number;
+      skipped: number;
+      entries: { suites: string[]; title: string; line: number; skipped: boolean }[];
+      property: { available: boolean; reason: string };
+    };
+    assert.equal(parsed.command, "spec");
+    assert.equal(parsed.total, 4);
+    assert.equal(parsed.shown, 2);
+    assert.equal(parsed.truncated, true);
+    assert.equal(parsed.files, 2);
+    assert.equal(parsed.skipped, 1);
+    assert.deepEqual(parsed.entries[0]?.suites, ["widgets"]);
+    assert.equal(parsed.entries[0]?.line, 2);
+    // Unavailable keeps its reason and reports no counts: absent is not zero.
+    assert.equal(parsed.property.available, false);
+    assert.match(parsed.property.reason, /fast-check/);
+  });
+
+  it("still answers in JSON when the selection is empty", async () => {
+    const result = await runSpecCapturing({
+      root: project(FILES),
+      format: "json",
+      symbols: ["nosuchtest"],
+    });
+    assert.equal(result.code, 0);
+    const parsed = JSON.parse(result.out) as { total: number; shown: number; entries: unknown[] };
+    assert.equal(parsed.total, 0);
+    assert.equal(parsed.shown, 0);
+    assert.deepEqual(parsed.entries, []);
+  });
+});

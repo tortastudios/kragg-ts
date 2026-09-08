@@ -52,8 +52,15 @@ kragg security                 # the security subset, cheap enough for every pus
 kragg fix                      # format and safely auto-fix lint findings
 
 kragg map                      # exported symbols — what already exists
+kragg map --path src/analysis  # ...just this directory or file (repeatable)
+kragg map --symbol runCommand  # ...just this exported name, or module#name
+kragg map --changed            # ...just what changed against HEAD
+kragg map --limit 0            # the full export (--all is the same thing)
+kragg map --format json        # entries plus total / shown / truncated
 kragg spec                     # the test suite rendered as a documentation tree
+kragg spec --symbol coverage   # ...cases whose title or describe says this
 kragg brief                    # a reviewable digest of the change set
+kragg brief --path src/gates   # ...restricted to one area of the change set
 kragg status                   # what failed last run, without re-running
 kragg policy show              # the effective policy, resolved
 kragg doctor                   # environment diagnostics with exact fixes
@@ -196,6 +203,33 @@ belongs.
 The tool holds the memory the agent lacks: `kragg map` is the inventory of what
 exists, `.kragg/history.jsonl` remembers runs, `CRITICALITY.md` remembers risk,
 and `kragg brief` renders the change set legible to a human reviewer.
+
+Memory the agent cannot afford to read is memory it does not have, so the
+inventories are **focused and bounded**. `map`, `spec` and `brief` take
+`--path` (repeatable file or directory prefixes), `map` and `spec` also take
+`--symbol` (an exported name, `Class.method`, or the exact `<module>#<name>`
+for `map`; a case-insensitive substring of a test or `describe` title for
+`spec`) and `--changed` (files changed against `HEAD`, the same detection
+`check --changed` uses). All three take `--limit <n>`, which defaults to 100
+entries — `--limit 0` or `--all` restores the complete export. `map` and
+`spec` also take `--format json`, which carries `total`, `shown` and
+`truncated` beside the entries. Ordering is deterministic: by path, then by
+name for `map`, and by path, then source order for `spec`, so the JSON entry
+order is the text order and two runs over one tree are byte-identical.
+
+**A display budget is never a scope.** A truncated text render ends with
+`showing N of M … — pass --limit 0 for everything`, so a bounded view cannot
+be read as a complete one; `map` still derives the whole project's criticality
+graph however narrow the printed map, so no gate goes quieter; and
+`map --write` always writes the complete `.kragg/map.md`, refusing `--path`,
+`--symbol` and `--changed` outright — a scoped map injected at session start
+does not read as "part of the map", it reads as "nothing else exists".
+`--limit` is allowed with `--write` and trims only the terminal.
+
+`kragg brief` never runs a gate. Its `## Last gate run` section is a summary of
+`.kragg/history.jsonl`, says so on its own line, and states when the recorded
+verdict was reached at another commit or on a dirty tree — so a stale `PASS`
+cannot be read as "this change set was checked".
 
 Scaffolding emits `AGENTS.md` as the canonical agent contract — read by Codex,
 Cursor and Gemini CLI, and by Claude Code via a `CLAUDE.md` pointer — plus

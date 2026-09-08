@@ -344,7 +344,7 @@ A conformance runner must not flag these; a suite that diffs the two
 implementations naively will flag every one. Rows 1–9 are this repository's
 original table, re-verified against both trees while the spec was written; rows
 10–12 were added by that verification and are also SPEC.md section 10's rows
-10–12; rows 13–19 were introduced by TOR-1358, TOR-1363, TOR-1361 and TOR-1369 on this branch. Fixtures that exercise a row carry a `divergences` entry naming its id.
+10–12; rows 13–22 were introduced by TOR-1358, TOR-1363, TOR-1361, TOR-1369 and TOR-1375 on this branch. Fixtures that exercise a row carry a `divergences` entry naming its id.
 
 | # | Divergence | Why it is intentional |
 | --- | --- | --- |
@@ -367,6 +367,9 @@ original table, re-verified against both trees while the spec was written; rows
 | 17 | `criticality --write --path` is exit 2 | Python writes whatever the scoped analysis produced. A partial `.kragg/criticality.json` is not read as partial: `critical-tests` and `critical-coverage` would treat every function outside the scope as uncritical. Refusing keeps the file whole-project by construction. |
 | 18 | `check --file` with `--changed`/`--since` is exit 2 | Python's `_check_targets` takes the git branch first and drops `--file` on the floor. Same file set either way; kragg-ts declines to guess which one the caller meant. |
 | 19 | `check` with an empty `--changed` set under `--format json` | Python prints `no changed Python files` in both formats. kragg-ts prints that only for text and emits the ordinary payload with `gates: []` for JSON, so every `--format json` path is parseable. No key is added, and the text path is byte-identical apart from the language name. |
+| 20 | `map` orders symbols by (path, name); Python's `cmd_map` emits source order | With a display budget in play, source order decides which symbols fall inside the printed window by where their author happened to declare them, and re-ordering a file produces a spurious `.kragg/map.md` diff. Sorting by qualified name still places a class before its own methods, which the deeper method indent depends on. |
+| 21 | `map`, `spec` and `brief` take `--path` / `--symbol` / `--changed` / `--limit` / `--all` / `--format`; Python's have no filters and no budget | Unfiltered, this repository's `map` and `spec` are ~95,000 and ~86,000 characters, which an agent cannot afford to read. The filters are DISPLAY-only: `map` still derives the whole criticality graph, `map --write` still writes the complete `.kragg/map.md` (and refuses the content filters, as row 17 does for `criticality`), no gate reads any of it, and a truncated render names the total it withheld. `--limit 0` / `--all` reproduces the unbudgeted output. No fixture covers `map`/`spec`/`brief`, so no golden moves. |
+| 22 | `brief` labels its `## Last gate run` section as read from `.kragg/history.jsonl`, and says when the recorded verdict is stale | Python prints the journal summary bare. Under a list of changed files that reads as "these files passed" — a conclusion nobody reached. kragg-ts names the source, states that nothing was re-run, and prints the recorded commit against `HEAD` whenever they differ or the tree was dirty. |
 
 Four defects found in the Python implementation during the port are recorded in
 [KNOWN_LIMITATIONS.md](../KNOWN_LIMITATIONS.md#found-in-the-python-implementation-during-this-port).

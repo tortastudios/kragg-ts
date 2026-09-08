@@ -44,6 +44,44 @@ a previously green run red — see [Gate additions](#gate-additions) below.
   **No threshold, grade band, profile or default was changed**: the proposals
   the measurements support are written up in `docs/calibration.md` and marked
   as not applied, because each one is a number Python kragg also ships.
+- **TOR-1375** — the agent-facing inventories are focused and bounded.
+  `kragg map` and `kragg spec` on this repository printed 94,729 and 86,284
+  characters, with no way to ask for one directory, one symbol or just what
+  changed — an inventory too expensive to read is one an agent skips, which is
+  the reinvention `map` exists to prevent arriving through the back door.
+  `map`, `spec` and `brief` now take `--path <p>` (repeatable file or
+  directory prefixes); `map` and `spec` also take `--symbol <name>` (for
+  `map`, an exported name, `Class.method`, or the exact `<module>#<name>`; for
+  `spec`, a case-insensitive substring of a test or `describe` title) and
+  `--changed` (files changed against `HEAD`, through the same
+  `src/git/changes.ts` `check --changed` uses — outside a repository it is
+  exit 3 and a message, never an empty inventory). All three take `--limit
+  <n>`, defaulting to 100 entries, with `--limit 0` or `--all` for the
+  deliberate full export; `map` and `spec` also take `--format text|json`,
+  which carries `total`, `shown` and `truncated` beside the entries. Ordering
+  is deterministic — by path then name for `map`, by path then source order
+  for `spec` — so the JSON entry order is the text order and two runs over one
+  tree are byte-identical. The default `map` is now 11,536 characters and the
+  default `spec` 6,977.
+
+  **A display budget is never a scope.** A truncated text render ends with
+  `showing N of M … — pass --limit 0 for everything`; `map` still derives the
+  whole project's criticality graph however narrow the printed map, so no gate
+  can be quietened by asking for less; `map --write` always writes the
+  complete `.kragg/map.md` and refuses `--path`, `--symbol` and `--changed`
+  outright (a scoped map injected at session start reads as "nothing else
+  exists", the same reasoning as `criticality --write --path`), while
+  `--limit` is allowed and trims only the terminal. An empty selection prints
+  "no symbols/tests match the selection" and exits 0, distinct from a project
+  that has none; in JSON it is a valid object with `total: 0`.
+
+  `kragg brief` now says where its gate section comes from: `## Last gate run`
+  is labelled as a summary of `.kragg/history.jsonl` that was not re-run for
+  the brief, and it states when the recorded verdict was reached at another
+  commit, against an unidentifiable one, or on a dirty tree — so a stale
+  `PASS` above a list of changed files can no longer be read as "this change
+  set was checked". No change to the report JSON, the criticality sidecar or
+  any exit code.
 
 ### Fixed
 

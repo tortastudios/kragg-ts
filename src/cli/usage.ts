@@ -66,11 +66,28 @@ Options for status:
   --format text|json     output format (default: text)
   --last <n>             how many runs to read (default: 10)
 
-Options for map:
-  --write                also write the inventory to .kragg/map.md
+Options for map and spec:
+  --path <path>          only this file or directory (repeatable)
+  --symbol <name>        map: an exported name, Class.method, or the exact
+                         <module>#<name>; spec: a case-insensitive substring
+                         of a test or describe title (repeatable)
+  --changed              only files changed against HEAD
+  --limit <n>            how many entries to print (default: 100)
+  --all                  print every entry (the same as --limit 0)
+  --format text|json     output format (default: text); json carries total,
+                         shown and truncated beside the entries
+
+Options for map only:
+  --write                also write the FULL inventory to .kragg/map.md
+                         (not with --path, --symbol or --changed, whose
+                         output is a view and not the project's inventory;
+                         --limit is fine and never trims the file)
 
 Options for brief:
   --since <ref>          digest the changes since <ref>
+  --path <path>          only changed files under this path (repeatable)
+  --limit <n>            how many changed files to list (default: 100)
+  --all                  list every changed file (the same as --limit 0)
 
 Options for criticality:
   --write                write CRITICALITY.md and .kragg/criticality.json
