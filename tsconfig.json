@@ -56,6 +56,11 @@
 
     "noEmit": true
   },
-  "include": ["src/**/*.ts", "test/**/*.ts"],
+  /* `scripts/` is not shipped (tsconfig.build.json compiles `src` only) and is
+     not `source_paths`, but it imports `src/` directly and must not be allowed
+     to rot: a maintenance script that no longer compiles is a script nobody
+     can re-run, and `scripts/calibrate.ts` exists precisely so a measurement
+     can be re-derived later. */
+  "include": ["src/**/*.ts", "test/**/*.ts", "scripts/**/*.ts"],
   "exclude": ["node_modules", "dist"]
 }

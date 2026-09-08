@@ -187,10 +187,22 @@ higher one, and the `boundaries` gate enforces that on this repo.
   and one non-test helper, `conformanceContract.ts`. `conformance.test.ts`
   drives the versioned fixtures under `test/fixtures/conformance/` that pin
   the cross-language contract; see `docs/spec-conformance.md`.
+  `fixtures/knownDefects.ts` is the known-defect corpus for the metric gates —
+  one measured defect per gate plus a clean control — asserted by
+  `knownDefects.test.ts`. It exists so a threshold change cannot stop detecting
+  a real defect quietly; update it together with `docs/calibration.md`, never
+  by deleting an assertion.
+- `scripts/` — maintenance tooling, not shipped (`tsconfig.build.json` compiles
+  `src` only) but covered by `pnpm run typecheck`. `calibrate.ts` measures the
+  metric gates against a list of sample projects; see `docs/calibration.md`.
 - `docs/architecture.md`: the ideas behind the module layout. Read it first.
 - `docs/dependency-policy.md`: the standing supply-chain policy. Read it
   before touching `package.json`.
 - `docs/spec-conformance.md`: the contract with the Python implementation.
+- `docs/calibration.md`: what the metric gates' ported thresholds actually do
+  on real TypeScript, and how to re-derive the numbers. Read it before
+  proposing a threshold change — and note that changing one is a policy and
+  conformance decision, not an implementation choice.
 - `kragg.json`: this repo's own policy — kragg checks itself with it.
 - `pnpm-workspace.yaml`: pnpm settings, including all supply-chain hardening.
   Note that `.npmrc` is NOT where pnpm settings go as of pnpm v11.
