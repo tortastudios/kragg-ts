@@ -354,6 +354,16 @@ kragg-Python as of this writing.
 3. `secret_name_suffixes` lacks `_service_key`.
 4. A **stale** `.kragg/criticality.json` is consumed as if current; the gate
    skips only when the file is absent.
+5. `run_gates` counts a SKIP as a failure (`check.py`: `if not
+   result.passed`), because a visible skip is `passed=False, skipped=True` —
+   so one gate that steps aside from inside its own run skips the entire slow
+   tier with `static gates failed`, and the run still exits 0. kragg-ts
+   follows `spec/SPEC.md` §2.3/§4.1 instead: only a gate that ran and did not
+   pass halts anything.
+6. `run_gates` has no `try` around `spec.runner()`, so an exception inside a
+   gate kills the process and the consolidated report is never produced.
+   kragg-ts turns it into `error: true` for that gate — §4.3's outcome for a
+   gate that could not run — and finishes the pipeline.
 
 ---
 

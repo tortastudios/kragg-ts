@@ -235,6 +235,8 @@ Deliberate, and documented at each site:
 | `audit` | knip, which covers both vulture (dead code) and deptry (dependency hygiene). |
 | criticality | Fingerprinted by a sidecar stamp, so stale call-graph data is re-derived rather than trusted. `criticality.json` itself stays byte-compatible with Python's reader. |
 | `secret_name_suffixes` | Includes `ServiceKey`, which Python's default list lacks. |
+| pipeline halting | A **skip never halts** the slow tier or `--fail-fast`; only a gate that ran and did not pass does. Python branches on `not result.passed`, which counts a visible skip as a failure. |
+| a gate that throws | Reported as that gate's `error: true` — the rest of the pipeline still runs and the consolidated report survives. Python lets the exception kill the process. |
 
 ## Supply chain
 

@@ -45,7 +45,8 @@ import {
   skipGate,
   type RanReport,
 } from "../src/catalog/results.ts";
-import { FAST, SLOW, type GateSpec } from "../src/engine/gate.ts";
+import { FAST, runGates, SLOW, type GateSpec } from "../src/engine/gate.ts";
+import type { GateResult } from "../src/engine/models.ts";
 import { EXIT_ENVIRONMENT, EXIT_GATE_FAILURES, EXIT_OK } from "../src/engine/report.ts";
 import { buildReport, reportExitCode } from "../src/engine/report.ts";
 import { resolveProjectEnvironment } from "../src/environment/project.ts";
@@ -88,6 +89,27 @@ function find(specs: readonly GateSpec[], name: string): GateSpec {
   const spec = specs.find((candidate) => candidate.name === name);
   assert.ok(spec !== undefined, `no gate named ${name}`);
   return spec;
+}
+
+/** The `GateResult` a pipeline produced for one gate. */
+function findResult(results: readonly GateResult[], name: string): GateResult {
+  const result = results.find((candidate) => candidate.name === name);
+  assert.ok(result !== undefined, `no result named ${name}`);
+  return result;
+}
+
+function exitCodeFor(results: readonly GateResult[]): number {
+  return reportExitCode(
+    buildReport({
+      command: "check",
+      mode: "full",
+      targets: [],
+      results,
+      maxViolations: 10,
+      startedAt: "now",
+      gitSha: null,
+    }),
+  );
 }
 
 describe("buildCheckGates: composition", () => {
@@ -135,6 +157,43 @@ describe("buildCheckGates: composition", () => {
       assert.equal(spec.skipReason, "incremental mode", spec.name);
     }
     assert.equal(find(specs, "tsc").skipReason, undefined);
+  });
+});
+
+describe("a gate that skips itself does not cost the slow tier its run", () => {
+  it("still runs test-coverage, critical-coverage and audit with no secret scanner", async () => {
+    // THE FALSE GREEN THIS CLOSES, on the real pipeline's names and tiers.
+    // Whether a scanner is installed is not knowable while the pipeline is
+    // being assembled, so `detect-secrets` decides at RUN time and returns
+    // `passed: false, skipped: true`. `runGates` read that as a failure and
+    // skipped every SLOW gate with "static gates failed" — on this repo, 14
+    // green gates, exit 0, and the test suite never run. The runs are faked
+    // so no gate here needs a tool installed to prove the wiring.
+    const ran: string[] = [];
+    const results = await runGates(
+      gates(buildCheckGates).map((spec) => ({
+        ...spec,
+        run: () => {
+          ran.push(spec.name);
+          return spec.name === "detect-secrets"
+            ? fromSecrets(spec.name, {
+                ok: false,
+                skipped: true,
+                reason: "no secret scanner available",
+              })
+            : nativeGate(spec.name, []);
+        },
+      })),
+    );
+
+    assert.ok(ran.includes("detect-secrets"), "the scanner gate must have been reached");
+    for (const name of ["test-coverage", "critical-coverage", "audit"]) {
+      assert.ok(ran.includes(name), `${name} must run when a fast gate only skipped`);
+      assert.equal(findResult(results, name).skipReason, null, name);
+    }
+    assert.equal(findResult(results, "detect-secrets").skipped, true);
+    // And the run is still green, with the skip printed rather than promoted.
+    assert.equal(exitCodeFor(results), EXIT_OK);
   });
 });
 

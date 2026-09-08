@@ -170,8 +170,8 @@ it and collects the result.
 
 ### `runGates` semantics
 
-Three rules, ported from `check.py` unchanged, in the order `skipReasonFor`
-applies them:
+Three rules, ported from `check.py`, in the order `skipReasonFor` applies
+them:
 
 1. **`failFast` halts.** Every remaining gate is reported as skipped with
    reason `fail-fast` — *reported*, not omitted, so the report still accounts
@@ -185,6 +185,31 @@ And the rule that is not in the code because it is the *absence* of code:
 **every FAST gate runs even after one fails.** One invocation reveals every
 failure, so an agent never re-runs to discover problem #2. SLOW gates skip
 because their results would be invalidated by the fixes anyway.
+
+**"Failed" in rules 1 and 3 means ran-and-did-not-pass: `!passed &&
+!skipped`.** The difference is not academic. A visible skip is spelled
+`passed: false, skipped: true`, and a gate can decide to skip from *inside*
+its run, where no spec-level `skipReason` could have predicted it:
+`detect-secrets` with no scanner installed, `lint` with no linter,
+`test-quality` with no test files, `critical-tests` outside a git repository.
+Reading any of those as a failure skipped every SLOW gate with `static gates
+failed` — on this very repo, `check` reported 14 passed, 0 failed, exit 0, and
+never ran the tests. `crag/spec/SPEC.md` §2.3 and §4.1 make the three states a
+contract and count `gates_failed` as "not passed and not skipped", so a skip
+is not one of the two states that stop other work. `error: true` is neither
+passed nor skipped, so it still halts, and exit 3 outranks exit 1 regardless.
+
+**A gate whose `run` throws becomes an errored gate**, not a dead process.
+`run` is arbitrary code over an untrusted project tree; an exception used to
+propagate out of `runGates` to `cli.ts`, which printed one stderr line and
+exited 3 — the consolidated report, and every other gate's result with it,
+simply vanished. `ranOrThrew` catches instead and builds `error: true,
+passed: false` with the exception's message as the gate's output, so the
+message reaches `raw_output` and its `Fix:` line reaches `next_actions`. The
+rest of the pipeline still runs, and the errored gate halts the SLOW tier like
+any other error: fail closed. Python has no equivalent — `run_gates` lets the
+exception kill the process — so both of these are in the divergence table in
+[spec-conformance.md](spec-conformance.md#intentional-divergences-a-conformance-suite-must-encode).
 
 The pipeline is sequential, deliberately, so it can be diffed against the
 Python implementation. `gate.ts` carries a `TODO(concurrency)` explaining that
