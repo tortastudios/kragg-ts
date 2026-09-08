@@ -305,6 +305,19 @@ override outranks inference, and an override we cannot honour is an error":
   linted when it is not.
 - `lint_tool: "off"` → **skip**. A deliberate opt-out.
 
+The same three-way rule governs `test_runner` and `secret_scanner`:
+`"auto"` is optional autodetection, `"off"` is a deliberate opt-out, and a
+NAMED tool is required — `secret_scanner: "gitleaks"` with no gitleaks is exit
+3, not the skip that exits 0 and lets the project believe it was scanned.
+`kragg doctor` reports the same split up front, so the diagnostic and the run
+cannot disagree.
+
+A fourth case sits outside the rule: a tool that is **installed and then
+misbehaves** is an error under *every* setting, `"auto"` included. `gitleaks`
+crashing on its version probe used to count as "unusable", so `"auto"` fell
+through to secretlint and the crash disappeared behind the second tool's green
+result. Absence may fall through; a failure may not.
+
 ### Step 3 — parse the tool's own machine-readable output
 
 Each adapter parses the format the tool documents: oxlint's miette-derived

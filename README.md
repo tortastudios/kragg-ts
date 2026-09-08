@@ -106,7 +106,7 @@ character in a file, not reinstalling a tool.
 | `critical-tests` | critical functions cannot change without test changes |
 | `test-quality` | no assertion-free tests; critical functions are referenced |
 | `secret-default` | secrets given silent fallbacks — a blank key must fail at startup, not sign |
-| `detect-secrets` | gitleaks or secretlint, if available |
+| `detect-secrets` | gitleaks or secretlint — autodetected under `"auto"`, required when `secret_scanner` names one |
 
 **Slow** — skipped while fast gates fail:
 
@@ -275,7 +275,7 @@ Deliberate, and documented at each site:
 | `nullable-default` | A redesign, not a port. `.get(k, default)` has no JS analogue; it targets `\|\|` mis-coalescing instead. |
 | `complexity` | A `switch` scores **+1 total, not +1 per `case`** — measured evidence, see [KNOWN_LIMITATIONS.md](KNOWN_LIMITATIONS.md). |
 | `structure` | Counts real `export` declarations, and enumerates `export *`, rather than Python's leading-underscore convention. |
-| `detect-secrets` | Bundles no scanner. gitleaks, else secretlint, else a visible skip. |
+| `detect-secrets` | Bundles no scanner. Under `secret_scanner: "auto"`: gitleaks, else secretlint, else a visible skip. A scanner named in the policy is *required* — unavailable, or installed and crashing, is `error: true` and exit 3, never a skip. |
 | `audit` | knip, which covers both vulture (dead code) and deptry (dependency hygiene). |
 | criticality | Fingerprinted by a sidecar stamp, so stale call-graph data is re-derived rather than trusted. `criticality.json` itself stays byte-compatible with Python's reader. |
 | criticality (top-20) | Python's `top_n=20` truncates the analysis, so its `criticality.json` — the input the criticality gates enforce on — never names more than twenty functions. Here twenty is a *display* limit on `CRITICALITY.md` and the terminal table only; the sidecar carries every ranked function, so the gates enforce on the whole eligible population. Same record shape, same ranking, more rows. |
