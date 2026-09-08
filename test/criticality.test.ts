@@ -28,7 +28,14 @@
  */
 
 import assert from "node:assert/strict";
-import { mkdirSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from "node:fs";
+import {
+  chmodSync,
+  mkdirSync,
+  mkdtempSync,
+  readFileSync,
+  rmSync,
+  writeFileSync,
+} from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { after, describe, it } from "node:test";
@@ -44,11 +51,15 @@ import {
   type DirectedGraph,
 } from "../src/analysis/betweenness.ts";
 import { analysisProgram } from "../src/analysis/program.ts";
+import { runCriticality } from "../src/commands/criticality.ts";
+import { EXIT_ENVIRONMENT } from "../src/engine/report.ts";
+import { stampPath } from "../src/gates/criticality/freshness.ts";
 import {
   BETWEENNESS_THRESHOLD,
   FAN_IN_THRESHOLD,
   analyze,
   buildCallGraph,
+  criticalityFreshness,
   criticalityPath,
   formatReport,
   formatTable,
@@ -645,5 +656,88 @@ describe("formatTable", () => {
 
   it("says so when there is nothing to show", () => {
     assert.deepEqual(formatTable([]), ["No functions found."]);
+  });
+});
+
+describe("kragg criticality --write: artifacts that could not be written", () => {
+  const FIXTURE: Readonly<Record<string, string>> = {
+    "src/a.ts": [
+      "export function leaf(): number {",
+      "  return 1;",
+      "}",
+      "export function top(): number {",
+      "  return leaf();",
+      "}",
+      "",
+    ].join("\n"),
+  };
+
+  /** Run the command with both streams captured. */
+  function run(root: string): {
+    readonly code: number;
+    readonly out: string[];
+    readonly err: string[];
+  } {
+    const out: string[] = [];
+    const err: string[] = [];
+    const code = runCriticality({
+      root,
+      write: true,
+      log: (line) => out.push(line),
+      logError: (line) => err.push(line),
+    });
+    return { code, out, err };
+  }
+
+  it("writes the data, the report and the stamp on the ordinary path", () => {
+    const root = project(FIXTURE);
+    const result = run(root);
+    assert.equal(result.code, 0);
+    assert.deepEqual(result.err, []);
+    assert.match(result.out.join("\n"), /^Wrote /u);
+    assert.match(readFileSync(criticalityPath(root), "utf8"), /src\/a#leaf/u);
+    assert.ok(readFileSync(join(root, "CRITICALITY.md"), "utf8").length > 0);
+    assert.equal(criticalityFreshness(root), "fresh");
+  });
+
+  it("reports a read-only checkout instead of printing `Wrote` for nothing", () => {
+    // "Never report work that did not happen" applies to artifacts too. The
+    // write throws EACCES; announcing `Wrote …` and exiting 0 would be the
+    // same lie a passing gate that never ran tells.
+    if (process.getuid?.() === 0) {
+      return; // root ignores the mode bits, so there is nothing to observe.
+    }
+    const root = project(FIXTURE);
+    chmodSync(root, 0o500);
+    try {
+      const result = run(root);
+      assert.equal(result.code, EXIT_ENVIRONMENT);
+      assert.deepEqual(result.out, []);
+      assert.match(result.err.join("\n"), /could not write the criticality artifacts/u);
+      assert.match(result.err.join("\n"), /Fix:/u);
+    } finally {
+      chmodSync(root, 0o700);
+    }
+    assert.throws(() => readFileSync(join(root, "CRITICALITY.md"), "utf8"));
+  });
+
+  it("says so when the data landed but its freshness stamp could not", () => {
+    // Milder: the data IS correct, nothing on disk can vouch for it, so every
+    // later run will read it as stale and derive again. Correct, and worth one
+    // line rather than a permanent unexplained re-derivation.
+    if (process.getuid?.() === 0) {
+      return;
+    }
+    const root = project(FIXTURE);
+    assert.equal(run(root).code, 0);
+    chmodSync(stampPath(root), 0o400);
+    try {
+      const result = run(root);
+      assert.equal(result.code, 0, "the data was written, so this is not an error exit");
+      assert.match(result.out.join("\n"), /^Wrote /u);
+      assert.match(result.err.join("\n"), /could not write its freshness stamp/u);
+    } finally {
+      chmodSync(stampPath(root), 0o600);
+    }
   });
 });

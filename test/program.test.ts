@@ -10,7 +10,12 @@
  *
  * The tests import `typescript` directly, which production analysis code must
  * NOT do (see `resolveTypeScript`): here it is the compiler under test, and
- * passing it in explicitly keeps these tests off the shared handle cache.
+ * passing it in explicitly keeps the resolution out of the picture.
+ *
+ * SHARED MEANS PER RUN, NOT PER PROCESS. `analysisProgram` keeps no
+ * module-level handle cache — it used to, and a second run in one process was
+ * served the first run's pre-edit program. The sharing that gates rely on is
+ * asserted against `catalogContext` in `catalog.test.ts`.
  */
 
 import assert from "node:assert/strict";
@@ -23,7 +28,6 @@ import ts from "typescript";
 
 import {
   analysisProgram,
-  clearAnalysisProgramCache,
   programFileNames,
   sourceFilesFor,
 } from "../src/analysis/program.ts";
@@ -38,7 +42,6 @@ import {
 const temporaryRoots: string[] = [];
 
 after(() => {
-  clearAnalysisProgramCache();
   clearCompilerCache();
   for (const root of temporaryRoots) {
     rmSync(root, { recursive: true, force: true });
@@ -334,21 +337,51 @@ describe("analysisProgram", () => {
     );
   });
 
-  it("shares one handle per tsconfig across callers", () => {
-    clearAnalysisProgramCache();
+  it("keeps no process-global handle, so a second run cannot inherit one", () => {
+    // Sharing is the RUN's job (`catalog/context.ts` owns the one handle every
+    // gate is given), never this module's. A module-level memo here is a
+    // correctness bug the moment anything outlives one CLI invocation.
     const root = project(sample);
-    const shared = analysisProgram({ root });
-    assert.equal(analysisProgram({ root }), shared, "one program per run, not per gate");
-    clearAnalysisProgramCache();
-    assert.notEqual(analysisProgram({ root }), shared, "clearing must really clear");
+    assert.notEqual(analysisProgram({ root }), analysisProgram({ root }));
   });
 
-  it("keeps an explicit compiler out of the shared cache", () => {
-    clearAnalysisProgramCache();
-    const root = project(sample);
-    const injected = analysisProgram({ root, api: ts });
-    assert.notEqual(injected, analysisProgram({ root }));
+  it("shows the second run the edit the first run never saw", () => {
+    // THE BUG THIS PINS. `analysisProgram` memoized handles per tsconfig path
+    // in a module-level map. A long-lived process using the library API — a
+    // watcher, an MCP server, `runCommand` called twice — ran, the files
+    // changed, it ran again, and it was handed the FIRST run's `ts.Program`:
+    // every source file in it parsed from the pre-edit bytes. It then reported
+    // confidently on code that no longer existed, which is the same failure a
+    // stale criticality cache causes, one tier down.
+    //
+    // No `api` is passed, so this is the production resolution path — the one
+    // that used to consult the cache.
+    const root = project({ ...sample, "src/a.ts": "export const count = 1;\n" });
+    const before = analysisProgram({ root }).load();
+    assert.equal(before.ok, true);
+    if (!before.ok) {
+      return;
+    }
+    assert.match(
+      before.program.getSourceFile(join(root, "src", "a.ts"))?.text ?? "",
+      /count = 1/,
+    );
+
+    writeFileSync(join(root, "src", "a.ts"), "export const count = 99;\n");
+
+    const after = analysisProgram({ root }).load();
+    assert.equal(after.ok, true);
+    if (!after.ok) {
+      return;
+    }
+    const text = after.program.getSourceFile(join(root, "src", "a.ts"))?.text ?? "";
+    assert.match(text, /count = 99/, "the second run must read the edited file");
+    assert.doesNotMatch(text, /count = 1;/);
   });
+
+  // The other half of the contract — every gate in ONE run shares ONE lazily
+  // built handle — is asserted where the sharing now lives, on the run
+  // context: see "the program is shared and lazy" in `catalog.test.ts`.
 
   it("reports a missing tsconfig instead of inventing default options", () => {
     const load = analysisProgram({ root: project({ "src/a.ts": "export const a = 1;\n" }), api: ts })

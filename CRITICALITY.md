@@ -9,29 +9,29 @@ When editing them, full types, docstrings, and tests are mandatory.
 
 | Function | Fan-in | Fan-out | Centrality | Risk |
 | --- | ---: | ---: | ---: | --- |
-| `src/analysis/sourceFile#parseSourceFile` | 4 | 5 | 0.0008 | MED |
+| `src/analysis/sourceFile#parseSourceFile` | 4 | 5 | 0.0007 | MED |
 | `src/analysis/sourceFile#parsedSources` | 14 | 3 | 0.0007 | HIGH |
 | `src/gates/testDepth/criticalFunctions#criticalFunctions` | 7 | 5 | 0.0006 | HIGH |
-| `src/policy/policy#loadPolicy` | 16 | 5 | 0.0004 | HIGH |
+| `src/policy/policy#loadPolicy` | 18 | 6 | 0.0005 | HIGH |
+| `src/gates/criticality/freshness#criticalityFreshness` | 3 | 5 | 0.0004 | MED |
 
 ## Non-critical
 
 | Function | Fan-in | Fan-out | Centrality | Risk |
 | --- | ---: | ---: | ---: | --- |
-| `src/catalog/check#checkPipeline` | 1 | 7 | 0.0019 | low |
-| `src/catalog#buildCheckGates` | 2 | 2 | 0.0016 | low |
-| `src/adapters/testRunner#runTests` | 2 | 15 | 0.0008 | low |
-| `src/commands/check#runCheck` | 1 | 5 | 0.0007 | low |
-| `src/cli#gateCommand` | 1 | 10 | 0.0007 | low |
+| `src/catalog/check#checkPipeline` | 1 | 7 | 0.0017 | low |
+| `src/catalog#buildCheckGates` | 2 | 2 | 0.0014 | low |
+| `src/adapters/testRunner#runTests` | 2 | 15 | 0.0007 | low |
+| `src/commands/check#runCheck` | 1 | 5 | 0.0006 | low |
+| `src/cli#gateCommand` | 1 | 10 | 0.0006 | low |
 | `src/cli#dispatch` | 1 | 4 | 0.0006 | low |
 | `src/catalog/check#slowGates` | 1 | 9 | 0.0006 | low |
 | `src/cli#reportCommand` | 1 | 12 | 0.0006 | low |
 | `src/catalog#buildSecurityGates` | 1 | 4 | 0.0005 | low |
 | `src/catalog/security#secretGates` | 2 | 5 | 0.0005 | low |
-| `src/adapters/testRunner#parseResults` | 1 | 4 | 0.0005 | low |
-| `src/analysis/imports#moduleImports` | 2 | 3 | 0.0005 | low |
+| `src/adapters/testRunner#parseResults` | 1 | 4 | 0.0004 | low |
+| `src/analysis/imports#moduleImports` | 2 | 3 | 0.0004 | low |
 | `src/gates/typingStrictness#checkTypingStrictness` | 2 | 5 | 0.0004 | low |
-| `src/commands/security#runSecurity` | 1 | 4 | 0.0004 | low |
+| `src/gates/criticality/profile#analyze` | 2 | 5 | 0.0004 | low |
 | `src/gates/testDepth/criticalFunctions#moduleIndex` | 1 | 3 | 0.0004 | low |
-| `src/catalog/check#toolGates` | 1 | 7 | 0.0004 | low |
 

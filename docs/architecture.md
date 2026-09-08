@@ -63,10 +63,14 @@ matching Python's behaviour rather than the compiler's.
 One `ts.Program`, one `ts.TypeChecker`, for the whole run. Two properties, both
 structural rather than optimizations to add later:
 
-- **One per run.** The handle is memoized per tsconfig path, and
-  `catalog/context.ts` additionally creates it once and hands the same object
-  to every gate — so the sharing is a property of the pipeline, not an accident
-  of a cache.
+- **One per run — and per *run*, not per process.** `catalog/context.ts`
+  creates the handle once and hands the same object to every gate, and that is
+  the only thing sharing it. `analysisProgram` keeps no module-level cache:
+  it used to memoize per tsconfig path, so a long-lived host (the library API,
+  a watcher, an MCP server) that ran, saw an edit and ran again was handed the
+  first run's `ts.Program` with every file parsed from the pre-edit bytes. The
+  sharing is a property of the pipeline; it must not be an accident of a cache
+  that nothing invalidates.
 - **Lazy.** Construction happens on the first `load()`, never at handle
   creation. `kragg check --changed` over three files where no type-aware gate
   fires must not pay a millisecond of program cost, and does not.
@@ -98,6 +102,15 @@ This creates the rule that governs every gate in the repo:
 
 `compiler.ts` holds the only value import of `typescript` in the codebase — for
 the types and for the fallback instance. Everywhere else it is `import type`.
+
+The resolution is memoized per root, but on the compiler's **identity** rather
+than merely on the root: the resolved entry path plus that file's size and
+mtime, all obtainable without executing anything. A project that upgrades or
+relinks its `typescript` between two runs of a long-lived host gets resolved
+again instead of being analyzed with the compiler the first run happened to
+load. The residual limit is Node's own CJS module cache — a compiler replaced
+*in place*, at the same path, still `require`s to the module object already in
+this process.
 
 Two consequences that are easy to miss: loading the project's `typescript`
 executes code from the project under check (a real trust boundary, and the same
@@ -259,6 +272,15 @@ gets the gates. Staleness is checked before the file is believed, via a sidecar
 fingerprint; see `src/gates/criticality/freshness.ts` and
 [spec-conformance.md](spec-conformance.md) for why the fingerprint is a
 separate file.
+
+The fingerprint has to cover everything the analysis *reads*, or the data can
+be wrong while the check says "fresh". It walks the source tree with the same
+`analysis/walk.ts` the syntax tier uses (so a real `src/coverage/` is watched,
+while a repo-root `dist/` is not), **hashes the bytes** rather than trusting a
+size and an mtime, and includes the other analysis inputs: `kragg.json`,
+`package.json#kragg`, `tsconfig.json` and the resolved compiler's version and
+path. A read-only `.kragg` cannot land the artifacts, and that is reported —
+never silently converted into a fresh answer.
 
 ---
 

@@ -140,8 +140,11 @@ gates that expect one. Repeating a whole-tree fact across all N records instead
 would still change what Python reads.
 
 So kragg-ts writes a **separate file**, `.kragg/criticality.stamp.json`
-(`version`, `scan_paths`, `files`, `bytes`, `newest_mtime_ms`), and
-`criticality.json` stays byte-compatible with what both tools already write.
+(`version`, `scan_paths`, `files`, `bytes`, `source_digest`, `inputs_digest`),
+and `criticality.json` stays byte-compatible with what both tools already write.
+The sidecar's own shape is internal and versioned: a stamp of any other
+`version` is not read as evidence of freshness, so changing it makes older
+stamps read as stale rather than crash.
 Python cannot observe the difference: it never opens the sidecar, and the file
 it does open is unchanged. See
 [`src/gates/criticality/freshness.ts`](../src/gates/criticality/freshness.ts)

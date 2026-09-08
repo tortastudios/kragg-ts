@@ -154,7 +154,9 @@ export function writeJson(
  * left the hook and the command believing a file the gates had already
  * rejected. `freshness.ts` documents the bug this closes and why a stale file
  * takes the same path as an absent one; the cost is a few milliseconds of
- * `readdirSync` per call, against a graph rebuild it makes unnecessary.
+ * walking and hashing the sources per call — measured at ~6 ms over this
+ * repo's 214 source and test files — against the ~1 s graph rebuild it makes
+ * unnecessary.
  */
 export function readJson(root: string): readonly CriticalityRecord[] {
   if (criticalityFreshness(root) !== "fresh") {

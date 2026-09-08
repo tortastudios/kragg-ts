@@ -329,7 +329,26 @@ describe("the program is shared and lazy", () => {
     assert.equal(ctx.program.loaded(), false);
   });
 
-  it("hands every type-aware gate the same handle and compiler", () => {
+  it("hands every type-aware gate one handle, parsed by that handle's compiler", () => {
+    // The context is the sole owner of the run's program, so "shared" is a
+    // property of the object every gate is given rather than of a cache. The
+    // syntax tier gets `api` from the SAME resolution, or one run would apply
+    // two `SyntaxKind` numberings to one file set.
+    const root = project();
+    const ctx = catalogContext({
+      root,
+      policy: DEFAULT_POLICY,
+      env: resolveProjectEnvironment(root),
+      targets: ["src"],
+    });
+    assert.equal(ctx.api, ctx.program.compiler.api);
+  });
+
+  it("does not hand a second run the first run's program", () => {
+    // THE BUG: `analysisProgram` memoized handles in a module-level map, so a
+    // long-lived process — the library API, a watcher — that ran, saw an edit
+    // and ran again was served the first run's `ts.Program`, whose files were
+    // parsed before the edit. Two runs, two programs; same compiler.
     const root = project();
     const options = {
       root,
@@ -339,8 +358,8 @@ describe("the program is shared and lazy", () => {
     };
     const first = catalogContext(options);
     const second = catalogContext(options);
-    assert.equal(first.program, second.program);
-    assert.equal(first.api, second.api);
+    assert.notEqual(first.program, second.program);
+    assert.equal(first.api, second.api, "compiler identity is still resolved once");
   });
 });
 

@@ -20,14 +20,20 @@
  */
 
 import assert from "node:assert/strict";
-import { mkdirSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from "node:fs";
+import {
+  mkdirSync,
+  mkdtempSync,
+  readFileSync,
+  rmSync,
+  statSync,
+  writeFileSync,
+} from "node:fs";
 import { tmpdir } from "node:os";
 import { dirname, join } from "node:path";
 import { after, describe, it } from "node:test";
 
 import ts from "typescript";
 
-import { analysisProgram } from "../src/analysis/program.ts";
 import {
   buildMap,
   criticalityFlags,
@@ -340,24 +346,34 @@ describe("map: criticality derivation", () => {
     assert.equal(criticalityFreshness(root), "fresh");
   });
 
-  it("builds no program when the data on disk is already current", async () => {
+  it("derives nothing when the data on disk is already current", async () => {
     // THE LAZINESS CONTRACT. `ts.createProgram` is seconds on a real repo, and
-    // `kragg map` is a thing an agent runs at session start. Seeding the
-    // memoized handle first means the assertion is about the handle `runMap`
-    // itself will get, not a lookalike.
+    // `kragg map` is a thing an agent runs at session start.
+    //
+    // The assertion is on the ARTIFACT rather than on a handle: the run's
+    // program is owned by the run now (no process-global cache to seed from
+    // outside — see `analysis/program.ts`), and `ensure()` is the only thing
+    // in `runMap` that can touch it. Hand-written records a real derivation
+    // would never produce, still byte-identical afterwards, prove `ensure()`
+    // returned on the freshness check and never reached the program. That
+    // `ensure()` builds nothing on that path is asserted directly in
+    // `criticalityFreshness.test.ts`.
+    const seeded = JSON.stringify([
+      { name: "src/a#helper", fan_in: 5, is_critical: true, risk: "HIGH" },
+    ]);
     const root = project({
       "tsconfig.json": TSCONFIG,
       "src/a.ts": HUB,
-      ".kragg/criticality.json": JSON.stringify([
-        { name: "src/a#helper", fan_in: 5, is_critical: true, risk: "HIGH" },
-      ]),
+      ".kragg/criticality.json": seeded,
     });
     assert.equal(criticalityFreshness(root), "fresh");
-    const handle = analysisProgram({ root });
+    const json = join(root, ".kragg", "criticality.json");
+    const before = statSync(json).mtimeMs;
 
     const output = await mapOutput(root);
 
-    assert.equal(handle.loaded(), false, "a fresh cache must cost no compile");
+    assert.equal(readFileSync(json, "utf8"), seeded, "a fresh cache must not be rewritten");
+    assert.equal(statSync(json).mtimeMs, before, "a fresh cache must cost no derivation");
     assert.match(output, /fn helper\(\): number {2}\[HIGH]/);
   });
 });
