@@ -22,7 +22,7 @@
  */
 
 import assert from "node:assert/strict";
-import { mkdirSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from "node:fs";
+import { existsSync, mkdirSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { after, describe, it } from "node:test";
@@ -567,6 +567,56 @@ describe("mutationCommand", () => {
     assert.match(emptyScopeMessage("criticality", true), /no changed files/);
     assert.match(emptyScopeMessage("criticality", false), /criticality --write/);
     assert.match(emptyScopeMessage("mutation_include", false), /mutation_include scope/);
+  });
+
+  /**
+   * A project with one mutable file and a stand-in `stryker` — an `sh` script
+   * in `node_modules/.bin`, the seam every adapter test uses — that records
+   * having run and then exits without writing a report.
+   */
+  function projectWithFakeStryker(): string {
+    const root = tempRoot();
+    write(root, "src/a.ts", "export const a = 1;\n");
+    write(root, "kragg.json", JSON.stringify({ mutation_include: ["src/*.ts"] }));
+    const bin = join(root, "node_modules", ".bin");
+    mkdirSync(bin, { recursive: true });
+    writeFileSync(join(bin, STRYKER_BIN), "#!/bin/sh\ntouch ran.marker\nexit 0\n", { mode: 0o755 });
+    return root;
+  }
+
+  it("never credits an earlier run's report to a stryker that wrote none", async () => {
+    const root = projectWithFakeStryker();
+    // Yesterday's report says two mutants survived — a verdict, either way.
+    write(root, DEFAULT_REPORT_PATH, report({ "src/a.ts": ALL_STATUSES }));
+    const errors: string[] = [];
+    const code = await mutationCommand({
+      root,
+      log: () => undefined,
+      logError: (line) => errors.push(line),
+    });
+    assert.equal(code, EXIT_ENVIRONMENT);
+    assert.match(errors.join("\n"), /stryker exited 0 without writing .*mutation\.json/);
+    assert.ok(existsSync(join(root, "ran.marker")), "stryker did run");
+    // The stale report was cleared BEFORE the run, not read after it.
+    assert.equal(existsSync(join(root, DEFAULT_REPORT_PATH)), false);
+  });
+
+  it("refuses to start stryker while an earlier report cannot be cleared", async () => {
+    const root = projectWithFakeStryker();
+    // A directory where the report goes: `rm` without `recursive` cannot
+    // remove it, so the path still exists when stryker would be spawned.
+    write(root, join(DEFAULT_REPORT_PATH, "keep.txt"), "not kragg's to delete\n");
+    const errors: string[] = [];
+    const code = await mutationCommand({
+      root,
+      log: () => undefined,
+      logError: (line) => errors.push(line),
+    });
+    assert.equal(code, EXIT_ENVIRONMENT);
+    assert.match(errors.join("\n"), /could not remove it/);
+    assert.match(errors.join("\n"), /stryker was not started/);
+    assert.equal(existsSync(join(root, "ran.marker")), false, "stryker must not have run");
+    assert.ok(existsSync(join(root, DEFAULT_REPORT_PATH, "keep.txt")), "nothing was deleted");
   });
 });
 

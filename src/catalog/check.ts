@@ -22,10 +22,8 @@
 
 import { runLint } from "../adapters/lint.ts";
 import { runTests, TEST_GATE } from "../adapters/testRunner.ts";
-import { readTextFile } from "../adapters/support/manifest.ts";
-import { artifacts } from "../adapters/support/testCommands.ts";
+import type { CoverageEvidence, TestRunOutcome } from "../adapters/testRunner.ts";
 import { runTypeCheck } from "../adapters/tsc.ts";
-import { readIstanbulReport } from "../coverage/istanbul.ts";
 import { FAST, SLOW, type GateSpec } from "../engine/gate.ts";
 import { checkLayers, checkStructure } from "../gates/architecture.ts";
 import { cyclomaticViolations, maintainabilityViolations } from "../gates/complexity.ts";
@@ -45,6 +43,7 @@ import {
   fromTestDepth,
   fromTypingStrictness,
   nativeGate,
+  skipGate,
 } from "./results.ts";
 import { auditGate, forbiddenCallsGate, secretGates } from "./security.ts";
 
@@ -275,43 +274,44 @@ function slowGates(ctx: CatalogContext): readonly GateSpec[] {
     {
       name: TEST_GATE,
       tier: SLOW,
-      run: async () =>
-        fromReport(
-          TEST_GATE,
-          await runTests({
-            env: ctx.env,
-            choice: policy.testRunner,
-            coverageFailUnder: policy.coverageFailUnder,
-            coverageReportPath: policy.coverageReportPath,
-            maxViolations: policy.maxViolationsPerGate,
-            testPatterns: testPatterns(policy.testPaths),
-          }),
-        ),
+      run: async () => {
+        const outcome = await runTests({
+          env: ctx.env,
+          choice: policy.testRunner,
+          coverageFailUnder: policy.coverageFailUnder,
+          coverageReportPath: policy.coverageReportPath,
+          maxViolations: policy.maxViolationsPerGate,
+          testPatterns: testPatterns(policy.testPaths),
+        });
+        // Recorded for `critical-coverage`, which reads THIS run's coverage
+        // from here and never from disk. See `RunEvidence` in `context.ts`.
+        ctx.evidence.testRun = outcome;
+        return fromReport(TEST_GATE, outcome);
+      },
       skipReason: ctx.slowSkip,
     },
     {
       name: "critical-coverage",
       tier: SLOW,
-      // The report is read at RUN time, not at build time: `test-coverage`
-      // runs first in this same pipeline and writes it, so reading it while
-      // assembling the specs would always read the previous run's file. The
-      // criticality data is now on the same footing — derived here rather
-      // than skipped over at build time. See `critical-tests` above.
+      // Consumes the evidence `test-coverage` produced in this same pipeline
+      // — whichever format the runner wrote — and nothing else. Reading the
+      // coverage files off disk here is what let a crashed runner's stale
+      // report, or the previous runner's leftover istanbul JSON, decide this
+      // gate. The criticality data is on the same footing: derived here
+      // rather than skipped over at build time. See `critical-tests` above.
       run: () => {
         ctx.criticality.ensure();
-        // BOTH artifacts, because which one exists depends on the runner:
-        // vitest writes istanbul JSON, `node --test` and `bun test` write
-        // lcov. Passing only the first is what made this gate skip on every
-        // node/bun project — a permanent SKIP that reads as "fine".
-        const layout = artifacts(ctx.root, policy.coverageReportPath);
-        const lcov = readTextFile(layout.lcovFile);
+        const coverage = currentCoverage(ctx.evidence.testRun);
+        if (!coverage.ok) {
+          return skipGate("critical-coverage", coverage.reason);
+        }
         return fromTestDepth(
           "critical-coverage",
           checkCriticalCoverage({
             root: ctx.root,
             sourcePaths: policy.sourcePaths,
-            report: readIstanbulReport(layout.istanbulFile),
-            ...(lcov === undefined ? {} : { lcov }),
+            report: coverage.evidence.format === "istanbul" ? coverage.evidence.raw : null,
+            ...(coverage.evidence.format === "lcov" ? { lcov: coverage.evidence.report } : {}),
             api: ctx.api,
           }),
         );
@@ -320,4 +320,51 @@ function slowGates(ctx: CatalogContext): readonly GateSpec[] {
     },
     auditGate(ctx),
   ];
+}
+
+/** This run's coverage document, or the reason there is none. */
+type CurrentCoverage =
+  | { readonly ok: true; readonly evidence: CoverageEvidence }
+  | { readonly ok: false; readonly reason: string };
+
+/**
+ * What `critical-coverage` may believe: only coverage measured in this run.
+ *
+ * Every arm that is not evidence is a visible SKIP naming the cause. None is
+ * an error here, because in every such arm `test-coverage` has already said
+ * the same thing in its own result — an error there is exit 3 already, and a
+ * skip there is a skip for the same reason. What this must never do is fall
+ * back to a file on disk: a report nobody produced in this invocation is
+ * exactly the evidence this gate must not accept.
+ */
+function currentCoverage(outcome: TestRunOutcome | undefined): CurrentCoverage {
+  const prefix = "no coverage evidence from this run";
+  if (outcome === undefined) {
+    return { ok: false, reason: `${prefix}: test-coverage did not run in this invocation` };
+  }
+  if (!outcome.ok) {
+    const what = outcome.kind === "not-configured" ? "was skipped" : "could not run";
+    return { ok: false, reason: `${prefix}: test-coverage ${what} (${firstLine(outcome.message)})` };
+  }
+  if (outcome.coverage === null) {
+    return {
+      ok: false,
+      reason:
+        `${prefix}: coverage was not collected because \`coverage_fail_under\` is 0 or ` +
+        "less; set it above 0 so test-coverage measures coverage for this gate",
+    };
+  }
+  if (!outcome.coverage.ok) {
+    return {
+      ok: false,
+      reason:
+        `${prefix}: test-coverage could not read a complete coverage report ` +
+        `(${firstLine(outcome.coverage.message)})`,
+    };
+  }
+  return { ok: true, evidence: outcome.coverage.evidence };
+}
+
+function firstLine(text: string): string {
+  return text.split("\n")[0] ?? "";
 }

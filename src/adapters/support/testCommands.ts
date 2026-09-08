@@ -8,12 +8,13 @@
  * of them "cleaned up" eventually. They are all load-bearing.
  */
 
+import { copyFileSync, mkdirSync, mkdtempSync, renameSync, rmSync } from "node:fs";
 import { dirname, isAbsolute, join, resolve } from "node:path";
 
 import { missingToolMessage, resolveBin } from "../../environment/project.ts";
 import type { ProjectEnvironment } from "../../environment/project.ts";
 import type { TestRunnerName } from "./detect.ts";
-import { missingTool } from "./outcome.ts";
+import { crashed, missingTool } from "./outcome.ts";
 import type { Unavailable } from "./outcome.ts";
 
 /** Default location of the istanbul report — vitest's own default path. */
@@ -22,39 +23,138 @@ export const DEFAULT_COVERAGE_REPORT = "coverage/coverage-final.json";
 /** Where kragg writes its own run artifacts, mirroring Python's `.kragg/`. */
 export const ARTIFACTS_DIR = ".kragg";
 
+/**
+ * Where each invocation gets a private directory for what its runner writes.
+ *
+ * EVIDENCE IS ATTRIBUTABLE TO THIS RUN BY CONSTRUCTION, not by timestamp. The
+ * runner is told to write every report into a directory that did not exist
+ * before this invocation created it (`mkdtemp`: unique, atomic, empty), so
+ * anything found there afterwards was written by the process kragg just
+ * spawned. A runner that crashes leaves the directory empty and the gate
+ * errors; it cannot pick up the report a previous run — or a previous RUNNER,
+ * writing a different format — left at the shared location. Two concurrent
+ * invocations in one project get two directories and never read each other's.
+ * The directory is removed once read; see `discardRunDir`.
+ */
+export const RUNS_DIR = join(ARTIFACTS_DIR, "runs");
+
 /** Absolute paths for everything a run reads or writes. */
 export interface Artifacts {
   readonly root: string;
+  /** This invocation's private directory. Every path the runner writes is inside it. */
+  readonly runDir: string;
   /** vitest's `--outputFile` target. */
   readonly reportFile: string;
-  /** Directory holding the coverage artifact. */
+  /** Directory the runner is told to write coverage into. */
   readonly coverageDir: string;
   /** istanbul `coverage-final.json`, written by vitest. */
   readonly istanbulFile: string;
   /** lcov tracefile, written by `node --test` and `bun test`. */
   readonly lcovFile: string;
+  /**
+   * `coverage_report_path`: where this run's istanbul report is PUBLISHED once
+   * it has been read, for `kragg coverage` and anything else that reads it
+   * there. No gate reads from this path.
+   */
+  readonly publishedIstanbulFile: string;
+  /** `lcov.info` beside it: where this run's lcov tracefile is published. */
+  readonly publishedLcovFile: string;
 }
 
 /**
- * Resolve every path from the ONE configured value.
+ * Resolve every path from the ONE configured value and this run's directory.
  *
- * `coverage_report_path` names the istanbul report; the directory holding it
- * is then also where the runner is told to write, so the place kragg looks and
- * the place the runner writes cannot drift apart. Configuring one and
- * defaulting the other is how a coverage gate ends up reading last week's
- * report.
+ * `coverage_report_path` names the istanbul report and, through its directory,
+ * the lcov tracefile beside it. Those are where a run's coverage ends up; the
+ * runner itself is pointed at `runDir`, so the place a gate reads and the
+ * place the runner just wrote are the same directory and cannot hold anything
+ * older than this invocation.
  */
-export function artifacts(root: string, coverageReportPath: string | undefined): Artifacts {
+export function artifacts(
+  root: string,
+  coverageReportPath: string | undefined,
+  runDir: string,
+): Artifacts {
   const configured = coverageReportPath ?? DEFAULT_COVERAGE_REPORT;
-  const istanbulFile = isAbsolute(configured) ? configured : resolve(root, configured);
-  const coverageDir = dirname(istanbulFile);
+  const publishedIstanbulFile = isAbsolute(configured) ? configured : resolve(root, configured);
+  const coverageDir = join(runDir, "coverage");
   return {
     root,
-    reportFile: join(root, ARTIFACTS_DIR, "test-report.json"),
+    runDir,
+    reportFile: join(runDir, "test-report.json"),
     coverageDir,
-    istanbulFile,
+    istanbulFile: join(coverageDir, "coverage-final.json"),
     lcovFile: join(coverageDir, "lcov.info"),
+    publishedIstanbulFile,
+    publishedLcovFile: join(dirname(publishedIstanbulFile), "lcov.info"),
   };
+}
+
+/** A fresh, empty, uniquely named run directory — or why there is none. */
+export type RunDir = { readonly ok: true; readonly dir: string } | Unavailable;
+
+/**
+ * Create this invocation's directory under `.kragg/runs`.
+ *
+ * Failure is an ERROR outcome rather than a fallback to the shared location:
+ * without a directory of its own, this run could not tell its report from an
+ * earlier one, and that is the situation this module exists to make
+ * impossible.
+ */
+export function createRunDir(root: string): RunDir {
+  const parent = join(root, RUNS_DIR);
+  try {
+    mkdirSync(parent, { recursive: true });
+    return { ok: true, dir: mkdtempSync(join(parent, "test-")) };
+  } catch (error: unknown) {
+    return crashed(
+      `kragg could not create a private directory for this run's test artifacts under ` +
+        `${parent} (${describeError(error)}), so no tests ran. Without one, a report ` +
+        "left by an earlier run could be mistaken for this run's.",
+    );
+  }
+}
+
+/**
+ * Move the coverage artifact this run READ to the configured location.
+ *
+ * Only the one file the runner just wrote moves, by rename where the two paths
+ * share a filesystem; nothing else at the destination is touched or removed.
+ * Returns a message on failure. It is not a gate failure — the evidence was
+ * already read — but it is not swallowed either: the caller shows it, because
+ * a `kragg coverage` reading the old file afterwards would otherwise be a
+ * mystery.
+ */
+export function publishCoverage(layout: Artifacts, runner: TestRunnerName): string | undefined {
+  const [from, to] =
+    runner === "vitest"
+      ? [layout.istanbulFile, layout.publishedIstanbulFile]
+      : [layout.lcovFile, layout.publishedLcovFile];
+  try {
+    mkdirSync(dirname(to), { recursive: true });
+    try {
+      renameSync(from, to);
+    } catch {
+      copyFileSync(from, to);
+    }
+    return undefined;
+  } catch (error: unknown) {
+    return `could not publish ${from} to ${to}: ${describeError(error)}`;
+  }
+}
+
+/** Remove the run directory. kragg created it; nothing else lives in it. */
+export function discardRunDir(layout: Artifacts): void {
+  try {
+    rmSync(layout.runDir, { recursive: true, force: true });
+  } catch {
+    // A directory that will not delete is a leftover under `.kragg/runs`, and
+    // never evidence: no later run can be handed this name again.
+  }
+}
+
+function describeError(error: unknown): string {
+  return error instanceof Error ? error.message : String(error);
 }
 
 /**

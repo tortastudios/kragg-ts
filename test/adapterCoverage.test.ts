@@ -162,3 +162,17 @@ test("lcov: an empty or record-less file is a failure, not 100%", () => {
   assert.equal(readLcov(join(root, "coverage/absent.info")).ok, false);
 });
 
+test("lcov: a tracefile that ends inside a record is truncated, not partial coverage", () => {
+  // The writer was killed after the first record: reading the one complete
+  // record would report coverage over fewer files than the suite touched.
+  const root = project({
+    "coverage/lcov.info": "SF:/repo/src/a.ts\nDA:1,1\nend_of_record\nSF:/repo/src/b.ts\nDA:1,0\n",
+    "coverage/whole.info": "SF:/repo/src/a.ts\nDA:1,1\nend_of_record\n\n",
+  });
+  const truncated = readLcov(join(root, "coverage/lcov.info"));
+  assert.equal(truncated.ok, false);
+  assert.match(truncated.ok ? "" : truncated.message, /truncated: it ends inside a record/u);
+  // Trailing blank lines are not a truncation.
+  assert.equal(readLcov(join(root, "coverage/whole.info")).ok, true);
+});
+

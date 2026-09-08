@@ -29,6 +29,7 @@
 import { mkdirSync } from "node:fs";
 import { join, resolve } from "node:path";
 
+import type { TestRunOutcome } from "../adapters/testRunner.ts";
 import { analysisProgram, type AnalysisProgram } from "../analysis/program.ts";
 import type { TypeScriptApi } from "../analysis/sourceFile.ts";
 import { JOURNAL_DIR } from "../engine/journal.ts";
@@ -62,6 +63,24 @@ export interface CatalogOptions {
   readonly since?: string | null | undefined;
 }
 
+/**
+ * Evidence produced by a gate earlier in THIS run, for the gates that depend
+ * on it.
+ *
+ * `critical-coverage` needs the coverage `test-coverage` just measured. It
+ * used to re-read the coverage files from disk, which is how it came to
+ * report on last week's report after a crash, and on the OTHER runner's
+ * format after a runner switch (istanbul wins over lcov, whichever is newer).
+ * The test gate now records its outcome here and the dependent gate reads
+ * only this — evidence from this invocation or nothing. Mutable by design:
+ * the pipeline is sequential, the producer writes once, the consumer reads
+ * after.
+ */
+export interface RunEvidence {
+  /** `test-coverage`'s outcome; `undefined` until that gate has run. */
+  testRun: TestRunOutcome | undefined;
+}
+
 /** `CatalogOptions` plus the per-run analysis handles. */
 export interface CatalogContext extends CatalogOptions {
   readonly root: string;
@@ -69,6 +88,8 @@ export interface CatalogContext extends CatalogOptions {
   readonly api: TypeScriptApi;
   /** Reason every SLOW gate skips, or `undefined` when they should run. */
   readonly slowSkip: string | undefined;
+  /** What earlier gates in this run produced. See {@link RunEvidence}. */
+  readonly evidence: RunEvidence;
   /**
    * Derive-with-cache for `.kragg/criticality.json`.
    *
@@ -99,6 +120,7 @@ export function catalogContext(options: CatalogOptions): CatalogContext {
     program,
     api: program.compiler.api,
     slowSkip: options.incremental === true ? "incremental mode" : undefined,
+    evidence: { testRun: undefined },
     criticality: criticalityCache({
       root,
       // Sources AND tests: both are in the program, so both contribute

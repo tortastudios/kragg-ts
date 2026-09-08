@@ -63,6 +63,7 @@ import {
   functionsNamed,
   uncoveredWithin,
   type FileCoverage,
+  type LineCoverageReport,
   type NormalizedCoverage,
 } from "../coverage/model.ts";
 import {
@@ -107,16 +108,17 @@ export interface CriticalCoverageOptions {
    */
   readonly report: unknown;
   /**
-   * The TEXT of an lcov tracefile, which is all `node --test` and `bun test`
-   * can produce.
+   * An lcov tracefile — its TEXT, or the report `adapters/support/lcov.ts`
+   * already parsed from it — which is all `node --test` and `bun test` can
+   * produce.
    *
    * ISTANBUL WINS when both are present, and that is not arbitrary: istanbul
    * states each function's full body span while lcov states only where it
-   * starts, so the richer document produces the better attribution. A project
-   * that has both has run vitest, and the lcov beside it is the older artifact
-   * more often than not.
+   * starts, so the richer document produces the better attribution. The
+   * caller is responsible for passing only documents from one run; the
+   * `check` pipeline passes exactly the one its test gate just produced.
    */
-  readonly lcov?: string | undefined;
+  readonly lcov?: string | LineCoverageReport | undefined;
   /** Compiler used to map modules to files. Defaults to the project's own. */
   readonly api?: TypeScriptApi | undefined;
 }
@@ -183,8 +185,11 @@ function normalize(options: CriticalCoverageOptions): NormalizedCoverage | null 
   if (typeof options.report === "object" && options.report !== null) {
     return normalizeIstanbul(options.report, options.root);
   }
-  if (options.lcov !== undefined && options.lcov !== "") {
+  if (typeof options.lcov === "string" && options.lcov !== "") {
     return normalizeLcov(parseLcov(options.lcov, "lcov.info"), options.root);
+  }
+  if (typeof options.lcov === "object") {
+    return normalizeLcov(options.lcov, options.root);
   }
   return null;
 }

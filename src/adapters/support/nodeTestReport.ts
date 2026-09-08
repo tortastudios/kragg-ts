@@ -81,6 +81,15 @@ const DIRECTIVE = /#\s*(skip|todo)\b/iu;
  * something else (a syntax error, a bad-option message), and a parser that
  * returned "zero failures" for it would report a green gate for a run that
  * never happened.
+ *
+ * ALSO `undefined` for a document that never reached node's `# fail` summary
+ * and recorded no failure on the way: the process died before finishing, and
+ * nothing in what it printed says whether the tests pass. Reporting that as a
+ * failed gate would send a reader looking for a failing test that does not
+ * exist; it is unusable evidence, and the caller reports it as such. When the
+ * partial document DOES record failures, those are real and are returned as
+ * violations — the run is still not a pass (`verdict`), but the pointers are
+ * the useful part.
  */
 export function parseNodeTap(text: string, root: string): TestReport | undefined {
   const lines = text.split("\n");
@@ -89,6 +98,9 @@ export function parseNodeTap(text: string, root: string): TestReport | undefined
   }
   const counts = readCounts(lines);
   const violations = readFailures(lines, root);
+  if (!counts.has("fail") && violations.length === 0) {
+    return undefined;
+  }
   return {
     summary: summarize(counts, violations.length),
     violations,
@@ -101,7 +113,9 @@ export function parseNodeTap(text: string, root: string): TestReport | undefined
  *
  * Either the version header or a summary count line is enough: a run killed
  * partway through has the header and no counts, and a reporter that omits the
- * header still emits counts. Requiring both would discard usable output.
+ * header still emits counts. Requiring both would discard the failures a
+ * partial document records; `parseNodeTap` decides what to do with a partial
+ * document that records none.
  */
 function looksLikeTap(lines: readonly string[]): boolean {
   return lines.some(

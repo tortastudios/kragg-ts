@@ -61,7 +61,15 @@ export type LcovReadResult =
   | { readonly ok: true; readonly report: LineCoverageReport }
   | Extract<CoverageReadResult, { ok: false }>;
 
-/** Read and parse an lcov tracefile. Never throws. */
+/**
+ * Read and parse an lcov tracefile. Never throws.
+ *
+ * A tracefile that ends INSIDE a record — its last non-blank line is not
+ * `end_of_record` — is refused as malformed. Every record a writer emits is
+ * closed with that line, so an open record at EOF means the writer was killed
+ * mid-file, and the records before it describe part of the run: reading them
+ * would report coverage over fewer files than the suite touched.
+ */
 export function readLcov(reportPath: string): LcovReadResult {
   const read = readReportFile(reportPath);
   if (!read.ok) {
@@ -77,7 +85,28 @@ export function readLcov(reportPath: string): LcovReadResult {
         "(expected `SF:` / `DA:` lines; the file may be truncated or empty)",
     };
   }
+  if (lastLine(read.text) !== "end_of_record") {
+    return {
+      ok: false,
+      reason: "malformed",
+      message:
+        `${reportPath} is truncated: it ends inside a record ` +
+        "(the last line is not `end_of_record`), so the writer did not finish",
+    };
+  }
   return { ok: true, report };
+}
+
+/** The last non-blank line, trimmed; `""` when there is none. */
+function lastLine(text: string): string {
+  const lines = text.split("\n");
+  for (let index = lines.length - 1; index >= 0; index -= 1) {
+    const line = lines[index]?.trim() ?? "";
+    if (line !== "") {
+      return line;
+    }
+  }
+  return "";
 }
 
 /**

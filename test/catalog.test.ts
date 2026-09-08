@@ -27,7 +27,11 @@ import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { after, describe, it } from "node:test";
 
+import type { TestRunFindings } from "../src/adapters/testRunner.ts";
+import { parseLcov } from "../src/adapters/support/lcov.ts";
+import { crashed } from "../src/adapters/support/outcome.ts";
 import { buildCheckGates, buildSecurityGates } from "../src/catalog.ts";
+import { checkPipeline } from "../src/catalog/check.ts";
 import {
   catalogContext,
   noCriticalityReason,
@@ -397,6 +401,147 @@ describe("outcome mapping: fail vs error vs skip", () => {
     assert.equal(floored.output, "", "a passing gate's raw output is still suppressed");
     assert.equal(floored.advisories.length, 1);
     assert.deepEqual(fromReport("t", base).advisories, []);
+  });
+});
+
+describe("critical-coverage consumes this run's evidence, never a file on disk", () => {
+  const PAY = [
+    "export function chargeCard(amount: number): number {",
+    "  if (amount < 0) {",
+    "    throw new Error('negative');",
+    "  }",
+    "  return amount * 2;",
+    "}",
+    "",
+  ].join("\n");
+
+  /** lcov as `node --test` would write it: line 3 (the throw) never ran. */
+  const LCOV_LINE_3_UNCOVERED = parseLcov(
+    "SF:src/pay.ts\nFN:1,chargeCard\nFNDA:1,chargeCard\nDA:1,1\nDA:2,1\nDA:3,0\nDA:5,1\nend_of_record\n",
+    "lcov.info",
+  );
+
+  /** istanbul as a PREVIOUS vitest run left it on disk: everything covered. */
+  function fullyCoveredIstanbul(root: string): string {
+    const path = join(root, "src", "pay.ts");
+    return JSON.stringify({
+      [path]: {
+        path,
+        statementMap: {
+          "0": { start: { line: 2, column: 2 }, end: { line: 4, column: 3 } },
+          "1": { start: { line: 3, column: 4 }, end: { line: 3, column: 32 } },
+          "2": { start: { line: 5, column: 2 }, end: { line: 5, column: 20 } },
+        },
+        fnMap: {
+          "0": {
+            name: "chargeCard",
+            decl: { start: { line: 1, column: 16 }, end: { line: 1, column: 26 } },
+            loc: { start: { line: 1, column: 51 }, end: { line: 6, column: 1 } },
+            line: 1,
+          },
+        },
+        branchMap: {},
+        s: { "0": 5, "1": 1, "2": 4 },
+        f: { "0": 5 },
+        b: {},
+      },
+    });
+  }
+
+  /** A `test-coverage` outcome that measured `evidence`, or no coverage at all. */
+  function findings(coverage: TestRunFindings["coverage"]): TestRunFindings {
+    return {
+      ok: true,
+      runner: "node",
+      source: "package.json#scripts.test",
+      command: ["node", "--test"],
+      summary: { total: 1, passed: 1, failed: 0, skipped: 0, todo: 0, failedFiles: 0 },
+      violations: [],
+      violationCount: 0,
+      coverage,
+      passed: coverage === null || coverage.ok,
+      error: coverage !== null && !coverage.ok,
+      output: "",
+    };
+  }
+
+  const measuredLcov: TestRunFindings["coverage"] = {
+    ok: true,
+    totals: { totalLines: 4, coveredLines: 3, pct: 75 },
+    reportPath: "lcov.info",
+    violation: undefined,
+    evidence: { format: "lcov", report: LCOV_LINE_3_UNCOVERED },
+  };
+
+  /** The pipeline over a repo whose criticality data names `chargeCard`. */
+  function pipeline(): { readonly ctx: ReturnType<typeof catalogContext>; readonly spec: GateSpec } {
+    const root = project();
+    mkdirSync(join(root, "src"), { recursive: true });
+    mkdirSync(join(root, "test"), { recursive: true });
+    mkdirSync(join(root, ".kragg"), { recursive: true });
+    mkdirSync(join(root, "coverage"), { recursive: true });
+    writeFileSync(join(root, "src", "pay.ts"), PAY);
+    writeFileSync(
+      join(root, ".kragg", "criticality.json"),
+      JSON.stringify([{ name: "src/pay#chargeCard", fan_in: 9, is_critical: true }]),
+    );
+    writeStamp(root, [...DEFAULT_POLICY.sourcePaths, ...DEFAULT_POLICY.testPaths]);
+    // The stale artifact the gate used to read: a runner switch away from
+    // vitest leaves it exactly here, and istanbul used to win over lcov.
+    writeFileSync(join(root, "coverage", "coverage-final.json"), fullyCoveredIstanbul(root));
+    const ctx = catalogContext({
+      root,
+      policy: DEFAULT_POLICY,
+      env: resolveProjectEnvironment(root),
+      targets: ["src"],
+    });
+    return { ctx, spec: find(checkPipeline(ctx), "critical-coverage") };
+  }
+
+  it("reports the uncovered line the test gate's lcov measured, not the stale istanbul's pass", async () => {
+    const { ctx, spec } = pipeline();
+    ctx.evidence.testRun = findings(measuredLcov);
+    const result = await spec.run();
+    assert.equal(result.skipped, false);
+    assert.equal(result.passed, false);
+    assert.equal(result.violationCount, 1);
+    assert.match(result.violations[0]?.message ?? "", /chargeCard has 1 uncovered lines/u);
+    assert.equal(result.violations[0]?.line, 3);
+  });
+
+  it("passes on istanbul evidence from this run that covers everything", async () => {
+    const { ctx, spec } = pipeline();
+    const raw: unknown = JSON.parse(fullyCoveredIstanbul(ctx.root));
+    assert.ok(typeof raw === "object" && raw !== null);
+    ctx.evidence.testRun = findings({
+      ...measuredLcov,
+      evidence: { format: "istanbul", raw: raw as Readonly<Record<string, unknown>> },
+    });
+    const result = await spec.run();
+    assert.equal(result.passed, true);
+  });
+
+  it("skips visibly, naming the cause, whenever this run produced no coverage", async () => {
+    const { ctx, spec } = pipeline();
+    const reasonWhen = async (testRun: TestRunFindings["coverage"] | "absent" | "crashed") => {
+      ctx.evidence.testRun =
+        testRun === "absent"
+          ? undefined
+          : testRun === "crashed"
+            ? crashed("vitest exited 1 without a complete test report")
+            : findings(testRun);
+      const result = await spec.run();
+      assert.equal(result.skipped, true, "must skip, never read the istanbul file on disk");
+      assert.equal(result.passed, false);
+      return result.skipReason ?? "";
+    };
+    assert.match(await reasonWhen("absent"), /test-coverage did not run in this invocation/u);
+    assert.match(await reasonWhen("crashed"), /test-coverage could not run \(vitest exited 1/u);
+    assert.match(await reasonWhen(null), /`coverage_fail_under` is 0 or less/u);
+    assert.match(
+      await reasonWhen({ ok: false, message: "no complete coverage report for this run — x\nadvice" }),
+      /could not read a complete coverage report \(no complete coverage report for this run — x\)/u,
+    );
   });
 });
 

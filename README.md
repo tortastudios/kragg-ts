@@ -129,6 +129,15 @@ mostly-deterministic signals:
   functions ranked by fan-in, instead of a gameable global percentage. The
   `critical-coverage` gate fails on any uncovered line in a critical function.
   Works under vitest (istanbul JSON), `node --test` and `bun test` (lcov).
+  Both gates believe only **this invocation's** evidence: the runner writes
+  into a private `.kragg/runs/` directory that did not exist before the run,
+  so a runner that crashes, times out or leaves a partial report is an error
+  (exit 3) — never a re-read of an older report, and never the other runner's
+  format after a switch — and `critical-coverage` consumes the coverage
+  `test-coverage` just measured rather than any file on disk. Two `kragg
+  check`s in one project cannot read each other's artifacts. Once read, the
+  coverage artifact is published to `coverage_report_path` (istanbul) or the
+  `lcov.info` beside it, which is what `kragg coverage` reads on demand.
 - **what's defended** — `kragg mutation` runs Stryker over critical files and
   reports surviving mutants as `file:line`. Accept equivalent mutants with
   `--update-baseline`; that baseline is the one `.kragg/` file deliberately
@@ -235,6 +244,7 @@ Deliberate, and documented at each site:
 | `audit` | knip, which covers both vulture (dead code) and deptry (dependency hygiene). |
 | criticality | Fingerprinted by a sidecar stamp, so stale call-graph data is re-derived rather than trusted. `criticality.json` itself stays byte-compatible with Python's reader. |
 | `secret_name_suffixes` | Includes `ServiceKey`, which Python's default list lacks. |
+| test evidence | Python reads `.kragg/coverage.json` from a fixed path. kragg-ts gives every invocation its own `.kragg/runs/` directory, refuses anything incomplete, and hands `critical-coverage` the coverage in memory. Same gates, same wire format; only the provenance rule differs. |
 
 ## Supply chain
 

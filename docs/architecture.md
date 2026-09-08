@@ -295,6 +295,23 @@ model that both istanbul JSON and lcov are reduced to, so
 `critical-coverage` has one shape to reason about regardless of which runner
 the project uses.
 
+**A report is evidence only for the run that produced it.** The test runner
+is pointed at a directory created for this invocation alone
+(`.kragg/runs/test-XXXXXX`, `mkdtemp`, so two concurrent runs get two), and
+the gate reads back only what appeared there. That makes provenance a
+property of the path rather than of a timestamp: a crashed runner leaves the
+directory empty and the gate is `error: true`; a killed one
+(`CompletedCommand.killed`) is an error whatever it managed to write; a
+partial report — truncated JSON, an lcov that ends inside a record, a TAP
+stream with no summary and no failure — is refused, not read as fewer
+results. `critical-coverage` never touches the disk at all: `test-coverage`
+records its outcome in `CatalogContext.evidence` and the dependent gate reads
+that, so a runner switch cannot hand it the previous runner's format. The
+directory is removed once read, and the coverage artifact is published to
+`coverage_report_path` for `kragg coverage`. `kragg mutation` cannot be
+given a directory (Stryker's report path comes from its config), so it clears
+the previous report and refuses to start if the path still exists.
+
 ### Step 4 — distinguish "the tool crashed" from "the tool found problems"
 
 **For most tools this cannot be done from the exit code alone**, and getting it

@@ -18,7 +18,23 @@ a previously green run red — see [Gate additions](#gate-additions) below.
 
 ## [Unreleased]
 
-Nothing yet.
+### Fixed
+
+- TOR-1360: `test-coverage` and `critical-coverage` accept only complete
+  evidence from the current invocation. The runner writes into a private
+  `.kragg/runs/` directory created for the run (so concurrent runs cannot read
+  each other's artifacts); a runner that crashes, is killed by the timeout, or
+  leaves a partial report (truncated JSON, an lcov ending inside a record, TAP
+  with no summary) is `error: true` / exit 3 — previously a stale
+  `.kragg/test-report.json` or `coverage/coverage-final.json` from an earlier
+  run could pass the gate. Green tests with no usable coverage artifact are
+  likewise an error (with any test failures still listed), not a plain
+  failure. `critical-coverage` now consumes the coverage `test-coverage` just
+  measured instead of re-reading disk, so switching from vitest to `node
+  --test`/`bun test` can no longer select the older istanbul report over this
+  run's lcov. The coverage artifact is published to `coverage_report_path`
+  afterwards for `kragg coverage`. `kragg mutation` refuses to start Stryker
+  while an earlier report it could not remove is still at the report path.
 
 ## [0.0.0] — unreleased
 

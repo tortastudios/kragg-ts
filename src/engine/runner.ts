@@ -311,6 +311,9 @@ export function runCommand(
           returncode: exitCodeOf(error),
           stdout,
           stderr: stderr === "" && error !== null ? String(error.message) : stderr,
+          // `killed` is set by execFile only when IT sent the signal — on
+          // timeout or maxBuffer — never for a process that died on its own.
+          ...(error?.killed === true ? { killed: true } : {}),
         });
       },
     );
