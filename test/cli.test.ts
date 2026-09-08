@@ -625,7 +625,7 @@ describe("the help text and the flag table cannot drift apart", () => {
     const documented = documentedTable();
     assert.deepEqual(
       [...documented.keys()].sort(),
-      ["brief", "check", "criticality", "fix", "flaky", "map", "mutation", "security", "status"],
+      ["brief", "check", "criticality", "fix", "flaky", "init", "map", "mutation", "security", "status"],
     );
     assert.deepEqual(documented.get("criticality"), ["write", "path"]);
     assert.deepEqual(allowedTable().get("mutation"), ["path", "since", "all", "update-baseline"]);
