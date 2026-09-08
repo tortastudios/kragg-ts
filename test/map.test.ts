@@ -35,7 +35,7 @@ import {
   runMap,
   writeMap,
 } from "../src/commands/map.ts";
-import { clamp, compact } from "../src/commands/map/render.ts";
+import { callSignature, clamp, compact, typeParameters } from "../src/commands/map/render.ts";
 import { criticalityFreshness } from "../src/gates/criticality.ts";
 import { DEFAULT_POLICY, type KraggPolicy } from "../src/policy/policy.ts";
 
@@ -379,5 +379,101 @@ describe("map: text helpers", () => {
   it("truncates with an ellipsis only past the limit", () => {
     assert.equal(clamp("abcde", 5), "abcde");
     assert.equal(clamp("abcdef", 5), "abcd…");
+  });
+});
+
+/**
+ * The signature renderer on its own.
+ *
+ * `buildMap` above only ever shows the signature that survives elision and
+ * risk-flagging. What a caller actually needs from a map line — can I call
+ * this with what I have — is decided here: optionality, rest, destructuring
+ * and the deliberate omission of an unannotated return. Each of those is a
+ * place where a plausible-looking line would answer that question WRONGLY,
+ * which is worse than omitting it.
+ */
+describe("callSignature / typeParameters", () => {
+  function parse(code: string): ts.SourceFile {
+    return ts.createSourceFile("snippet.ts", code, ts.ScriptTarget.Latest, true, ts.ScriptKind.TS);
+  }
+
+  /** The first function declaration in a snippet, with its file. */
+  function declaration(code: string): {
+    node: ts.FunctionDeclaration;
+    file: ts.SourceFile;
+  } {
+    const file = parse(code);
+    const found = file.statements.find(
+      (statement): statement is ts.FunctionDeclaration => ts.isFunctionDeclaration(statement),
+    );
+    assert.ok(found !== undefined, `expected a function declaration in: ${code}`);
+    return { node: found, file };
+  }
+
+  function signatureOf(code: string): string {
+    const { node, file } = declaration(code);
+    return callSignature(node, file, ts);
+  }
+
+  it("renders parameters and an annotated return", () => {
+    assert.equal(
+      signatureOf("function f(root: string, api: TypeScriptApi): CompilerResolution {}\n"),
+      "(root: string, api: TypeScriptApi): CompilerResolution",
+    );
+  });
+
+  it("omits a return type that was never written, rather than inferring one", () => {
+    assert.equal(signatureOf("function f(a: number) {}\n"), "(a: number)");
+  });
+
+  it("renders `?` for both spellings of an omittable argument", () => {
+    assert.equal(
+      signatureOf("function f(a?: number, b: string = 'x') {}\n"),
+      "(a?: number, b?: string)",
+      "a default and a `?` mean the same thing at the call site",
+    );
+  });
+
+  it("keeps the rest marker, and says `{…}` for a destructured parameter", () => {
+    assert.equal(
+      signatureOf("function f({ a, b }: Options, ...rest: number[]) {}\n"),
+      "({…}: Options, ...rest: number[])",
+    );
+  });
+
+  it("collapses a type written across several lines onto one", () => {
+    assert.equal(
+      signatureOf("function f(a: {\n  x: number;\n  y: number;\n}) {}\n"),
+      "(a: { x: number; y: number; })",
+    );
+  });
+
+  it("prefixes the type parameters, dropping constraints and defaults", () => {
+    assert.equal(
+      signatureOf(
+        "function f<T extends Record<string, unknown>, U = never>(value: T): U {}\n",
+      ),
+      "<T, U>(value: T): U",
+    );
+  });
+
+  it("returns nothing for a declaration that is not generic", () => {
+    const { node } = declaration("function f(a: number) {}\n");
+    assert.equal(typeParameters(node, ts), "");
+  });
+
+  it("returns nothing for a node that cannot carry type parameters at all", () => {
+    const file = parse("const x = 1;\n");
+    const statement = file.statements[0];
+    assert.ok(statement !== undefined);
+    assert.equal(typeParameters(statement, ts), "");
+  });
+
+  it("reads type parameters off an interface and a type alias too", () => {
+    const file = parse("interface Box<T> { value: T }\ntype Pair<A, B> = [A, B];\n");
+    const [box, pair] = file.statements;
+    assert.ok(box !== undefined && pair !== undefined);
+    assert.equal(typeParameters(box, ts), "<T>");
+    assert.equal(typeParameters(pair, ts), "<A, B>");
   });
 });

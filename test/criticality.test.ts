@@ -66,6 +66,7 @@ import {
   writeStamp,
   type FunctionProfile,
 } from "../src/gates/criticality.ts";
+import { newScope, qualify, recordFunction } from "../src/gates/criticality/scope.ts";
 
 const temporaryRoots: string[] = [];
 
@@ -806,5 +807,71 @@ describe("the top-N limit is presentation, not enforcement", () => {
 
   it("prints the table it always printed", () => {
     assert.ok(printed.some((line) => line.startsWith("Wrote ")));
+  });
+});
+
+/**
+ * The registration pass's one write, on its own.
+ *
+ * `recordFunction` keys TWO maps with DIFFERENT nodes on purpose: `functions`
+ * by the node the checker hands back for a symbol, `bodies` by the node whose
+ * subtree holds the calls to attribute. Collapsing them would silently
+ * mis-attribute every call inside an arrow-const — the shape most of this
+ * codebase is written in — so the two keys are pinned here rather than
+ * inferred from a graph three layers downstream.
+ */
+describe("recordFunction", () => {
+  function firstFunction(code: string): {
+    declaration: ts.FunctionDeclaration;
+    body: ts.Block;
+  } {
+    const file = ts.createSourceFile(
+      "snippet.ts",
+      code,
+      ts.ScriptTarget.Latest,
+      true,
+      ts.ScriptKind.TS,
+    );
+    const declaration = file.statements.find(
+      (statement): statement is ts.FunctionDeclaration =>
+        ts.isFunctionDeclaration(statement) && statement.body !== undefined,
+    );
+    assert.ok(declaration !== undefined, `expected a function with a body in: ${code}`);
+    const body = declaration.body;
+    assert.ok(body !== undefined);
+    return { declaration, body };
+  }
+
+  it("keys the declaration and the body separately, under one name", () => {
+    const scope = newScope(ts);
+    const { declaration, body } = firstFunction("export function send(a: number) { return a; }\n");
+    const name = qualify("src/client", [], "send");
+    assert.equal(name, "src/client#send");
+
+    recordFunction(scope, declaration, body, name);
+
+    assert.deepEqual([...scope.names], [name]);
+    assert.equal(scope.functions.get(declaration), name);
+    assert.equal(scope.bodies.get(body), name);
+    assert.equal(scope.bodies.get(declaration), undefined, "the body key is the body");
+    assert.equal(scope.classes.size, 0);
+    assert.equal(scope.constructors.size, 0);
+  });
+
+  it("lets an overload set collapse onto one name without duplicating it", () => {
+    const scope = newScope(ts);
+    const one = firstFunction("export function send(a: number) { return a; }\n");
+    const two = firstFunction("export function send(a: string) { return a; }\n");
+    const name = qualify("src/client", ["Client"], "send");
+    assert.equal(name, "src/client#Client.send");
+
+    recordFunction(scope, one.declaration, one.body, name);
+    recordFunction(scope, two.declaration, two.body, name);
+
+    assert.equal(scope.names.size, 1, "one name, however many signatures declare it");
+    assert.equal(scope.functions.size, 2);
+    assert.equal(scope.functions.get(one.declaration), name);
+    assert.equal(scope.functions.get(two.declaration), name);
+    assert.equal(scope.bodies.get(two.body), name);
   });
 });

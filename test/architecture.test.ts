@@ -24,9 +24,16 @@ import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { after, describe, it } from "node:test";
 
-import { clearCompilerCache } from "../src/analysis/sourceFile.ts";
+import { clearCompilerCache, resolveTypeScript } from "../src/analysis/sourceFile.ts";
 import type { Violation } from "../src/engine/models.ts";
 import { checkLayers, checkStructure, clearAliasCache } from "../src/gates/architecture.ts";
+import { existingFile, loadAliases } from "../src/gates/architecture/aliases.ts";
+import {
+  layerIndex,
+  parseCached,
+  resolveTarget,
+  type ResolveContext,
+} from "../src/gates/architecture/resolve.ts";
 
 /** Layers used throughout: modules are named relative to the REPO ROOT. */
 const LAYERS: readonly string[] = ["src/entrypoints", "src/services", "src/domain"];
@@ -562,5 +569,136 @@ describe("checkStructure / `export *` re-exports", () => {
     });
     clearAliasCache();
     assert.equal(found.count, 2);
+  });
+});
+
+/**
+ * The specifier resolver on its own, rather than through `checkLayers`.
+ *
+ * `resolveTarget` is where every TypeScript-only escape route is decided, and
+ * the gate above can only observe the answers that end in a breach. The rest
+ * are pinned here, because each one is a place where a wrong answer becomes a
+ * silent PASS rather than a visible violation: a package mistaken for a
+ * module, a layer-prefixed bare specifier treated as external, a relative
+ * path silently dropped because nothing on disk confirms it.
+ */
+describe("resolveTarget / layerIndex / parseCached", () => {
+  function contextFor(root: string): ResolveContext {
+    const api = resolveTypeScript(root).api;
+    return {
+      root,
+      api,
+      layers: LAYERS,
+      aliases: loadAliases(root, api),
+      parsed: new Map(),
+      seen: new Set(),
+    };
+  }
+
+  it("indexes a module by the layer that prefixes it", () => {
+    assert.equal(layerIndex("src/entrypoints", LAYERS), 0);
+    assert.equal(layerIndex("src/services/inner/deep", LAYERS), 1);
+    assert.equal(layerIndex("src/domain/x", LAYERS), 2);
+  });
+
+  it("refuses a module that merely starts with a layer's characters", () => {
+    assert.equal(layerIndex("src/domainless/x", LAYERS), null);
+    assert.equal(layerIndex("src/entrypointsX", LAYERS), null);
+    assert.equal(layerIndex("vendor/thing", LAYERS), null);
+    assert.equal(layerIndex("src/domain", []), null);
+  });
+
+  it("pins a relative specifier to the file it names", () => {
+    const root = project({ [HIGH]: HIGH_SOURCE, "src/domain/consumer.ts": "" });
+    const target = resolveTarget(
+      "../entrypoints/high.ts",
+      join(root, "src/domain/consumer.ts"),
+      contextFor(root),
+    );
+    assert.ok(target.kind === "module", `expected a module, got ${target.kind}`);
+    assert.equal(target.module, "src/entrypoints/high");
+    assert.equal(target.file, join(root, HIGH));
+  });
+
+  it("still names the module of a relative specifier nothing on disk confirms", () => {
+    const root = project({ "src/domain/consumer.ts": "" });
+    const target = resolveTarget(
+      "../entrypoints/gone.ts",
+      join(root, "src/domain/consumer.ts"),
+      contextFor(root),
+    );
+    assert.ok(target.kind === "module", `expected a module, got ${target.kind}`);
+    assert.equal(target.module, "src/entrypoints/gone");
+    assert.equal(target.file, null, "an unconfirmed path must not invent a file");
+  });
+
+  it("treats a package and a Node builtin as unrestricted", () => {
+    const root = project({ "src/domain/consumer.ts": "" });
+    const context = contextFor(root);
+    const from = join(root, "src/domain/consumer.ts");
+    assert.equal(resolveTarget("typescript", from, context).kind, "external");
+    assert.equal(resolveTarget("node:path", from, context).kind, "external");
+  });
+
+  it("treats a bare specifier prefixed by a declared layer as that module", () => {
+    const root = project({ "src/domain/consumer.ts": "" });
+    const target = resolveTarget(
+      "src/entrypoints/high",
+      join(root, "src/domain/consumer.ts"),
+      contextFor(root),
+    );
+    assert.ok(target.kind === "module", `expected a module, got ${target.kind}`);
+    assert.equal(target.module, "src/entrypoints/high");
+    assert.equal(target.file, null);
+  });
+
+  it("resolves a specifier through `baseUrl` when no `paths` pattern matches", () => {
+    clearAliasCache();
+    const root = project({
+      "tsconfig.json": JSON.stringify({ compilerOptions: { baseUrl: "." } }),
+      [HIGH]: HIGH_SOURCE,
+      "src/domain/consumer.ts": "",
+    });
+    const target = resolveTarget(
+      "src/entrypoints/high",
+      join(root, "src/domain/consumer.ts"),
+      contextFor(root),
+    );
+    clearAliasCache();
+    assert.ok(target.kind === "module", `expected a module, got ${target.kind}`);
+    assert.equal(target.module, "src/entrypoints/high");
+    assert.equal(target.file, join(root, HIGH));
+  });
+
+  it("parses a file once per run and remembers the misses too", () => {
+    const root = project({ [HIGH]: HIGH_SOURCE });
+    const context = contextFor(root);
+    const path = join(root, HIGH);
+
+    const first = parseCached(path, context);
+    assert.ok(first !== null, "an existing file must parse");
+    assert.equal(first.relative, "src/entrypoints/high.ts");
+    assert.equal(parseCached(path, context), first, "a second call must reuse the parse");
+    assert.equal(context.parsed.size, 1);
+
+    const missing = join(root, "src/entrypoints/gone.ts");
+    assert.equal(parseCached(missing, context), null);
+    assert.equal(context.parsed.size, 2, "a failed parse must be remembered, not retried");
+    assert.equal(context.parsed.get(missing), null);
+  });
+
+  it("probes extensions in the compiler's order, and answers null for nothing", () => {
+    const root = project({
+      "src/domain/plain.ts": "export const a = 1;\n",
+      "src/domain/hub/index.ts": "export const b = 2;\n",
+    });
+    assert.equal(existingFile(join(root, "src/domain/plain.ts")), join(root, "src/domain/plain.ts"));
+    assert.equal(existingFile(join(root, "src/domain/plain")), join(root, "src/domain/plain.ts"));
+    assert.equal(
+      existingFile(join(root, "src/domain/hub")),
+      join(root, "src/domain/hub/index.ts"),
+      "a directory is not a file; the index inside it is",
+    );
+    assert.equal(existingFile(join(root, "src/domain/absent")), null);
   });
 });

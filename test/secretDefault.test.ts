@@ -34,6 +34,11 @@ import ts from "typescript";
 
 import type { Violation } from "../src/engine/models.ts";
 import { checkSecretDefaults, SECRET_DEFAULT_CODE } from "../src/gates/secretDefault.ts";
+import {
+  hasUsableSuffix,
+  isSecretName,
+  normalizeIdentifier,
+} from "../src/gates/secretDefault/names.ts";
 import { DEFAULT_POLICY } from "../src/policy/policy.ts";
 
 const SUFFIXES = DEFAULT_POLICY.secretNameSuffixes;
@@ -472,5 +477,46 @@ describe("secret-default: suppression and outcome", () => {
       return;
     }
     assert.equal(outcome.violations.length, 0);
+  });
+});
+
+/**
+ * The matcher itself, including the two inputs the gate above cannot show it.
+ *
+ * A POLICY TYPO IS THE FAILURE MODE THAT MATTERS HERE, in both directions: an
+ * empty suffix that matched everything would turn every identifier in the repo
+ * into a credential, and an identifier that normalizes to nothing must not be
+ * made to match a suffix by the empty-string `endsWith` rule. Both would be
+ * discovered as a wall of noise on somebody else's repository, so both are
+ * pinned on the function.
+ */
+describe("isSecretName", () => {
+  it("matches across every casing and separator convention", () => {
+    for (const name of ["API_KEY", "api-key", "apiKey", "ApiKey", "api.key"]) {
+      assert.equal(isSecretName(name, ["ApiKey"]), true, name);
+    }
+    assert.equal(normalizeIdentifier("API_KEY"), "apikey");
+  });
+
+  it("answers false for an identifier that normalizes to nothing", () => {
+    // `_`, `$` and `#` carry no alphanumerics, so there is no name left to
+    // compare. Without the early return, `"".endsWith("")` would be true for a
+    // policy that also carried an empty suffix.
+    assert.equal(isSecretName("_", ["ApiKey"]), false);
+    assert.equal(isSecretName("", ["ApiKey"]), false);
+    assert.equal(isSecretName("$$_$$", [""]), false);
+    assert.equal(isSecretName("__", ["", "Secret"]), false);
+  });
+
+  it("skips an empty suffix instead of letting it match everything", () => {
+    assert.equal(isSecretName("sortOrder", [""]), false);
+    assert.equal(isSecretName("sortOrder", ["_", "-"]), false);
+    assert.equal(isSecretName("sortOrder", ["", "SortOrder"]), true);
+  });
+
+  it("reports whether a suffix list can ever match anything", () => {
+    assert.equal(hasUsableSuffix(["ApiKey"]), true);
+    assert.equal(hasUsableSuffix([]), false);
+    assert.equal(hasUsableSuffix(["", "_", "--"]), false);
   });
 });

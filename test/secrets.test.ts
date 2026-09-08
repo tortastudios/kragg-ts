@@ -35,6 +35,7 @@ import {
   type SecretsOutcome,
 } from "../src/gates/secrets.ts";
 import * as gitleaks from "../src/gates/secrets/gitleaks.ts";
+import { isRecord, MAX_TEXT_LENGTH, plainText } from "../src/gates/secrets/types.ts";
 import * as secretlint from "../src/gates/secrets/secretlint.ts";
 
 /**
@@ -496,5 +497,60 @@ describe("finding gitleaks on PATH", () => {
     const asDirectory = sandbox();
     mkdirSync(join(asDirectory, "gitleaks"));
     assert.equal(findGitleaksOnPath(asDirectory), null);
+  });
+});
+
+/**
+ * The two narrowing helpers every scanner report is read through.
+ *
+ * `plainText` is the only thing standing between a hostile repository and the
+ * reviewer's terminal: a rule description travels from untrusted content,
+ * through a scanner, into a line printed next to a count of findings. The
+ * adapters above exercise the happy path; the adversarial inputs are pinned
+ * here, on the function itself. The control characters are BUILT rather than
+ * written, so this file stays printable.
+ */
+describe("plainText / isRecord", () => {
+  /** ESC — the first byte of every ANSI sequence. */
+  const ESC = String.fromCodePoint(0x1b);
+  /** A C1 control, which a terminal honours just as readily as a C0 one. */
+  const C1 = String.fromCodePoint(0x9b);
+
+  it("strips C0 and C1 controls rather than escaping them", () => {
+    assert.equal(
+      plainText(`aws${ESC}[2A key found`, "fallback"),
+      "aws [2A key found",
+      "an ANSI cursor-move must not survive into a terminal",
+    );
+    assert.equal(plainText(`a${C1}b`, "fallback"), "a b");
+    assert.equal(plainText("  ragged   spacing  ", "fallback"), "ragged spacing");
+  });
+
+  it("falls back for anything that is not a usable string", () => {
+    assert.equal(plainText(undefined, "no description"), "no description");
+    assert.equal(plainText(42, "no description"), "no description");
+    assert.equal(plainText(null, "no description"), "no description");
+    assert.equal(plainText(["a"], "no description"), "no description");
+    // A string made ENTIRELY of controls and whitespace strips to nothing, and
+    // the fallback is the honest answer where an empty message would not be.
+    assert.equal(plainText(`${ESC}${C1} `, "no description"), "no description");
+    assert.equal(plainText("   ", "no description"), "no description");
+  });
+
+  it("caps a long string with an ellipsis instead of letting it scroll", () => {
+    const capped = plainText("x".repeat(MAX_TEXT_LENGTH + 50), "fallback");
+    assert.equal(capped.length, MAX_TEXT_LENGTH + 1);
+    assert.ok(capped.endsWith("\u2026"));
+
+    const exact = "y".repeat(MAX_TEXT_LENGTH);
+    assert.equal(plainText(exact, "fallback"), exact, "at the limit nothing is elided");
+  });
+
+  it("narrows only to a plain object", () => {
+    assert.equal(isRecord({ a: 1 }), true);
+    assert.equal(isRecord([1, 2]), false, "an array is not the shape either report uses");
+    assert.equal(isRecord(null), false);
+    assert.equal(isRecord("{}"), false);
+    assert.equal(isRecord(undefined), false);
   });
 });
