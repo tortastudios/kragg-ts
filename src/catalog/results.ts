@@ -162,6 +162,17 @@ export interface RanReport {
    * they are looking at.
    */
   readonly advisories?: readonly Violation[] | undefined;
+  /**
+   * The tool ran and its findings stand, but its evidence is INCOMPLETE:
+   * ERROR, exit 3, with the findings still listed.
+   *
+   * `test-coverage` sets it when the tests ran but the coverage floor could
+   * not be checked. Neither a pass (the floor went unenforced) nor a plain
+   * failure (the missing number is not a finding anyone can fix in the code),
+   * and dropping the test failures that WERE found would hide real findings
+   * behind the environment problem.
+   */
+  readonly error?: boolean | undefined;
 }
 
 /**
@@ -176,21 +187,24 @@ export interface RanReport {
  * Raw output is suppressed when the run passed or when violations were parsed,
  * matching `_project_tool_gate`: showing a tool's own chatter next to parsed
  * findings is noise, and `processGate` only falls back to it when a failing
- * gate produced nothing structured.
+ * gate produced nothing structured. An ERROR always keeps it: the output is
+ * where the adapter says what evidence was expected and what was found.
  */
 export function fromReport(name: string, outcome: RanReport | Unavailable): GateResult {
   if (!outcome.ok) {
     return fromUnavailable(name, outcome);
   }
+  const error = outcome.error === true;
   const parsed = outcome.violations.length > 0;
   return gateResult({
     name,
     passed: outcome.passed,
-    output: outcome.passed || parsed ? "" : outcome.output,
+    output: outcome.passed || (parsed && !error) ? "" : outcome.output,
     command: outcome.command,
     violations: outcome.violations,
     violationCount: outcome.violationCount,
     advisories: outcome.advisories ?? [],
+    error,
   });
 }
 

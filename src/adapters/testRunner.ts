@@ -28,6 +28,18 @@
  * backwards tells someone to reinstall their toolchain when they have a typo
  * in an import.
  *
+ * ── EVIDENCE MUST BE THIS RUN'S, AND COMPLETE ──────────────────────────────
+ * Every report is read from a directory that did not exist before this
+ * invocation (`support/testCommands.ts`, `RUNS_DIR`), so a runner that crashes
+ * cannot be credited with the report a previous run left behind, and a runner
+ * switch cannot pick up the other runner's format. Three things are then
+ * treated as UNUSABLE evidence — `error: true`, exit 3, never a pass and never
+ * a plain failure: kragg killed the runner (timeout), the runner exited
+ * without a complete report, or coverage was asked for and no complete
+ * coverage artifact came back. A complete report that says tests FAILED is the
+ * opposite case — a genuine finding, exit 1 — and the two are kept apart so a
+ * reader is never sent to fix tests that never ran.
+ *
  * ── COVERAGE: WHY kragg COMPUTES THE PERCENTAGE ITSELF ─────────────────────
  * All three runners can enforce a coverage threshold, and all three signal it
  * with **exit code 1 — the same code as a failing test**:
@@ -63,9 +75,9 @@
  */
 
 import { mkdirSync } from "node:fs";
-import { dirname } from "node:path";
 
-import type { Violation } from "../engine/models.ts";
+import type { LineCoverageReport } from "../coverage/model.ts";
+import type { CompletedCommand, Violation } from "../engine/models.ts";
 import { runCommand } from "../engine/runner.ts";
 import {
   missingTool as missingToolName,
@@ -77,6 +89,7 @@ import { coverageTotals, readCoverageReport } from "./support/coverage.ts";
 import type { CoverageTotals } from "./support/coverage.ts";
 import { detectTestRunner } from "./support/detect.ts";
 import type { RunnerDetection, TestRunnerChoice, TestRunnerName } from "./support/detect.ts";
+import type { JsonObject } from "./support/json.ts";
 import { readLcov } from "./support/lcov.ts";
 import { parseBunTest } from "./support/bunTestReport.ts";
 import { parseNodeTap } from "./support/nodeTestReport.ts";
@@ -87,8 +100,16 @@ import type { TestReport, TestSummary } from "./support/testReport.ts";
 import { capped, crashed, missingTool, notConfigured } from "./support/outcome.ts";
 import type { Unavailable } from "./support/outcome.ts";
 import { runOptions } from "./support/run.ts";
-import { artifacts, buildCommand, resolveRunner } from "./support/testCommands.ts";
+import {
+  artifacts,
+  buildCommand,
+  createRunDir,
+  discardRunDir,
+  publishCoverage,
+  resolveRunner,
+} from "./support/testCommands.ts";
 import type { Artifacts } from "./support/testCommands.ts";
+import { crashMessage, killedMessage } from "./support/testEvidence.ts";
 
 /** Gate name, matching the Python gate this replaces. */
 export const TEST_GATE = "test-coverage";
@@ -111,6 +132,17 @@ export interface TestRunnerOptions {
   readonly timeoutMs?: number | undefined;
 }
 
+/**
+ * The coverage document THIS run produced, in the format its runner writes.
+ *
+ * Handed to the gates that depend on coverage (`critical-coverage`) so they
+ * consume what this invocation measured and never re-read a path on disk —
+ * which, after a runner switch, holds the other runner's older format.
+ */
+export type CoverageEvidence =
+  | { readonly format: "istanbul"; readonly raw: JsonObject }
+  | { readonly format: "lcov"; readonly report: LineCoverageReport };
+
 /** Coverage was measured, or could not be. Never silently absent. */
 export type CoverageOutcome =
   | {
@@ -118,6 +150,7 @@ export type CoverageOutcome =
       readonly totals: CoverageTotals;
       readonly reportPath: string;
       readonly violation: Violation | undefined;
+      readonly evidence: CoverageEvidence;
     }
   | { readonly ok: false; readonly message: string };
 
@@ -135,6 +168,13 @@ export interface TestRunFindings {
   /** `null` when `coverageFailUnder <= 0` — coverage was not asked for. */
   readonly coverage: CoverageOutcome | null;
   readonly passed: boolean;
+  /**
+   * The tests ran and their verdict stands, but the evidence is incomplete:
+   * coverage was asked for and no usable artifact came back. Exit 3, with any
+   * test failures still listed. `passed: false` alone would say "coverage is
+   * below the floor" about a number that was never measured.
+   */
+  readonly error: boolean;
   readonly output: string;
 }
 
@@ -147,75 +187,74 @@ export async function runTests(options: TestRunnerOptions): Promise<TestRunOutco
   if (detection.runner === undefined) {
     return notConfigured(skipReason(detection, env));
   }
-
-  const layout = artifacts(env.root, options.coverageReportPath);
-  const withCoverage = options.coverageFailUnder > 0;
   const resolved = resolveRunner(env, detection.runner);
   if (!resolved.ok) {
     return resolved;
   }
+  const runDir = createRunDir(env.root);
+  if (!runDir.ok) {
+    return runDir;
+  }
+  const layout = artifacts(env.root, options.coverageReportPath, runDir.dir);
+  try {
+    return await runInto(layout, detection, detection.runner, resolved.bin, options);
+  } finally {
+    discardRunDir(layout);
+  }
+}
 
-  mkdirIgnoringErrors(dirname(layout.reportFile));
+/** Spawn the runner into `layout.runDir` and read back only what it wrote there. */
+async function runInto(
+  layout: Artifacts,
+  detection: RunnerDetection,
+  runner: TestRunnerName,
+  bin: string,
+  options: TestRunnerOptions,
+): Promise<TestRunOutcome> {
+  const withCoverage = options.coverageFailUnder > 0;
   if (withCoverage) {
     mkdirIgnoringErrors(layout.coverageDir);
   }
+  const command = buildCommand(bin, runner, layout, withCoverage, options.testPatterns ?? []);
+  const result = await runCommand(TEST_GATE, command, layout.root, runOptions(options.timeoutMs));
 
-  const command = buildCommand(
-    resolved.bin,
-    detection.runner,
-    layout,
-    withCoverage,
-    options.testPatterns ?? [],
-  );
-  const result = await runCommand(TEST_GATE, command, env.root, runOptions(options.timeoutMs));
-
-  const environmentFailure = runnerMissing(env, detection.runner, result.stdout, result.stderr);
+  const environmentFailure = runnerMissing(options.env, runner, result.stdout, result.stderr);
   if (environmentFailure !== undefined) {
     return environmentFailure;
   }
-
-  const report = parseResults(
-    detection.runner,
-    result.stdout,
-    result.stderr,
-    layout,
-    env.root,
-    result.returncode,
-  );
+  if (result.killed === true) {
+    return crashed(killedMessage(runner, options.timeoutMs, result));
+  }
+  const report = parseResults(runner, result, layout);
   if (report === undefined) {
-    return crashed(
-      crashMessage(detection.runner, command, result.returncode, result.stdout, result.stderr),
-    );
+    return crashed(crashMessage(runner, result, layout));
   }
 
-  const coverage = withCoverage
-    ? readCoverage(detection.runner, layout, options.coverageFailUnder)
-    : null;
-  return assemble(detection, command, report, coverage, options.maxViolations);
+  const coverage = withCoverage ? readCoverage(runner, layout, options.coverageFailUnder) : null;
+  const published = coverage?.ok === true ? publishCoverage(layout, runner) : undefined;
+  return assemble(detection, runner, command, report, coverage, published, options.maxViolations);
 }
 
 /** Parse whichever format the runner produced. `undefined` means unreadable. */
 function parseResults(
   runner: TestRunnerName,
-  stdout: string,
-  stderr: string,
+  result: CompletedCommand,
   layout: Artifacts,
-  root: string,
-  exitCode: number,
 ): TestReport | undefined {
   if (runner === "vitest") {
     // The report file is authoritative; stdout is the fallback for a vitest
-    // whose `--outputFile` handling differs (or a run killed before it wrote).
+    // whose `--outputFile` handling differs. Both are this run's: the file
+    // lives in the run directory and stdout came from the process just run.
     const fromFile = readTextFile(layout.reportFile);
     return (
-      (fromFile === undefined ? undefined : parseVitestJson(fromFile, root)) ??
-      parseVitestJson(stdout, root)
+      (fromFile === undefined ? undefined : parseVitestJson(fromFile, layout.root)) ??
+      parseVitestJson(result.stdout, layout.root)
     );
   }
   if (runner === "node") {
-    return parseNodeTap(stdout, root) ?? parseNodeTap(stderr, root);
+    return parseNodeTap(result.stdout, layout.root) ?? parseNodeTap(result.stderr, layout.root);
   }
-  return parseBunTest(`${stdout}\n${stderr}`, exitCode);
+  return parseBunTest(`${result.stdout}\n${result.stderr}`, result.returncode);
 }
 
 /**
@@ -260,18 +299,43 @@ function runnerMissing(
   );
 }
 
+/** What a coverage read yields: the line model plus the document to share. */
+type CoverageRead =
+  | {
+      readonly ok: true;
+      readonly report: LineCoverageReport;
+      readonly evidence: CoverageEvidence;
+    }
+  | { readonly ok: false; readonly message: string };
+
+/** Read the artifact this runner writes, from this run's directory only. */
+function readCoverageArtifact(runner: TestRunnerName, layout: Artifacts): CoverageRead {
+  if (runner === "vitest") {
+    const read = readCoverageReport(layout.istanbulFile);
+    return read.ok
+      ? { ok: true, report: read.report, evidence: { format: "istanbul", raw: read.report.raw } }
+      : read;
+  }
+  const read = readLcov(layout.lcovFile);
+  return read.ok
+    ? { ok: true, report: read.report, evidence: { format: "lcov", report: read.report } }
+    : read;
+}
+
 /** Read whichever coverage artifact this runner writes, and apply the floor. */
 function readCoverage(
   runner: TestRunnerName,
   layout: Artifacts,
   failUnder: number,
 ): CoverageOutcome {
-  const read =
-    runner === "vitest"
-      ? readCoverageReport(layout.istanbulFile)
-      : readLcov(layout.lcovFile);
+  const read = readCoverageArtifact(runner, layout);
   if (!read.ok) {
-    return { ok: false, message: `${read.message}\n${COVERAGE_ADVICE[runner]}` };
+    return {
+      ok: false,
+      message:
+        `no complete coverage report for this run — ${read.message}\n` +
+        `${COVERAGE_ADVICE[runner]}`,
+    };
   }
   const totals = coverageTotals(read.report);
   if (totals.totalLines === 0) {
@@ -290,6 +354,7 @@ function readCoverage(
     totals,
     reportPath: read.report.reportPath,
     violation: totals.pct < failUnder ? belowThreshold(totals, failUnder) : undefined,
+    evidence: read.evidence,
   };
 }
 
@@ -314,9 +379,11 @@ function belowThreshold(totals: CoverageTotals, failUnder: number): Violation {
 /** Combine test failures and coverage into one outcome. */
 function assemble(
   detection: RunnerDetection,
+  runner: TestRunnerName,
   command: readonly string[],
   report: TestReport,
   coverage: CoverageOutcome | null,
+  published: string | undefined,
   maxViolations: number,
 ): TestRunFindings {
   const coverageViolation = coverage?.ok === true ? coverage.violation : undefined;
@@ -326,11 +393,14 @@ function assemble(
   ];
   // A coverage artifact kragg could not read is NOT a pass: the gate was asked
   // to enforce a floor and could not, which is the "reports green without
-  // checking" failure the whole project exists to prevent.
+  // checking" failure the whole project exists to prevent. Nor is it a plain
+  // failure — the tests ran and their verdict stands, and exit 1 would send
+  // someone to raise a coverage number that was never measured. It is an
+  // ERROR with the test results kept: see `TestRunFindings.error`.
   const coverageUsable = coverage === null || coverage.ok;
   return {
     ok: true,
-    runner: detection.runner ?? "vitest",
+    runner,
     source: detection.source,
     command,
     summary: report.summary,
@@ -338,12 +408,24 @@ function assemble(
     violationCount: violations.length,
     coverage,
     passed: report.success && violations.length === 0 && coverageUsable,
-    output: describe(report.summary, coverage),
+    error: !coverageUsable,
+    output: describe(report.summary, coverage, published),
   };
 }
 
-/** The headline: counts, then the coverage number, on one line each. */
-function describe(summary: TestSummary, coverage: CoverageOutcome | null): string {
+/**
+ * The headline: counts, then the coverage number, then any publishing note.
+ *
+ * The unavailable branch keeps the coverage message WHOLE. That branch is an
+ * ERROR, and an error's remediation reaches the reader only through this
+ * output — the message says which file was expected, what was found instead,
+ * and what to do about it.
+ */
+function describe(
+  summary: TestSummary,
+  coverage: CoverageOutcome | null,
+  published: string | undefined,
+): string {
   const parts = [
     `${summary.total} tests: ${summary.passed} passed, ${summary.failed} failed` +
       (summary.skipped > 0 ? `, ${summary.skipped} skipped` : "") +
@@ -354,8 +436,11 @@ function describe(summary: TestSummary, coverage: CoverageOutcome | null): strin
       coverage.ok
         ? `line coverage ${coverage.totals.pct}% ` +
           `(${coverage.totals.coveredLines}/${coverage.totals.totalLines} lines)`
-        : `coverage unavailable — ${coverage.message.split("\n")[0] ?? ""}`,
+        : `coverage unavailable — ${coverage.message}`,
     );
+  }
+  if (published !== undefined) {
+    parts.push(`note: ${published}`);
   }
   return parts.join("\n");
 }
@@ -378,30 +463,6 @@ function skipReason(detection: RunnerDetection, env: ProjectEnvironment): string
     `${remediation(env.packageManager, "vitest @vitest/coverage-v8")}\n` +
     "or use Node's built-in runner: set `\"test\": \"node --test\"` in package.json."
   );
-}
-
-/** A runner that produced nothing readable. Never reported as a pass. */
-function crashMessage(
-  runner: TestRunnerName,
-  command: readonly string[],
-  returncode: number,
-  stdout: string,
-  stderr: string,
-): string {
-  return (
-    `${runner} exited ${returncode} without a readable test report, so kragg ` +
-    "cannot say whether the tests passed.\n" +
-    `command: ${command.join(" ")}\n` +
-    tail(`${stderr}\n${stdout}`.trim())
-  );
-}
-
-/** The LAST lines of a crash: the cause is at the end, not the start. */
-function tail(text: string, maxLines = 20): string {
-  const lines = text.split("\n");
-  return lines.length <= maxLines
-    ? text
-    : [`… ${lines.length - maxLines} earlier lines`, ...lines.slice(-maxLines)].join("\n");
 }
 
 /** Best-effort mkdir. A failure surfaces later as a missing artifact. */

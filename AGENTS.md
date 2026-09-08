@@ -125,8 +125,10 @@ higher one, and the `boundaries` gate enforces that on this repo.
   exist, in what order, in which tier. `check.ts` is the `check` pipeline,
   `security.ts` the gates shared by both pipelines, `context.ts` the per-run
   `CatalogContext` (root, policy, env, the one lazy program, the criticality
-  cache), `results.ts` the translation from each gate's own outcome shape into
-  `GateResult`, `criticalityCache.ts` the derive-with-cache.
+  cache, and `evidence` — what `test-coverage` produced this run, which
+  `critical-coverage` reads instead of the disk), `results.ts` the translation
+  from each gate's own outcome shape into `GateResult`, `criticalityCache.ts`
+  the derive-with-cache.
 - `src/gates/` — the built-in checks. A directory per gate large enough to
   split: `architecture/` (layers, structure, aliases, barrels, star exports),
   `complexity/` (cyclomatic, maintainability, lines, grades), `criticality/`
@@ -142,7 +144,9 @@ higher one, and the `boundaries` gate enforces that on this repo.
   `tsc.ts`, `testRunner.ts`, `audit.ts`, `deadcode.ts`; `linters/` holds the
   oxlint/biome/eslint JSON parsers, `support/` the per-package-manager audit
   parsers, the per-runner test reports, lcov/istanbul readers, the
-  `Unavailable` outcome kinds, and the `runCommand` helpers.
+  `Unavailable` outcome kinds, the `runCommand` helpers, the per-invocation
+  artifact directory under `.kragg/runs/` (`testCommands.ts`) and the
+  messages for evidence the test gate refuses (`testEvidence.ts`).
 - `src/scaffold/` — `kragg new` / `init` / `gen module`: `project.ts` (the
   engine), `initPlan.ts` (what `init` would change, decided before anything is
   written, so `--dry-run` and the real run cannot disagree), `kinds.ts`,

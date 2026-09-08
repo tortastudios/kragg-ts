@@ -122,6 +122,13 @@ export interface CompletedCommand {
   readonly returncode: number;
   readonly stdout: string;
   readonly stderr: string;
+  /**
+   * True when `runCommand` itself terminated the process — the timeout
+   * elapsed, or the output buffer overflowed. Absent otherwise. A command that
+   * did not get to finish cannot have written a complete report, whatever is
+   * on disk; adapters that read a report file check this before reading it.
+   */
+  readonly killed?: boolean;
 }
 
 /** Combined stdout/stderr, trimmed — what a human or agent should read. */

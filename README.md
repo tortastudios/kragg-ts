@@ -130,6 +130,15 @@ mostly-deterministic signals:
   functions ranked by fan-in, instead of a gameable global percentage. The
   `critical-coverage` gate fails on any uncovered line in a critical function.
   Works under vitest (istanbul JSON), `node --test` and `bun test` (lcov).
+  Both gates believe only **this invocation's** evidence: the runner writes
+  into a private `.kragg/runs/` directory that did not exist before the run,
+  so a runner that crashes, times out or leaves a partial report is an error
+  (exit 3) — never a re-read of an older report, and never the other runner's
+  format after a switch — and `critical-coverage` consumes the coverage
+  `test-coverage` just measured rather than any file on disk. Two `kragg
+  check`s in one project cannot read each other's artifacts. Once read, the
+  coverage artifact is published to `coverage_report_path` (istanbul) or the
+  `lcov.info` beside it, which is what `kragg coverage` reads on demand.
 - **what's defended** — `kragg mutation` runs Stryker over critical files and
   reports surviving mutants as `file:line`. Accept equivalent mutants with
   `--update-baseline`; that baseline is the one `.kragg/` file deliberately
@@ -276,6 +285,7 @@ Deliberate, and documented at each site:
 | criticality-dependent gates | Derived on demand when the data is missing or stale, so `critical-tests` and `test-quality` run; Python skips them visibly instead. |
 | SessionStart hook | Emits the `hookSpecificOutput` envelope, which is what injects `additionalContext`; Python prints plain-text context lines. |
 | hook output | Capped at 9000 characters with an in-band marker, because the harness spills longer output to a file the model never sees. Python does not cap. |
+| test evidence | Python reads `.kragg/coverage.json` from a fixed path. kragg-ts gives every invocation its own `.kragg/runs/` directory, refuses anything incomplete, and hands `critical-coverage` the coverage in memory. Same gates, same wire format; only the provenance rule differs. |
 
 Each row is pinned by a fixture or a unit test, and the full list — with the
 `spec/SPEC.md` row it corresponds to — is in

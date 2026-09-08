@@ -203,6 +203,19 @@ export function buildStrykerCommand(options: StrykerRunOptions): readonly string
  */
 export async function runStryker(options: StrykerRunOptions): Promise<MutationOutcome> {
   removeQuietly(options.reportPath);
+  if (existsSync(options.reportPath)) {
+    // Verified, not assumed: a report that survived the removal would be read
+    // below as this run's, and Stryker is not even started while that is
+    // possible. (The report's path is fixed by Stryker's config, not by kragg,
+    // so unlike the test gate this run cannot be given a directory of its own.)
+    return {
+      ok: false,
+      message:
+        `a mutation report from an earlier run is still at ${options.reportPath} and ` +
+        "kragg could not remove it, so a run now could not tell that report from its " +
+        "own. Remove it (or fix its permissions) and re-run; stryker was not started.",
+    };
+  }
   mkdirQuietly(dirname(options.reportPath));
 
   const command = buildStrykerCommand(options);
@@ -309,8 +322,8 @@ function removeQuietly(path: string): void {
   try {
     rmSync(path, { force: true });
   } catch {
-    // A report we cannot delete surfaces through the read below; the run still
-    // fails loudly if Stryker did not overwrite it.
+    // A report we cannot delete is caught by the `existsSync` check that
+    // follows in `runStryker`, which refuses to run rather than read it.
   }
 }
 
