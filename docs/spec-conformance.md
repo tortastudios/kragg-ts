@@ -330,7 +330,7 @@ everywhere.
 | `git_sha` | → `"<git-sha>"` when it matches `[0-9a-f]{7,40}` | the fixture repository is created at run time. `null` stays `null`: null-vs-present is contract, and `security-clean` pins the null |
 | absolute paths in any string | fixture root → `<project>`, this repo → `<kragg-repo>`, macOS `/private` aliases included | the temp directory differs per run and per machine. The messages embedding them — remediations, tsc output — are otherwise contractual and stay exact |
 | criticality record order | sorted by `(-betweenness, -fan_in, name)` | tie order is implementation-defined (section 5) |
-| `newest_mtime_ms` in the stamp | → `0` | the mtime of the copied fixture tree |
+| `source_digest`, `inputs_digest` in the stamp | → `"<source-digest>"`, `"<inputs-digest>"`, after the validator has checked both are SHA-256 hex | `source_digest` hashes the fixture files by absolute path (a temp directory); `inputs_digest` folds in the resolved compiler's version and path (this machine's). Stamp `version` 2 (TOR-1366) |
 | `(N.Ns)` inside hook stdout | → `(0.0s)`, and **only** for a case whose manifest sets `live_durations` | wall clock rendered into a block reason by gates that just ran. The SessionStart case does not set it: its numbers are read back out of the committed journal, are fixed, and stay pinned. The cross-language runner normalizes both, because every payload it records comes from a live run |
 
 Nothing else. Adding a rule here is a contract decision: an over-normalized

@@ -147,8 +147,12 @@ const STAMP_KEYS = {
   scan_paths: "list",
   files: "int",
   bytes: "int",
-  newest_mtime_ms: "number",
+  source_digest: "string",
+  inputs_digest: "string",
 } as const satisfies Record<string, Tag>;
+
+/** A stamp digest is a SHA-256 hex string; its VALUE is normalized, its shape is not. */
+const SHA256_HEX = /^[0-9a-f]{64}$/u;
 
 function isObject(value: unknown): value is JsonObject {
   return typeof value === "object" && value !== null && !Array.isArray(value);
@@ -344,6 +348,14 @@ export function validateCriticality(data: unknown): readonly string[] {
 export function validateStamp(data: unknown): readonly string[] {
   const errors: string[] = [];
   checkKeys(data, STAMP_KEYS, "criticality.stamp", errors);
+  if (isObject(data)) {
+    for (const key of ["source_digest", "inputs_digest"]) {
+      const value = data[key];
+      if (typeof value === "string" && !SHA256_HEX.test(value)) {
+        errors.push(`criticality.stamp: \`${key}\` is not a SHA-256 hex digest`);
+      }
+    }
+  }
   return errors;
 }
 
@@ -453,9 +465,16 @@ export function normalizeCriticality(data: unknown): unknown {
   });
 }
 
-/** Zero the sidecar's mtime: it is the wall clock of the fixture copy. */
+/**
+ * Blank the sidecar's two digests. `source_digest` hashes the fixture files by
+ * ABSOLUTE path, which is a temp directory here, and `inputs_digest` folds in
+ * the resolved compiler's version and path, which is this machine's. Both are
+ * validated as SHA-256 hex before they are blanked; only the value varies.
+ */
 export function normalizeStamp(data: unknown): unknown {
-  return isObject(data) ? { ...data, newest_mtime_ms: 0 } : data;
+  return isObject(data)
+    ? { ...data, source_digest: "<source-digest>", inputs_digest: "<inputs-digest>" }
+    : data;
 }
 
 /**

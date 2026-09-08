@@ -35,6 +35,7 @@ import { after, describe, it } from "node:test";
 import ts from "typescript";
 
 import { parseSourceFile } from "../src/analysis/sourceFile.ts";
+import { DEFAULT_EXTENSIONS, walkFiles } from "../src/analysis/walk.ts";
 
 const temporaryRoots: string[] = [];
 
@@ -228,5 +229,46 @@ describe("parseSourceFile", () => {
     const parsed = parseSourceFile(path, root, ts);
     assert.equal(parsed?.module, "src/sub");
     assert.equal(parsed?.relative, "src/sub/index.ts");
+  });
+});
+
+describe("walkFiles", () => {
+  it("yields candidate files sorted at every level, and nothing that is not a directory", () => {
+    const root = project({
+      "src/b.ts": "",
+      "src/a.ts": "",
+      "src/nested/z.tsx": "",
+      "src/nested/y.mts": "",
+      "src/readme.md": "",
+      "src/types.d.ts": "",
+    });
+    const files = [...walkFiles(join(root, "src"), DEFAULT_EXTENSIONS, false, root)].map((path) =>
+      path.slice(root.length + 1),
+    );
+    assert.deepEqual(files, ["src/a.ts", "src/b.ts", "src/nested/y.mts", "src/nested/z.tsx"]);
+    assert.deepEqual([...walkFiles(join(root, "src", "a.ts"), DEFAULT_EXTENSIONS, false, root)], []);
+    assert.deepEqual([...walkFiles(join(root, "missing"), DEFAULT_EXTENSIONS, false, root)], []);
+  });
+
+  it("includes declaration files only when asked, and honours the extension list", () => {
+    const root = project({ "src/types.d.ts": "", "src/impl.ts": "", "src/legacy.js": "" });
+    const base = join(root, "src");
+    const withDeclarations = [...walkFiles(base, DEFAULT_EXTENSIONS, true, root)].map((p) => p.slice(root.length + 1));
+    assert.deepEqual(withDeclarations, ["src/impl.ts", "src/types.d.ts"]);
+    const javascript = [...walkFiles(base, [".js"], false, root)].map((p) => p.slice(root.length + 1));
+    assert.deepEqual(javascript, ["src/legacy.js"]);
+  });
+
+  it("skips build outputs only at the repository root, and dot/vendor directories at any depth", () => {
+    const root = project({
+      "dist/out.ts": "",
+      "src/dist/kept.ts": "",
+      "src/coverage/model.ts": "",
+      "src/node_modules/dep/index.ts": "",
+      "src/.hidden/secret.ts": "",
+      "src/index.ts": "",
+    });
+    const all = [...walkFiles(root, DEFAULT_EXTENSIONS, false, root)].map((p) => p.slice(root.length + 1));
+    assert.deepEqual(all, ["src/coverage/model.ts", "src/dist/kept.ts", "src/index.ts"]);
   });
 });

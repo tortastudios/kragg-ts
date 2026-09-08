@@ -43,14 +43,15 @@
    }
   ],
   ".kragg/criticality.stamp.json": {
-   "version": 1,
+   "version": 2,
    "scan_paths": [
     "src",
     "test"
    ],
    "files": 2,
    "bytes": 1340,
-   "newest_mtime_ms": 0
+   "source_digest": "<source-digest>",
+   "inputs_digest": "<inputs-digest>"
   }
  },
  "paths": [
