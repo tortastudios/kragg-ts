@@ -101,7 +101,7 @@ failed task, not a judgement call.
 
 ## Project Map
 
-166 modules under `src/`, listed top-down in the order `kragg.json`'s
+167 modules under `src/`, listed top-down in the order `kragg.json`'s
 `layers` declares — a module may import its own layer or a lower one, never a
 higher one, and the `boundaries` gate enforces that on this repo.
 
@@ -153,7 +153,10 @@ higher one, and the `boundaries` gate enforces that on this repo.
   `naming.ts`, `agents.ts`, `guardrails.ts`, `supplyChain.ts`, and
   `templates/` (`cli`, `api`, `mcp`, `common`).
 - `src/coverage/` — `model.ts` is the one line-coverage model; `istanbul.ts`
-  and `lcov.ts` normalize into it; `spans.ts` bounds a function from source.
+  and `lcov.ts` normalize into it; `spans.ts` bounds a function (or a class
+  node) from source, keyed the way `criticality.json` spells its name;
+  `inventory.ts` is the source files a report is expected to describe, so a
+  file the run never loaded counts as uncovered instead of vanishing.
 - `src/analysis/` — the two analysis tiers. `compiler.ts` resolves which
   TypeScript compiler to analyze with; `sourceFile.ts` is the syntax tier's
   entry point, built from `walk.ts`, `modulePath.ts` and `imports.ts`;

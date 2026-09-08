@@ -58,6 +58,14 @@
  * own violation with its own code, and it can be reported alongside green
  * tests.
  *
+ * THE NUMBER IS THE PROJECT'S, NOT THE REPORT'S. Every runner reports only
+ * the files the run loaded, so a percentage over the report alone is a
+ * percentage over whichever files happened to load. `projectTotals`
+ * (`support/coverage.ts`) restricts the count to `source_paths` and adds
+ * every source file the report does not mention with all of its statement
+ * lines uncovered; the headline names those files. See
+ * `coverage/inventory.ts` for where the line count comes from.
+ *
  * ── COVERAGE ARTIFACTS, PER RUNNER ─────────────────────────────────────────
  *  - **vitest**: istanbul `coverage-final.json`. Its `json` coverage reporter
  *    is in the DEFAULT reporter set, and kragg names it explicitly anyway.
@@ -85,8 +93,10 @@ import {
   remediation,
 } from "../environment/project.ts";
 import type { ProjectEnvironment } from "../environment/project.ts";
-import { coverageTotals, readCoverageReport } from "./support/coverage.ts";
-import type { CoverageTotals } from "./support/coverage.ts";
+import type { TypeScriptApi } from "../analysis/sourceFile.ts";
+import { sourceInventory } from "../coverage/inventory.ts";
+import { projectTotals, readCoverageReport } from "./support/coverage.ts";
+import type { ProjectTotals } from "./support/coverage.ts";
 import { detectTestRunner } from "./support/detect.ts";
 import type { RunnerDetection, TestRunnerChoice, TestRunnerName } from "./support/detect.ts";
 import type { JsonObject } from "./support/json.ts";
@@ -109,13 +119,19 @@ import {
   resolveRunner,
 } from "./support/testCommands.ts";
 import type { Artifacts } from "./support/testCommands.ts";
-import { crashMessage, killedMessage } from "./support/testEvidence.ts";
+import {
+  belowThreshold,
+  COVERAGE_ADVICE,
+  coverageLine,
+  crashMessage,
+  killedMessage,
+} from "./support/testEvidence.ts";
 
 /** Gate name, matching the Python gate this replaces. */
 export const TEST_GATE = "test-coverage";
 
 /** `code` for the coverage threshold, distinct from any test failure. */
-export const COVERAGE_BELOW_THRESHOLD = "coverage-below-threshold";
+export { COVERAGE_BELOW_THRESHOLD } from "./support/testEvidence.ts";
 
 export interface TestRunnerOptions {
   readonly env: ProjectEnvironment;
@@ -130,6 +146,14 @@ export interface TestRunnerOptions {
   /** Paths passed to `node --test`; ignored by the other runners. */
   readonly testPatterns?: readonly string[] | undefined;
   readonly timeoutMs?: number | undefined;
+  /**
+   * Policy `source_paths`: the files the coverage number is reconciled
+   * against. Only files under them count, and a source file the run never
+   * loaded counts as uncovered — see `support/coverage.ts`, `projectTotals`.
+   */
+  readonly sourcePaths: readonly string[];
+  /** Compiler used to count a never-loaded file's lines. Defaults to the project's own. */
+  readonly api?: TypeScriptApi | undefined;
 }
 
 /**
@@ -147,7 +171,7 @@ export type CoverageEvidence =
 export type CoverageOutcome =
   | {
       readonly ok: true;
-      readonly totals: CoverageTotals;
+      readonly totals: ProjectTotals;
       readonly reportPath: string;
       readonly violation: Violation | undefined;
       readonly evidence: CoverageEvidence;
@@ -230,7 +254,7 @@ async function runInto(
     return crashed(crashMessage(runner, result, layout));
   }
 
-  const coverage = withCoverage ? readCoverage(runner, layout, options.coverageFailUnder) : null;
+  const coverage = withCoverage ? readCoverage(runner, layout, options) : null;
   const published = coverage?.ok === true ? publishCoverage(layout, runner) : undefined;
   return assemble(detection, runner, command, report, coverage, published, options.maxViolations);
 }
@@ -322,11 +346,20 @@ function readCoverageArtifact(runner: TestRunnerName, layout: Artifacts): Covera
     : read;
 }
 
-/** Read whichever coverage artifact this runner writes, and apply the floor. */
+/**
+ * Read whichever coverage artifact this runner writes, and apply the floor.
+ *
+ * The number is the PROJECT's, not the report's: `projectTotals` restricts
+ * it to `source_paths` and adds every source file the run never loaded with
+ * all of its statement lines uncovered. A report that leaves no line to count
+ * under the source paths is not 100%; it is coverage that was not collected
+ * for this project, and it is reported as such — `percent()`'s 100 here would
+ * be the most misleading number this gate could produce.
+ */
 function readCoverage(
   runner: TestRunnerName,
   layout: Artifacts,
-  failUnder: number,
+  options: TestRunnerOptions,
 ): CoverageOutcome {
   const read = readCoverageArtifact(runner, layout);
   if (!read.ok) {
@@ -337,42 +370,25 @@ function readCoverage(
         `${COVERAGE_ADVICE[runner]}`,
     };
   }
-  const totals = coverageTotals(read.report);
+  const inventory = sourceInventory(layout.root, options.sourcePaths, options.api);
+  const totals = projectTotals(read.report, layout.root, options.sourcePaths, inventory);
   if (totals.totalLines === 0) {
-    // A report with no measurable lines is not 100% coverage; it is coverage
-    // that was not collected. Reporting `percent()`'s 100 here would be the
-    // most misleading number this gate could produce.
     return {
       ok: false,
       message:
-        `${read.report.reportPath} measured no executable lines. ` +
-        `${COVERAGE_ADVICE[runner]}`,
+        `${read.report.reportPath} measured no executable lines under ` +
+        `${options.sourcePaths.join(", ")} (${totals.reportFiles} files in the report, ` +
+        `${totals.measuredFiles} of them under the source paths; ${totals.sourceFiles} ` +
+        `source files on disk). ${COVERAGE_ADVICE[runner]}`,
     };
   }
+  const failUnder = options.coverageFailUnder;
   return {
     ok: true,
     totals,
     reportPath: read.report.reportPath,
     violation: totals.pct < failUnder ? belowThreshold(totals, failUnder) : undefined,
     evidence: read.evidence,
-  };
-}
-
-const COVERAGE_ADVICE: Readonly<Record<TestRunnerName, string>> = {
-  vitest:
-    "vitest writes it via its `json` coverage reporter; check that " +
-    "`coverage.provider` is installed (@vitest/coverage-v8 or -istanbul).",
-  node: "node --test writes lcov via `--test-reporter=lcov`; coverage needs Node 20.1+.",
-  bun: "bun test writes lcov via `--coverage-reporter=lcov`.",
-};
-
-function belowThreshold(totals: CoverageTotals, failUnder: number): Violation {
-  return {
-    message:
-      `line coverage ${totals.pct}% is below the required ${failUnder}% ` +
-      `(${totals.coveredLines}/${totals.totalLines} lines)`,
-    code: COVERAGE_BELOW_THRESHOLD,
-    fixHint: "run `kragg coverage` for the uncovered lines of the highest-fan-in functions",
   };
 }
 
@@ -433,10 +449,7 @@ function describe(
   ];
   if (coverage !== null) {
     parts.push(
-      coverage.ok
-        ? `line coverage ${coverage.totals.pct}% ` +
-          `(${coverage.totals.coveredLines}/${coverage.totals.totalLines} lines)`
-        : `coverage unavailable — ${coverage.message}`,
+      coverage.ok ? coverageLine(coverage.totals) : `coverage unavailable — ${coverage.message}`,
     );
   }
   if (published !== undefined) {

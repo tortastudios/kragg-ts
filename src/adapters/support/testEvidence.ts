@@ -19,13 +19,69 @@
  * crash during it, and a TAP stream without its summary at a process that died
  * mid-suite. Then the tail of the runner's own output, which is where the
  * actual cause is.
+ *
+ * The coverage headline lives here too, because it has the same job: it says
+ * what was COUNTED. A file the run never loaded is in the denominator with
+ * every statement line uncovered (`support/coverage.ts`, `projectTotals`),
+ * and a number that moved because of that must name the files, or a reader
+ * is left hunting for a regression in code that was never the problem.
  */
 
 import { statSync } from "node:fs";
 
-import type { CompletedCommand } from "../../engine/models.ts";
+import type { CompletedCommand, Violation } from "../../engine/models.ts";
+import type { ProjectTotals } from "./coverage.ts";
 import type { TestRunnerName } from "./detect.ts";
 import type { Artifacts } from "./testCommands.ts";
+
+/** `code` for the coverage threshold, distinct from any test failure. */
+export const COVERAGE_BELOW_THRESHOLD = "coverage-below-threshold";
+
+/** How each runner is made to write its coverage artifact, for the error arm. */
+export const COVERAGE_ADVICE: Readonly<Record<TestRunnerName, string>> = {
+  vitest:
+    "vitest writes it via its `json` coverage reporter; check that " +
+    "`coverage.provider` is installed (@vitest/coverage-v8 or -istanbul).",
+  node: "node --test writes lcov via `--test-reporter=lcov`; coverage needs Node 20.1+.",
+  bun: "bun test writes lcov via `--coverage-reporter=lcov`.",
+};
+
+/** How many never-loaded files the headline names before `+N more`. */
+const UNLOADED_PREVIEW = 5;
+
+/** The coverage headline: the number, then what was counted to reach it. */
+export function coverageLine(totals: ProjectTotals): string {
+  return (
+    `line coverage ${totals.pct}% ` +
+    `(${totals.coveredLines}/${totals.totalLines} lines${unloadedNote(totals)})`
+  );
+}
+
+/** The floor was not met. Line coverage only: no branch is claimed or checked. */
+export function belowThreshold(totals: ProjectTotals, failUnder: number): Violation {
+  return {
+    message:
+      `line coverage ${totals.pct}% is below the required ${failUnder}% ` +
+      `(${totals.coveredLines}/${totals.totalLines} lines${unloadedNote(totals)})`,
+    code: COVERAGE_BELOW_THRESHOLD,
+    fixHint: "run `kragg coverage` for the uncovered lines of the highest-fan-in functions",
+  };
+}
+
+/** The files in the denominator that no test loaded, by name. */
+function unloadedNote(totals: ProjectTotals): string {
+  if (totals.unloaded.length === 0) {
+    return "";
+  }
+  const lines = totals.unloaded.reduce((sum, entry) => sum + entry.statementLines, 0);
+  const shown = totals.unloaded.slice(0, UNLOADED_PREVIEW).map((entry) => entry.path);
+  const more = totals.unloaded.length - shown.length;
+  return (
+    `; ${totals.unloaded.length} of ${totals.sourceFiles} source files never loaded by ` +
+    `the test run, counted as uncovered (${lines} statement lines read from the source): ` +
+    `${shown.join(", ")}${more > 0 ? `, +${more} more` : ""}`
+  );
+}
 
 /** kragg terminated the runner: nothing it wrote can be a complete report. */
 export function killedMessage(

@@ -320,6 +320,26 @@ model that both istanbul JSON and lcov are reduced to, so
 `critical-coverage` has one shape to reason about regardless of which runner
 the project uses.
 
+**A report describes only what the run loaded, and the gates say so.** No
+JavaScript runner reports a file no test imported; it is absent, not 0%. So
+`src/coverage/inventory.ts` walks `source_paths` and `test-coverage`
+reconciles its number against that inventory (`projectTotals` in
+`src/adapters/support/coverage.ts`): an unloaded file counts with every
+statement line uncovered — the count is read off the source with the
+project's compiler, the same "a statement starts on this line" rule the
+model applies to what a report states — and files outside the source paths
+do not count at all. `critical-coverage` reconciles per function: one whose
+file has no entry, whose extent nothing can bound, or whose body the report
+is silent on is UNMEASURED, and unmeasured is a violation
+(`critical-unmeasured`, with the cause in the message), never a pass. Extents
+come from `src/coverage/spans.ts`, whose index is keyed the way
+`criticality.json` spells a name (`Reader.close`, `Client.get token`), so
+same-named methods on two classes resolve to their own bodies; overload
+signatures and abstract members, which have no body, are not indexed; and a
+class that is itself a node owns its own lines with its member functions cut
+out. A document that names no file under the source paths is an error, not a
+list of findings. All of it is line coverage, and nothing pretends otherwise.
+
 **A report is evidence only for the run that produced it.** The test runner
 is pointed at a directory created for this invocation alone
 (`.kragg/runs/test-XXXXXX`, `mkdtemp`, so two concurrent runs get two), and

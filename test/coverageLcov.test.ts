@@ -253,17 +253,18 @@ describe("critical-coverage under lcov", () => {
     assert.equal(violations[0]?.line, 2);
   });
 
-  it("treats a name the source binds twice as UNMEASURED, never as clean", () => {
+  it("resolves a same-named method by its class, and blames it for its own lines only", () => {
     const root = measuredProject(
       "export class Client {\n  send(): void {}\n}\nexport class Other {\n  send(): void {}\n}\n",
     );
-    // The tracefile is unambiguous; the SOURCE is not, so no extent can be
-    // attributed and the gate declines rather than blaming the wrong method.
-    const lcov = tracefile(["FN:2,send", "FNDA:1,send", "DA:2,1", "DA:5,0"]);
+    // The tracefile records `send` twice; `criticality.json` says which one
+    // is critical (`Client.send`), and the source index is keyed the same
+    // way. Line 5 is `Other.send`'s and is not attributed to `Client.send`.
+    const lcov = tracefile(["FN:2,send", "FNDA:1,send", "FN:5,send", "FNDA:0,send", "DA:2,1", "DA:5,0"]);
     assert.deepEqual(violationsFor(root, lcov), []);
     assert.deepEqual(
-      criticalCoverageGaps(options(root, lcov)).map((gap) => gap.measured),
-      [false],
+      criticalCoverageGaps(options(root, lcov)).map((gap) => [gap.measured, gap.missingLines]),
+      [[true, []]],
     );
   });
 
