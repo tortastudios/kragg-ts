@@ -261,6 +261,16 @@ Read it before touching `package.json`.
 [KNOWN_LIMITATIONS.md](KNOWN_LIMITATIONS.md) states what each gate does **not**
 catch, in detail. It is worth reading before trusting a green run.
 
+The metric gates' thresholds are radon's and Python kragg's, ported onto a
+language they were not drawn against.
+[docs/calibration.md](docs/calibration.md) records what they actually do on
+real TypeScript — violation rates, distributions, a per-finding precision
+assessment and remediation cost, for a CLI, a Next.js app, a pnpm workspace and
+the three scaffolds — and `scripts/calibrate.ts` re-derives the numbers on your
+own projects. Nothing in that document changes a threshold; the proposals it
+makes are marked as not applied, because moving one of these numbers is a
+policy decision shared with the Python implementation.
+
 The short version: kragg checks the properties a machine can check cheaply and
 deterministically. It says nothing about whether the code does the right thing,
 whether the architecture suits the problem, or whether the tests test the
@@ -280,6 +290,9 @@ pnpm run typecheck
 pnpm run build
 pnpm run test
 node dist/cli.js check --all     # kragg checks itself
+
+# measure the metric gates against real projects (see docs/calibration.md)
+node scripts/calibrate.ts kragg-ts=. 'app=../some-app:src,lib'
 ```
 
 kragg-ts passes its own `check`. That is the point: a guardrails framework

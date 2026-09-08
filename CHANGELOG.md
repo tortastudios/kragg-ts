@@ -18,6 +18,33 @@ a previously green run red — see [Gate additions](#gate-additions) below.
 
 ## [Unreleased]
 
+### Added
+
+- **TOR-1376** — metric-gate calibration on representative TypeScript
+  projects, and a regression net so the result cannot be undone quietly.
+  `scripts/calibrate.ts` measures `complexity`, `maintainability`, `halstead`,
+  `type-complexity` and `nullable-default` against a list of sample roots by
+  calling the same gate entry points `check` calls, and reports the population
+  each violation count came out of — violation rates, order statistics,
+  distribution buckets and per-finding distance from the budget — as JSON or a
+  markdown table. It adds no dependency and spawns nothing except `git
+  rev-parse` through the approved runner.
+  [`docs/calibration.md`](docs/calibration.md) records a dated run over a CLI,
+  a Next.js application, a pnpm workspace and the three scaffolds (472
+  application files, 3,025 blocks, 3,099 annotation sites), with a per-finding
+  precision assessment, suppression frequency and remediation cost.
+  `test/fixtures/knownDefects.ts` and `test/knownDefects.test.ts` hold one
+  measured defect per metric gate plus a clean control, so a future threshold
+  change that stops detecting any of them fails the suite instead of passing
+  quietly. `KNOWN_LIMITATIONS.md` now states the measured precision limits —
+  chiefly that `??`/`?.` supply 12–19% of a TypeScript cyclomatic score, that
+  roughly a third of a React score is JSX rendering, that Halstead counts
+  static markup and a block's nested closures, and that the type-aware tier
+  sees one tsconfig and so covers a workspace only in part.
+  **No threshold, grade band, profile or default was changed**: the proposals
+  the measurements support are written up in `docs/calibration.md` and marked
+  as not applied, because each one is a number Python kragg also ships.
+
 ### Fixed
 
 - **TOR-1359** — `tsc` in incremental mode (`--changed`, `--file`, and
