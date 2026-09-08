@@ -90,6 +90,12 @@ a previously green run red — see [Gate additions](#gate-additions) below.
   again. This is a new divergence from Python, which truncates the analysis
   itself; see the divergence tables in `README.md` and
   `docs/spec-conformance.md`.
+- TOR-1369: `kragg check --changed --format json` with nothing in the change
+  set emits the ordinary report payload with an empty gate list instead of the
+  text sentence "no changed TypeScript files". No keys are added or changed;
+  the text format still prints the sentence, and neither form is journaled.
+- TOR-1369: `--help` now documents every flag every command accepts, and a test
+  walks the help text against the per-command table so the two cannot drift.
 
 ### Added
 
@@ -135,6 +141,31 @@ a previously green run red — see [Gate additions](#gate-additions) below.
   written. Previously a ban list written as `["node:child_process", 7]`
   loaded as *no bans* and a misspelled key configured nothing, with no error
   in either case.
+- TOR-1369: `kragg criticality --path` is honoured. It was in the accepted-flag
+  table and read by nothing, so a scoped invocation analyzed the whole program
+  and printed a table that looked scoped. It now narrows the call graph to the
+  files under the given paths (repeatable), and a path matching no analyzed
+  source file is exit 2 rather than an empty table that reads as "no risk".
+  `--path` with `--write` is refused (exit 2): a scoped
+  `.kragg/criticality.json` does not read as partial downstream, it reads as
+  "every function outside the scope is uncritical", and `critical-tests` and
+  `critical-coverage` would go quiet about all of them.
+- TOR-1369: `kragg mutation`'s baseline flag is `--update-baseline`, the name
+  the README and the Python sibling have always used. **`--write` is no longer
+  accepted for `mutation`** (exit 2); the other `--write` commands are
+  unchanged.
+- TOR-1369: `kragg mutation` no longer narrows to the git change set unless
+  `--since` says so. The CLI passed "compare against HEAD" by default, so a
+  clean tree mutated nothing and exited 0 while the docs described the change
+  intersection as opt-in.
+- TOR-1369: an out-of-domain flag VALUE is a usage error instead of a silent
+  fallback: `--format` other than `text`/`json`, and `--max-violations`,
+  `--last` or `--rerun` that is not a non-negative integer, now exit 2 (as they
+  already do in the Python sibling's argparse).
+- TOR-1369: a positional argument a command has no use for (`kragg check
+  src/a.ts`, `kragg status 20`) is exit 2 instead of being dropped, and `--file`
+  together with `--changed`/`--since` is exit 2 instead of being discarded in
+  favour of git's file set.
 
 ## [0.0.0] — unreleased
 

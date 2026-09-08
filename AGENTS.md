@@ -110,7 +110,10 @@ higher one, and the `boundaries` gate enforces that on this repo.
   environment. Keep it small; the `structure` symbol budget is spent here,
   and `structure_exclude` exempts this one file.
 - `src/cli.ts` — argument parsing and dispatch (`node:util` `parseArgs`), the
-  usage text, and the per-command allowed-flag table. `PENDING` is empty.
+  per-command allowed-flag and positional tables, and the validation that makes
+  an accepted argument one that acts. `PENDING` is empty. `src/cli/usage.ts`
+  holds the `--help` text, which is a contract with those tables and is checked
+  against them by `test/cli.test.ts`.
 - `src/commands/` — one module per command: `check`, `security`, `fix`,
   `map`, `spec`, `brief`, `status`, `policyShow`, `doctor`, `coverage`,
   `criticality`, `mutation`, `flaky`, `audit`, `new`, `gen`, `init`, `hook`,
@@ -242,8 +245,17 @@ authority; this list must match it.
 
 `check` and `security` share `--file`, `--format`, `--max-violations` and
 `--no-journal`. `--changed`, `--since`, `--fail-fast` and `--all` are
-`check`-only. Flags are validated per command: passing one a command does not
-accept is exit 2, not a silent no-op.
+`check`-only. The rest: `fix --file`; `status --format --last`; `map --write`;
+`brief --since`; `criticality --write --path`; `mutation --path --since --all
+--update-baseline`; `flaky --last --rerun`.
+
+Everything the CLI accepts must act, and `--help` (`src/cli/usage.ts`) is the
+list of what it accepts — `test/cli.test.ts` walks the help text against the
+per-command table. Exit 2, never a silent no-op, for: a flag the command does
+not accept, a `--format` other than `text`/`json`, a count that is not a
+non-negative integer, a positional the command has no use for, `--file`
+alongside `--changed`/`--since`, and `criticality --write --path` (a scoped
+`criticality.json` would read downstream as "everything else is uncritical").
 
 ## Conventions
 

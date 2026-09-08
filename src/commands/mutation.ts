@@ -44,7 +44,11 @@
  * the incremental file with the current run's report (`writeIncrementalReport`).
  * Narrowing `--mutate` therefore shrinks the cache, so alternating between a
  * narrow and a wide scope loses the wide scope's history. Prefer a stable
- * scope, or pass `--force` for a deliberately clean run.
+ * scope, or pass `kragg mutation --all` for a deliberately clean run — that is
+ * the CLI flag that turns Stryker's `--incremental` off. (`--force` below is
+ * Stryker's own flag and is reachable only programmatically; the CLI does not
+ * accept a `--force` of its own, and a doc that said otherwise named a flag
+ * the parser rejects.)
  *
  * ── TYPE ANNOTATIONS: ALREADY HANDLED UPSTREAM ─────────────────────────────
  * The Python port carries an AST filter that drops mutants inside type
@@ -111,11 +115,17 @@ export interface MutationOptions {
    * against HEAD; a string is the ref to merge-base from.
    */
   readonly changedSince?: string | null | undefined;
-  /** Record the surviving mutants as the accepted baseline and stop. */
+  /**
+   * `--update-baseline`: record the surviving mutants as the accepted baseline
+   * and stop.
+   */
   readonly updateBaseline?: boolean | undefined;
-  /** Pass `--incremental`. On by default; see the module docs. */
+  /** Pass Stryker's `--incremental`. On unless `--all`; see the module docs. */
   readonly incremental?: boolean | undefined;
-  /** Pass `--force`, re-testing every mutant despite the incremental file. */
+  /**
+   * Pass Stryker's `--force`, re-testing every mutant despite the incremental
+   * file. Programmatic callers only — there is no `kragg mutation --force`.
+   */
   readonly force?: boolean | undefined;
   readonly timeoutMs?: number | undefined;
   readonly log?: ((line: string) => void) | undefined;
@@ -212,10 +222,11 @@ async function resolveScope(
 }
 
 /**
- * Fill in the run's defaults: `--incremental` on, `--force` off.
+ * Fill in the run's defaults: Stryker's `--incremental` on, `--force` off.
  *
  * The module doc argues both. `--incremental` is what makes a repeat run
- * affordable, and `--force` is the deliberate escape hatch from it.
+ * affordable, and turning it off (`kragg mutation --all`) is the deliberate
+ * escape hatch from it.
  */
 function strykerOptions(
   env: ProjectEnvironment,

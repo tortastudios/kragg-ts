@@ -27,11 +27,28 @@
  * Folding their flags into `OPTIONS` instead would make every other command
  * silently accept `--kind`, which is exactly the class of "flag ignored, user
  * believes it applied" bug the per-command allowlist exists to prevent.
+ *
+ * AN ACCEPTED ARGUMENT MUST BE AN ARGUMENT THAT ACTS. That bug class has three
+ * more shapes than a flag the command does not know, and all three are usage
+ * errors here rather than silent fallbacks:
+ *
+ *   - a value outside its domain (`--format yaml`, `--max-violations abc`),
+ *     which used to fall back to the default and run something the caller did
+ *     not ask for (`invalidValue`);
+ *   - a positional a command has no use for (`kragg status yesterday`), which
+ *     used to be dropped on the floor (`POSITIONALS`);
+ *   - `--file` alongside `--changed`/`--since`, where git decides the file set
+ *     and the explicit list is discarded (`conflict`).
+ *
+ * `--help` is the fourth side of the same contract: `cli/usage.ts` documents
+ * exactly the flags `ALLOWED` accepts, and `test/cli.test.ts` walks one
+ * against the other.
  */
 
 import { parseArgs } from "node:util";
 import { pathToFileURL } from "node:url";
 
+import { USAGE } from "./cli/usage.ts";
 import { runAudit } from "./commands/audit.ts";
 import { runBrief } from "./commands/brief.ts";
 import { runCheck, type ReportFlags } from "./commands/check.ts";
@@ -58,69 +75,6 @@ import {
   EXIT_USAGE,
 } from "./engine/report.ts";
 import { PolicyError } from "./policy/policy.ts";
-
-const USAGE = `kragg — guardrails for AI-assisted TypeScript projects
-
-Usage:
-  kragg <command> [options]
-
-Gates:
-  check          run the quality gates
-  security       run the security gates only
-  fix            format and safely fix lint findings
-
-Inventory and review:
-  map            exported symbols, so nothing gets reinvented
-  spec           the test suite rendered as a documentation tree
-  brief          a reviewable digest of the change set
-  status         show recent run history
-  policy show    print the effective policy
-  doctor         verify this project's setup
-
-Test depth (on-demand, never the inner loop):
-  coverage       uncovered lines in critical functions, ranked by fan-in
-  criticality    call-graph risk -> CRITICALITY.md + .kragg/criticality.json
-  mutation       mutation-test critical files with Stryker
-  flaky          gates that flipped on an unchanged commit
-  audit          dead code and dependency drift
-
-Scaffolding:
-  new <name>     a new project (--kind cli|api|mcp)
-  gen module <n> service/domain/test slots in the layered layout
-  init           add guardrails to an existing project
-
-Harness integration:
-  hook claude    hook adapter; reads hook JSON on stdin
-
-Options for check and security:
-  --file <path>          scope to this file (repeatable)
-  --format text|json     output format (default: text)
-  --max-violations <n>   cap violations shown per gate
-  --no-journal           do not append to .kragg/history.jsonl
-
-Options for check only:
-  --changed              only files changed against HEAD
-  --since <ref>          only files changed since <ref>
-  --fail-fast            stop at the first failing gate
-  --all                  run slow gates even after a fast gate failed
-
-Options for status:
-  --format text|json     output format (default: text)
-  --last <n>             how many runs to read (default: 10)
-
-Options for init:
-  --dry-run              print the changes init would make, and write nothing
-
-Global options:
-  -h, --help             show this help and exit
-  -v, --version          print the version and exit
-
-Exit codes:
-  0  all gates passed
-  1  gates ran and found violations
-  2  usage error (bad flags, unknown command, unusable config)
-  3  environment broken (a gate could not run)
-`;
 
 /**
  * Commands with no handler yet.
@@ -154,6 +108,7 @@ const OPTIONS = {
   write: { type: "boolean" },
   path: { type: "string", multiple: true },
   rerun: { type: "string" },
+  "update-baseline": { type: "boolean" },
 } as const;
 
 /** Command name -> the flags it accepts. */
@@ -173,13 +128,23 @@ const ALLOWED: FlagTable = {
   coverage: [],
   criticality: ["write", "path"],
   audit: [],
-  mutation: ["path", "since", "all", "write"],
+  mutation: ["path", "since", "all", "update-baseline"],
   flaky: ["last", "rerun"],
   hook: [],
   new: [],
   gen: [],
   init: ["dry-run"],
 };
+
+/**
+ * How many positionals each command takes after its own name.
+ *
+ * Two do: `policy show` and `hook claude`. Every other command takes NONE, and
+ * an extra word is a usage error rather than something quietly dropped —
+ * `kragg check src/a.ts` looks like it scoped the run (it does not; that is
+ * `--file`), and `kragg status 20` looks like `--last 20`.
+ */
+const POSITIONALS: Readonly<Record<string, number>> = { policy: 1, hook: 1 };
 
 type Values = ReturnType<typeof parseArgs<{ options: typeof OPTIONS; allowPositionals: true }>>["values"];
 
@@ -250,6 +215,14 @@ async function dispatch(
   if (rejected !== null) {
     return usageError(`\`${command}\` does not accept --${rejected}`);
   }
+  const extra = rest[POSITIONALS[command] ?? 0];
+  if (extra !== undefined) {
+    return usageError(`\`${command}\` does not take the argument '${extra}'`);
+  }
+  const invalid = invalidValue(values) ?? conflict(values);
+  if (invalid !== null) {
+    return usageError(invalid);
+  }
 
   const root = process.cwd();
   const gate = gateCommand(command, rest, values, root);
@@ -315,15 +288,19 @@ function reportCommand(
     case "coverage":
       return runCoverage({ root });
     case "criticality":
-      return runCriticality({ root, write: values.write === true });
+      return runCriticality({ root, write: values.write === true, paths: values.path ?? [] });
     case "audit":
       return runAudit({ root });
     case "mutation":
       return mutationCommand({
         root,
         paths: values.path ?? [],
-        changedSince: values.since ?? null,
-        updateBaseline: values.write === true,
+        // `undefined`, NOT `null`: `null` means "narrow to what changed against
+        // HEAD", so defaulting to it made every `kragg mutation` a --since run
+        // and a clean tree mutate nothing while exiting 0. The change
+        // intersection is opt-in — see the module doc in commands/mutation.ts.
+        changedSince: values.since,
+        updateBaseline: values["update-baseline"] === true,
         incremental: values.all !== true,
       });
     case "flaky":
@@ -397,17 +374,64 @@ function reportFlags(values: Values, root: string): ReportFlags {
 }
 
 /**
- * `--format`, defaulting to text.
+ * The first flag whose VALUE is outside its domain, as a message, or `null`.
  *
- * An unrecognised value falls back rather than throwing, and that is the
- * lenient choice on purpose: the argument only decides how results are
- * PRINTED, so getting it wrong cannot make a failing project look passing.
+ * Every one of these used to fall back to a default. That is the same bug as
+ * a flag the command ignores, one level down: `--format yaml` printed text and
+ * exited 0, so a caller parsing stdout as JSON got a parse error with no way
+ * to tell a bad flag from a broken run, and `--max-violations abc` silently
+ * restored the policy's cap over the one the caller asked for. Neither can
+ * make a failing project look passing, which is why it was survivable — but a
+ * machine surface that quietly does something else is not one anybody can
+ * build on. Checked once, here, whichever command was invoked.
  */
+function invalidValue(values: Values): string | null {
+  if (values.format !== undefined && values.format !== "text" && values.format !== "json") {
+    return `--format must be 'text' or 'json', not '${values.format}'`;
+  }
+  return (
+    notACount("max-violations", values["max-violations"]) ??
+    notACount("last", values.last) ??
+    notACount("rerun", values.rerun)
+  );
+}
+
+/** Digits only, matching Python's `type=int`: no `1e3`, no sign, no padding. */
+function notACount(name: string, raw: string | undefined): string | null {
+  if (raw === undefined || /^[0-9]+$/.test(raw)) {
+    return null;
+  }
+  return `--${name} must be a non-negative integer, not '${raw}'`;
+}
+
+/**
+ * Flags the command accepts individually that cannot both apply, or `null`.
+ *
+ * `--changed`/`--since` hand the file set to git, and `resolveScope` in
+ * `commands/check.ts` then DISCARDS an explicit `--file` list. Running the
+ * caller's second choice without saying so is how a scope gets believed;
+ * asking which one they meant costs one re-run and no trust.
+ */
+function conflict(values: Values): string | null {
+  const fromGit = values.changed === true || values.since !== undefined;
+  if (fromGit && values.file !== undefined) {
+    return "--file cannot be combined with --changed or --since; git decides the file set";
+  }
+  return null;
+}
+
+/** `--format`, defaulting to text. `invalidValue` has already vetted it. */
 function format(values: Values): "text" | "json" {
   return values.format === "json" ? "json" : "text";
 }
 
-/** A non-negative integer flag, or the fallback when it is not one. */
+/**
+ * A non-negative integer flag, or the fallback when the flag is absent.
+ *
+ * The guard is not the validation — `invalidValue` rejects a non-count before
+ * any command runs — it is what keeps that true for a future caller that does
+ * not come through `dispatch`.
+ */
 function integer(raw: string | undefined, fallback: number): number {
   if (raw === undefined) {
     return fallback;

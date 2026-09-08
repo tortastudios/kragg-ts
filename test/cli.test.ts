@@ -20,7 +20,7 @@
  */
 
 import assert from "node:assert/strict";
-import { chmodSync, mkdirSync, mkdtempSync, readdirSync, rmSync, writeFileSync } from "node:fs";
+import { chmodSync, mkdirSync, mkdtempSync, readdirSync, readFileSync, rmSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { fileURLToPath } from "node:url";
@@ -34,6 +34,7 @@ import {
   EXIT_USAGE,
   kraggVersion,
 } from "../src/engine/report.ts";
+import type { ReportPayload } from "../src/engine/reportPayload.ts";
 
 /** The source entry point; Node strips its types natively, as `pnpm test` does. */
 const CLI = fileURLToPath(new URL("../src/cli.ts", import.meta.url));
@@ -405,3 +406,229 @@ describe("a compiler failure in an unchanged caller survives every scope", () =>
     );
   });
 });
+describe("a check with nothing in its scope", () => {
+  /** Identity flags, so a commit works on any developer machine. */
+  const COMMIT = [
+    "-c",
+    "user.name=kragg-test",
+    "-c",
+    "user.email=kragg-test@example.invalid",
+    "-c",
+    "commit.gpgsign=false",
+  ];
+
+  /** A repository with a clean tree, so `--changed` selects nothing at all. */
+  async function cleanRepo(): Promise<string | null> {
+    const root = project();
+    mkdirSync(join(root, "src"));
+    writeFileSync(join(root, "src", "a.ts"), "export const a = 1;\n");
+    for (const args of [
+      ["init", "--initial-branch=main"],
+      ["add", "."],
+      [...COMMIT, "commit", "-m", "initial"],
+    ]) {
+      const result = await runCommand("git", ["git", ...args], root);
+      if (result.returncode !== 0) {
+        return null;
+      }
+    }
+    return root;
+  }
+
+  it("says so in words under the default format", async (t) => {
+    const root = await cleanRepo();
+    if (root === null) {
+      t.skip("git is not available");
+      return;
+    }
+    const result = await run(["check", "--changed"], root);
+    assert.equal(result.code, EXIT_OK);
+    assert.match(result.out, /no changed TypeScript files/);
+  });
+
+  it("emits a report payload under --format json, not that sentence", async (t) => {
+    // It used to print the prose in both formats: the one path where the
+    // answer is "nothing to do" handed every machine caller a parse error.
+    const root = await cleanRepo();
+    if (root === null) {
+      t.skip("git is not available");
+      return;
+    }
+    const result = await run(["check", "--changed", "--format", "json"], root);
+    assert.equal(result.code, EXIT_OK);
+    const payload: ReportPayload = JSON.parse(result.out);
+    assert.equal(payload.schema_version, 1);
+    assert.equal(payload.command, "check");
+    assert.equal(payload.mode, "changed");
+    assert.deepEqual(payload.targets, []);
+    assert.deepEqual(payload.gates, []);
+    assert.deepEqual(payload.next_actions, []);
+    assert.equal(payload.passed, true);
+    assert.equal(payload.exit_code, EXIT_OK);
+    assert.equal(payload.summary.gates_total, 0);
+    assert.equal(payload.summary.violations_total, 0);
+  });
+});
+
+describe("an accepted argument must be an argument that acts", () => {
+  // Three shapes of one bug, each of which used to be a silent fallback: a
+  // value outside its domain, a positional nobody reads, and a flag that
+  // silently loses to another flag.
+
+  it("rejects a --format it cannot produce instead of printing text", async () => {
+    // The lenient fallback exited 0 and printed text, so a caller parsing
+    // stdout as JSON got a parse error and no way to tell a typo'd flag from
+    // a broken run.
+    const result = await run(["check", "--format", "yaml"]);
+    assert.equal(result.code, EXIT_USAGE);
+    assert.match(result.err, /--format must be 'text' or 'json', not 'yaml'/);
+    assert.equal(result.out, "");
+  });
+
+  it("still accepts both formats it advertises", async () => {
+    for (const format of ["text", "json"]) {
+      const result = await run(["status", "--format", format]);
+      assert.equal(result.code, EXIT_OK, format);
+    }
+  });
+
+  it("rejects a count that is not a count, rather than using the default", async () => {
+    // `--max-violations abc` silently restored the policy's cap over the one
+    // the caller asked for: a smaller report than requested, and no sign why.
+    for (const argv of [
+      ["check", "--max-violations", "abc"],
+      ["status", "--last", "1.5"],
+      ["flaky", "--rerun", "2x"],
+      ["status", "--last", ""],
+    ]) {
+      const result = await run(argv);
+      assert.equal(result.code, EXIT_USAGE, argv.join(" "));
+      assert.match(result.err, /must be a non-negative integer/, argv.join(" "));
+    }
+  });
+
+  it("still accepts a well-formed count", async () => {
+    assert.equal((await run(["status", "--last", "3"])).code, EXIT_OK);
+  });
+
+  it("rejects a positional the command has no use for", async () => {
+    // `kragg check src/a.ts` reads like it scoped the run. It did not — that
+    // is `--file` — and the word was dropped on the floor.
+    for (const argv of [["check", "src/a.ts"], ["status", "20"], ["policy", "show", "extra"]]) {
+      const result = await run(argv);
+      assert.equal(result.code, EXIT_USAGE, argv.join(" "));
+      assert.match(
+        result.err,
+        /does not take the argument|usage: kragg policy show/,
+        argv.join(" "),
+      );
+    }
+  });
+
+  it("keeps the positionals that mean something", async () => {
+    assert.equal((await run(["policy", "show"])).code, EXIT_OK);
+  });
+
+  it("refuses --file alongside --changed instead of discarding it", async () => {
+    // Git decides the file set in changed mode, so the explicit list was
+    // dropped and the run silently checked something else.
+    const result = await run(["check", "--changed", "--file", "src/a.ts"]);
+    assert.equal(result.code, EXIT_USAGE);
+    assert.match(result.err, /--file cannot be combined with --changed or --since/);
+  });
+
+  it("accepts the mutation baseline flag the docs name, and only that one", async () => {
+    // README and the Python sibling both call it `--update-baseline`; the
+    // parser accepted `--write` and rejected the documented spelling.
+    const rejected = await run(["mutation", "--write"]);
+    assert.equal(rejected.code, EXIT_USAGE);
+    assert.match(rejected.err, /`mutation` does not accept --write/);
+    const accepted = await run(["mutation", "--update-baseline"]);
+    assert.notEqual(accepted.code, EXIT_USAGE);
+  });
+
+  it("refuses to persist a criticality report scoped by --path", async () => {
+    // A partial .kragg/criticality.json does not read as partial: it reads as
+    // "every function outside --path is uncritical", and two gates go quiet.
+    const result = await run(["criticality", "--write", "--path", "src"]);
+    assert.equal(result.code, EXIT_USAGE);
+    assert.match(result.err, /--write cannot be combined with --path/);
+  });
+});
+
+describe("the help text and the flag table cannot drift apart", () => {
+  // Both directions of one contract: a flag `--help` advertises must be one a
+  // command accepts, and a flag a command accepts must be advertised. Read as
+  // text so neither table has to be exported just to be checked.
+  const source = readFileSync(fileURLToPath(new URL("../src/cli.ts", import.meta.url)), "utf8");
+  const usage = readFileSync(
+    fileURLToPath(new URL("../src/cli/usage.ts", import.meta.url)),
+    "utf8",
+  );
+
+  /** `command -> flags`, parsed out of the `ALLOWED` table in `cli.ts`. */
+  function allowedTable(): Map<string, string[]> {
+    const block = /const ALLOWED: FlagTable = \{\n([\s\S]*?)\n\};/.exec(source);
+    assert.ok(block !== null && block[1] !== undefined, "no ALLOWED table in src/cli.ts");
+    const table = new Map<string, string[]>();
+    for (const line of block[1].split("\n")) {
+      const entry = /^ {2}([\w-]+): \[(.*)],$/.exec(line);
+      assert.ok(entry?.[1] !== undefined && entry[2] !== undefined, `unparsed: ${line}`);
+      table.set(entry[1], [...entry[2].matchAll(/"([\w-]+)"/g)].map((match) => match[1] ?? ""));
+    }
+    return table;
+  }
+
+  /** `command -> flags`, parsed out of the `Options for ...` sections. */
+  function documentedTable(): Map<string, string[]> {
+    const table = new Map<string, string[]>();
+    let commands: string[] = [];
+    for (const line of usage.split("\n")) {
+      const heading = /^Options for (.+):$/.exec(line);
+      if (heading?.[1] !== undefined) {
+        commands = heading[1].replace(" only", "").split(" and ");
+        continue;
+      }
+      const flag = /^ {2}(?:-\w, )?--([\w-]+)/.exec(line);
+      if (flag?.[1] === undefined) {
+        commands = line.startsWith(" ") ? commands : [];
+        continue;
+      }
+      for (const command of commands) {
+        table.set(command, [...(table.get(command) ?? []), flag[1]]);
+      }
+    }
+    return table;
+  }
+
+  it("documents exactly the flags each command accepts", () => {
+    const allowed = allowedTable();
+    const documented = documentedTable();
+    for (const [command, flags] of documented) {
+      assert.deepEqual(
+        [...flags].sort(),
+        [...(allowed.get(command) ?? [])].sort(),
+        `\`${command}\`: --help and the ALLOWED table disagree`,
+      );
+    }
+    for (const [command, flags] of allowed) {
+      assert.equal(
+        flags.length > 0,
+        documented.has(command),
+        `\`${command}\`: help and the table disagree about whether it takes flags`,
+      );
+    }
+  });
+
+  it("finds the commands it claims to be checking", () => {
+    // A regex that quietly matched nothing would make the test above vacuous.
+    const documented = documentedTable();
+    assert.deepEqual(
+      [...documented.keys()].sort(),
+      ["brief", "check", "criticality", "fix", "flaky", "map", "mutation", "security", "status"],
+    );
+    assert.deepEqual(documented.get("criticality"), ["write", "path"]);
+    assert.deepEqual(allowedTable().get("mutation"), ["path", "since", "all", "update-baseline"]);
+  });
+});
+
