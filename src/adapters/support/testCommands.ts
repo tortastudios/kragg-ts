@@ -75,8 +75,6 @@ export function artifacts(
   coverageReportPath: string | undefined,
   runDir: string,
 ): Artifacts {
-  const configured = coverageReportPath ?? DEFAULT_COVERAGE_REPORT;
-  const publishedIstanbulFile = isAbsolute(configured) ? configured : resolve(root, configured);
   const coverageDir = join(runDir, "coverage");
   return {
     root,
@@ -85,6 +83,25 @@ export function artifacts(
     coverageDir,
     istanbulFile: join(coverageDir, "coverage-final.json"),
     lcovFile: join(coverageDir, "lcov.info"),
+    ...publishedPaths(root, coverageReportPath),
+  };
+}
+
+/** Where a run's coverage is published, for the on-demand readers. */
+export type PublishedPaths = Pick<Artifacts, "publishedIstanbulFile" | "publishedLcovFile">;
+
+/**
+ * The two published locations `coverage_report_path` decides: the istanbul
+ * report at the configured path, and the lcov tracefile beside it. `kragg
+ * coverage` reads from here, whichever of the two its runner writes.
+ */
+export function publishedPaths(
+  root: string,
+  coverageReportPath: string | undefined,
+): PublishedPaths {
+  const configured = coverageReportPath ?? DEFAULT_COVERAGE_REPORT;
+  const publishedIstanbulFile = isAbsolute(configured) ? configured : resolve(root, configured);
+  return {
     publishedIstanbulFile,
     publishedLcovFile: join(dirname(publishedIstanbulFile), "lcov.info"),
   };
@@ -196,21 +213,53 @@ export function resolveRunner(env: ProjectEnvironment, runner: TestRunnerName): 
     : { ok: true, bin };
 }
 
-/** The argv for one run. Always an array; never a shell string. */
+/**
+ * The argv for one run. Always an array; never a shell string.
+ *
+ * `testPaths` is the policy's `test_paths` verbatim — the DIRECTORIES, not
+ * globs. Turning them into something a runner can consume is this module's
+ * job and nobody else's: every caller that built the selection itself was one
+ * edit away from handing `node --test` a bare directory, which is the one
+ * argument shape that silently runs nothing (see `testFileGlobs`).
+ */
 export function buildCommand(
   bin: string,
   runner: TestRunnerName,
   layout: Artifacts,
   withCoverage: boolean,
-  testPatterns: readonly string[],
+  testPaths: readonly string[],
 ): readonly string[] {
   if (runner === "vitest") {
     return vitestCommand(bin, layout, withCoverage);
   }
   if (runner === "node") {
-    return nodeCommand(bin, layout, withCoverage, testPatterns);
+    return nodeCommand(bin, layout, withCoverage, testFileGlobs(testPaths));
   }
   return bunCommand(bin, layout, withCoverage);
+}
+
+/**
+ * `test_paths` -> globs `node --test` can actually consume.
+ *
+ * A BARE DIRECTORY DOES NOT WORK, and it fails in the worst available way.
+ * `node --test test` treats the argument as a module specifier and dies with
+ * `Cannot find module .../test` before running anything, which the TAP reader
+ * then parses as one failed test named after the directory. The caller sees a
+ * complete report saying "1 test, 1 failed" — a plausible number, attached to
+ * a suite that never ran. Node's runner does take globs, so each configured
+ * directory becomes one.
+ *
+ * Brace expansion only, deliberately: `{a,b}` works on every Node this package
+ * supports, while extglob (`@(a|b)`) is not guaranteed to. A glob that matches
+ * nothing costs nothing here — the runner reports zero tests for it, and a
+ * zero-test run is evidence of nothing, which the callers check for.
+ *
+ * vitest and bun ignore this list entirely and discover their own files.
+ */
+const TEST_FILE_GLOB = "**/*.{test,spec}.{ts,tsx,mts,cts,js,jsx,mjs,cjs}";
+
+function testFileGlobs(testPaths: readonly string[]): readonly string[] {
+  return testPaths.map((path) => `${path.replace(/\/+$/u, "")}/${TEST_FILE_GLOB}`);
 }
 
 /**
@@ -268,7 +317,7 @@ function nodeCommand(
   bin: string,
   layout: Artifacts,
   withCoverage: boolean,
-  patterns: readonly string[],
+  globs: readonly string[],
 ): readonly string[] {
   const command = [bin, "--test", "--test-reporter=tap", "--test-reporter-destination=stdout"];
   if (withCoverage) {
@@ -278,7 +327,7 @@ function nodeCommand(
       `--test-reporter-destination=${layout.lcovFile}`,
     );
   }
-  command.push(...patterns);
+  command.push(...globs);
   return command;
 }
 

@@ -20,6 +20,7 @@ import { describe, it } from "node:test";
 import { normalizeIstanbul, readIstanbulReport } from "../src/coverage/istanbul.ts";
 import {
   functionsNamed,
+  relativeKey,
   uncoveredWithin,
   type FileCoverage,
 } from "../src/coverage/model.ts";
@@ -232,5 +233,20 @@ describe("normalizeIstanbul: malformed input", () => {
 describe("readIstanbulReport", () => {
   it("returns null for a file that is not there", () => {
     assert.equal(readIstanbulReport("/repo/definitely/not/here.json"), null);
+  });
+});
+
+describe("relativeKey", () => {
+  it("resolves an absolute key under the root to a repo-relative POSIX path", () => {
+    assert.equal(relativeKey("/repo/src/a.ts", ROOT), "src/a.ts");
+  });
+
+  it("accepts a relative key, with or without a leading ./", () => {
+    assert.equal(relativeKey("./src/a.ts", ROOT), "src/a.ts");
+    assert.equal(relativeKey("src/a.ts", ROOT), "src/a.ts");
+  });
+
+  it("keeps a key outside the root as written rather than growing a ../ prefix", () => {
+    assert.equal(relativeKey("/elsewhere/src/a.ts", ROOT), "/elsewhere/src/a.ts");
   });
 });

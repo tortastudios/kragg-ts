@@ -33,6 +33,7 @@ import {
   logicalLines,
   maintainabilityIndex,
   maintainabilityViolations,
+  miExceeds,
   miRank,
   MI_MIN_GRADE,
 } from "../src/gates/complexity.ts";
@@ -93,6 +94,32 @@ describe("ccRank", () => {
     assert.equal(ccExceeds("B", CC_MAX_GRADE), false);
     assert.equal(ccExceeds("C", CC_MAX_GRADE), true);
     assert.equal(ccExceeds("F", CC_MAX_GRADE), true);
+  });
+});
+
+describe("miRank / miExceeds", () => {
+  it("uses radon's mi_rank bands", () => {
+    const bands: readonly (readonly [number, string])[] = [
+      [100, "A"],
+      [19.01, "A"],
+      [19, "B"],
+      [9.01, "B"],
+      [9, "C"],
+      [0, "C"],
+    ];
+    for (const [score, grade] of bands) {
+      assert.equal(miRank(score), grade, `score ${score}`);
+    }
+  });
+
+  it("orders grades so B and C are worse than the A floor, and a grade never exceeds itself", () => {
+    assert.equal(MI_MIN_GRADE, "A");
+    assert.equal(miExceeds("A", MI_MIN_GRADE), false);
+    assert.equal(miExceeds("B", MI_MIN_GRADE), true);
+    assert.equal(miExceeds("C", MI_MIN_GRADE), true);
+    assert.equal(miExceeds("B", "B"), false);
+    assert.equal(miExceeds("C", "B"), true);
+    assert.equal(miExceeds("A", "C"), false);
   });
 });
 

@@ -26,7 +26,10 @@ import {
   DECLARATION_SUFFIXES,
   gitDirty,
   gitSha,
+  scanChanges,
+  selectSourceFiles,
   SOURCE_EXTENSIONS,
+  type ChangedPaths,
 } from "../src/git/changes.ts";
 
 const roots: string[] = [];
@@ -327,6 +330,210 @@ describe("changedFiles: --since", () => {
       await gitDirty(root),
       true,
       "the untracked canary must still exist",
+    );
+  });
+});
+
+/** `scanChanges`, asserted to have succeeded. */
+async function scanned(root: string, since: string | null = null): Promise<ChangedPaths> {
+  const scan = await scanChanges(root, since);
+  assert.ok(scan.ok, `scanChanges failed: ${scan.ok ? "" : scan.message}`);
+  return scan.paths;
+}
+
+describe("changedFiles: names git would otherwise mangle", () => {
+  it("keeps a non-ASCII path, which core.quotePath used to hide", async (t) => {
+    if (!gitAvailable) {
+      t.skip("git is not installed");
+      return;
+    }
+    // THE SILENT LOSS. With `core.quotePath` on — the default — git renders
+    // this name as `"src/caf\303\251.ts"`, quotes included. That string is not
+    // a path on disk, so the file was dropped from the selection and
+    // `--changed` reported a confident pass over a file it never looked at.
+    const root = await repo();
+    write(root, "src/café.ts");
+    await git(root, ["add", "."]);
+    await git(root, [...COMMIT_FLAGS, "commit", "-m", "unicode"]);
+    write(root, "src/café.ts", "export const x = 1;\n");
+    assert.deepEqual(await changedFiles(root, null, ["src"]), ["src/café.ts"]);
+  });
+
+  it("keeps a path with a space and one with a quote", async (t) => {
+    if (!gitAvailable) {
+      t.skip("git is not installed");
+      return;
+    }
+    const root = await repo();
+    write(root, "src/two words.ts");
+    write(root, 'src/it"s.ts');
+    assert.deepEqual([...(await changedFiles(root, null, ["src"]) ?? [])].sort(), [
+      'src/it"s.ts',
+      "src/two words.ts",
+    ]);
+  });
+});
+
+describe("scanChanges: what changed, including what is gone", () => {
+  it("reports nothing changed as an empty change set, not a failure", async (t) => {
+    if (!gitAvailable) {
+      t.skip("git is not installed");
+      return;
+    }
+    assert.deepEqual(await scanned(await repo()), { present: [], removed: [] });
+  });
+
+  it("separates a deletion from an edit", async (t) => {
+    if (!gitAvailable) {
+      t.skip("git is not installed");
+      return;
+    }
+    // A deleted file cannot be handed to a per-file tool, and must equally not
+    // vanish: deleting the module half the tree imports is the change most
+    // likely to break the build.
+    const root = await repo();
+    write(root, "src/other.ts");
+    await git(root, ["add", "."]);
+    await git(root, [...COMMIT_FLAGS, "commit", "-m", "second file"]);
+    rmSync(join(root, "src/committed.ts"));
+    const paths = await scanned(root);
+    assert.deepEqual(paths.present, []);
+    assert.deepEqual(paths.removed, ["src/committed.ts"]);
+  });
+
+  it("puts a rename's destination in present and its source in removed", async (t) => {
+    if (!gitAvailable) {
+      t.skip("git is not installed");
+      return;
+    }
+    const root = await repo();
+    await git(root, ["mv", "src/committed.ts", "src/renamed.ts"]);
+    const paths = await scanned(root);
+    assert.deepEqual(paths.present, ["src/renamed.ts"]);
+    assert.deepEqual(paths.removed, ["src/committed.ts"]);
+  });
+
+  it("includes untracked files, which git diff alone never sees", async (t) => {
+    if (!gitAvailable) {
+      t.skip("git is not installed");
+      return;
+    }
+    const root = await repo();
+    write(root, "src/brand-new.ts");
+    assert.deepEqual(await scanned(root), {
+      present: ["src/brand-new.ts"],
+      removed: [],
+    });
+  });
+
+  it("reports every changed path, config files included", async (t) => {
+    if (!gitAvailable) {
+      t.skip("git is not installed");
+      return;
+    }
+    // Unfiltered on purpose: `tsconfig.json` is not a source file and still
+    // changes what every gate concludes. The caller decides what counts.
+    const root = await repo();
+    write(root, "tsconfig.json", "{}\n");
+    assert.deepEqual((await scanned(root)).present, ["tsconfig.json"]);
+  });
+
+  it("resolves --since through the merge base", async (t) => {
+    if (!gitAvailable) {
+      t.skip("git is not installed");
+      return;
+    }
+    const root = await repo();
+    await git(root, ["checkout", "-q", "-b", "feature"]);
+    write(root, "src/feature.ts");
+    await git(root, ["add", "."]);
+    await git(root, [...COMMIT_FLAGS, "commit", "-m", "feature work"]);
+    assert.deepEqual((await scanned(root, "main")).present, ["src/feature.ts"]);
+  });
+});
+
+describe("scanChanges: git failures carry git's own words", () => {
+  it("says it is not a repository, rather than reporting no changes", async (t) => {
+    if (!gitAvailable) {
+      t.skip("git is not installed");
+      return;
+    }
+    const scan = await scanChanges(scratchDir(), null);
+    assert.equal(scan.ok, false);
+    assert.match(scan.ok ? "" : scan.message, /not a git repository/i);
+  });
+
+  it("refuses a repository with no commit rather than reporting no changes", async (t) => {
+    if (!gitAvailable) {
+      t.skip("git is not installed");
+      return;
+    }
+    // `git diff HEAD` has no HEAD to diff against here. The old code took the
+    // failure as an empty diff and reported only untracked files, so anything
+    // already staged was invisible to `--changed`.
+    const root = scratchDir();
+    await git(root, ["init", "--initial-branch=main"]);
+    write(root, "src/a.ts");
+    await git(root, ["add", "."]);
+    const scan = await scanChanges(root, null);
+    assert.equal(scan.ok, false);
+    assert.match(scan.ok ? "" : scan.message, /git diff:/);
+  });
+
+  it("names the ref for an unknown --since, not the repository", async (t) => {
+    if (!gitAvailable) {
+      t.skip("git is not installed");
+      return;
+    }
+    // Two different mistakes with two different fixes. Flattening both into
+    // "not a git repository" sends the reader to the wrong place.
+    const scan = await scanChanges(await repo(), "no-such-ref");
+    assert.equal(scan.ok, false);
+    const message = scan.ok ? "" : scan.message;
+    assert.match(message, /merge-base/);
+    assert.doesNotMatch(message, /not a git repository/i);
+  });
+});
+
+describe("selectSourceFiles", () => {
+  it("keeps source files under the allowed prefixes, in order, de-duplicated", () => {
+    const root = scratchDir();
+    write(root, "src/a.ts");
+    write(root, "src/b.tsx");
+    write(root, "test/c.ts");
+    write(root, "other/d.ts");
+    write(root, "src/notes.md", "# no\n");
+    const names = ["src/a.ts", "src/b.tsx", "src/a.ts", "test/c.ts", "other/d.ts", "src/notes.md"];
+    assert.deepEqual(selectSourceFiles(root, names, ["src", "test"]), [
+      "src/a.ts",
+      "src/b.tsx",
+      "test/c.ts",
+    ]);
+  });
+
+  it("drops a name that is not on disk", () => {
+    const root = scratchDir();
+    write(root, "src/here.ts");
+    assert.deepEqual(selectSourceFiles(root, ["src/here.ts", "src/gone.ts"], ["src"]), [
+      "src/here.ts",
+    ]);
+  });
+
+  it("keeps a name that is not on disk when the caller asks — the removed half", () => {
+    const root = scratchDir();
+    assert.deepEqual(
+      selectSourceFiles(root, ["src/gone.ts", "src/gone.md"], ["src"], { mustExist: false }),
+      ["src/gone.ts"],
+    );
+  });
+
+  it("excludes ambient declarations unless asked", () => {
+    const root = scratchDir();
+    write(root, "src/types.d.ts");
+    assert.deepEqual(selectSourceFiles(root, ["src/types.d.ts"], ["src"]), []);
+    assert.deepEqual(
+      selectSourceFiles(root, ["src/types.d.ts"], ["src"], { includeDeclarations: true }),
+      ["src/types.d.ts"],
     );
   });
 });

@@ -171,6 +171,25 @@ const LCOV = [
   "",
 ].join("\n");
 
+/**
+ * An lcov tracefile from a run that never loaded `src/auth/login.ts` at all.
+ *
+ * The other half of the same story: TOR-1364 made a critical function the
+ * report says nothing about a FINDING (`critical-unmeasured`) rather than a
+ * silent pass, and a declared function has to arrive there with its reason
+ * too — "add a test for this fan-in-1 function" reads as noise without it.
+ */
+const LCOV_WITHOUT_LOGIN = [
+  "TN:",
+  "SF:src/text.ts",
+  "DA:1,1",
+  "DA:2,1",
+  "FN:1,normalize",
+  "FNDA:1,normalize",
+  "end_of_record",
+  "",
+].join("\n");
+
 /** Run `kragg criticality --write` and hand back its exit code and output. */
 function write(root: string): { readonly code: number; readonly errors: string[] } {
   const errors: string[] = [];
@@ -297,6 +316,36 @@ describe("a declared entrypoint is critical everywhere the graph's own are", () 
         ),
       ),
       `expected a declared finding, got ${JSON.stringify(violations)}`,
+    );
+  });
+
+  it("is UNMEASURED, not silent, when no test ever loaded its file", () => {
+    const options = {
+      root,
+      sourcePaths: ["src"],
+      report: null,
+      lcov: LCOV_WITHOUT_LOGIN,
+      api: ts,
+    };
+    const outcome = checkCriticalCoverage(options);
+    assert.equal(outcome.ok && !outcome.skipped, true);
+    const violations = outcome.ok && !outcome.skipped ? outcome.violations : [];
+    const finding = violations.find(
+      (violation) => violation.code === "critical-unmeasured",
+    );
+    assert.equal(
+      finding?.message,
+      `critical function src/auth/login#verifyPassword (declared: ${REASON}) has no ` +
+        "coverage data: the test run never loaded src/auth/login.ts (no entry in the " +
+        "coverage report)",
+    );
+    // `kragg coverage` prints the same row, off the same gaps.
+    const lines = renderGaps(criticalCoverageGaps(options));
+    assert.ok(
+      lines.some((line) =>
+        line.includes(`src/auth/login#verifyPassword (declared: ${REASON}) — unmeasured:`),
+      ),
+      lines.join("\n"),
     );
   });
 

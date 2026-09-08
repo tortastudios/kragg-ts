@@ -26,6 +26,7 @@
 
 import assert from "node:assert/strict";
 import {
+  chmodSync,
   mkdirSync,
   mkdtempSync,
   readFileSync,
@@ -41,6 +42,7 @@ import { after, describe, it } from "node:test";
 import ts from "typescript";
 
 import { analysisProgram } from "../src/analysis/program.ts";
+import { noCriticalityReason } from "../src/catalog/context.ts";
 import { criticalityCache } from "../src/catalog/criticalityCache.ts";
 import {
   criticalityFreshness,
@@ -134,6 +136,57 @@ describe("scanSources", () => {
     // another gate to report, not a reason freshness cannot be judged.
     const root = project({ "src/a.ts": "export const a = 1;\n" });
     assert.deepEqual(scanSources(root, ["src", "nope"]), scanSources(root, ["src"]));
+  });
+
+  it("watches nested directories whose NAME happens to be a build-output name", () => {
+    // THE BUG. This walk kept its own skip list and applied it by BASENAME AT
+    // ANY DEPTH, so `src/coverage/` and `src/build/` — the first of which is a
+    // real directory in this very repo — were invisible to it. Every file
+    // under them could be edited, added or deleted and the data still read
+    // "fresh". The walk is `analysis/walk.ts`'s now, which skips those names
+    // only where they mean "generated": as children of the REPO ROOT.
+    const root = project({
+      "src/a.ts": "export const a = 1;\n",
+      "src/coverage/model.ts": "export const model = 1;\n",
+      "src/build/plan.ts": "export const plan = 1;\n",
+      "src/out/emit.ts": "export const emit = 1;\n",
+      "src/dist/bundle.ts": "export const bundle = 1;\n",
+      "dist/generated.ts": "export const generated = 1;\n",
+      "coverage/report.ts": "export const report = 1;\n",
+    });
+    assert.equal(scanSources(root, ["src"]).files, 5);
+    // Under `["."]` the same names ARE generated output, and stay skipped.
+    assert.equal(scanSources(root, ["."]).files, 5);
+  });
+
+  it("sees a same-size edit, which a count and a byte total cannot", () => {
+    // `sed -i` swapping one character for another is a same-size edit, and the
+    // old fingerprint (files, bytes, newest mtime) was blind to it whenever
+    // the mtime did not move either.
+    const root = project({ "src/a.ts": "export const a = 1;\n" });
+    const path = join(root, "src", "a.ts");
+    const when = new Date(Math.floor(statSync(path).mtimeMs));
+    utimesSync(path, when, when);
+    const before = scanSources(root, ["src"]);
+
+    writeFileSync(path, "export const a = 2;\n");
+    utimesSync(path, when, when);
+    const after = scanSources(root, ["src"]);
+    assert.equal(after.files, before.files);
+    assert.equal(after.bytes, before.bytes, "the mutation must be same-size");
+    assert.equal(after.newestMtimeMs, before.newestMtimeMs, "and same-mtime");
+    assert.notEqual(after.digest, before.digest, "the content hash must see it");
+  });
+
+  it("hashes independently of the order the caller lists its paths in", () => {
+    const root = project({
+      "src/a.ts": "export const a = 1;\n",
+      "test/a.test.ts": "export const t = 1;\n",
+    });
+    assert.equal(
+      scanSources(root, ["src", "test"]).digest,
+      scanSources(root, ["test", "src"]).digest,
+    );
   });
 });
 
@@ -236,6 +289,95 @@ describe("criticalityFreshness", () => {
     const before = statSync(path);
     writeFileSync(path, "export const a = 1;\nexport const b = 2;\n");
     utimesSync(path, new Date(before.mtimeMs), new Date(before.mtimeMs));
+    assert.equal(criticalityFreshness(root), "stale");
+  });
+
+  it("notices an edit that changes neither the size nor the mtime", () => {
+    // THE COARSE-METADATA HOLE. Files, bytes and newest-mtime were the whole
+    // fingerprint, so a same-size edit made by a tool that preserves
+    // timestamps — `sed -i` under a build system, a restore from an archive —
+    // left all three numbers exactly where they were, and the data on disk
+    // stayed "fresh" while describing a tree that no longer existed.
+    const root = project({ "src/a.ts": "export const a = 1;\n" });
+    const path = join(root, "src", "a.ts");
+    // A whole-millisecond mtime, so restoring it below is exact rather than
+    // truncated — `utimesSync` cannot express the sub-millisecond part a write
+    // leaves behind, and a test about preserved timestamps must preserve them.
+    const when = new Date(Math.floor(statSync(path).mtimeMs));
+    utimesSync(path, when, when);
+    const before = statSync(path);
+
+    writeData(root);
+    writeStamp(root, ["src"]);
+    assert.equal(criticalityFreshness(root), "fresh");
+
+    writeFileSync(path, "export const a = 2;\n");
+    utimesSync(path, when, when);
+    const after = statSync(path);
+    assert.equal(after.size, before.size, "the mutation must be same-size");
+    assert.equal(after.mtimeMs, before.mtimeMs, "and must preserve the mtime");
+
+    assert.equal(criticalityFreshness(root), "stale");
+  });
+
+  it("watches a nested directory named like a build output", () => {
+    // `src/coverage/` is a real directory in this repo, and the old walk's own
+    // skip list ate it by name at any depth: edits, additions and deletions
+    // under it were all invisible.
+    const root = project({
+      "src/a.ts": "export const a = 1;\n",
+      "src/coverage/model.ts": "export const model = 1;\n",
+    });
+    writeData(root);
+    writeStamp(root, ["src"]);
+    assert.equal(criticalityFreshness(root), "fresh");
+
+    writeFileSync(join(root, "src", "coverage", "model.ts"), "export const model = 2;\n");
+    assert.equal(criticalityFreshness(root), "stale");
+
+    writeData(root);
+    writeStamp(root, ["src"]);
+    rmSync(join(root, "src", "coverage", "model.ts"));
+    assert.equal(criticalityFreshness(root), "stale", "a deletion under it too");
+  });
+
+  it("watches the analysis inputs that are not source files", () => {
+    // The policy decides which paths are analyzed, the tsconfig decides which
+    // files are in the program at all. Either can move the call graph without
+    // a single source byte changing, so neither may be outside the
+    // fingerprint. Each case re-stamps first, so a failure names itself.
+    const root = project({ "src/a.ts": "export const a = 1;\n" });
+    for (const [name, changed] of [
+      ["kragg.json", '{"source_paths": ["src", "lib"]}\n'],
+      ["tsconfig.json", `${TSCONFIG}\n`],
+      ["package.json", '{"kragg": {"max_file_lines": 400}}\n'],
+      ["package.json", '{"kragg": {"max_file_lines": 300}}\n'],
+    ] as const) {
+      writeData(root);
+      writeStamp(root, ["src"]);
+      assert.equal(criticalityFreshness(root), "fresh", name);
+      writeFileSync(join(root, name), changed);
+      assert.equal(criticalityFreshness(root), "stale", name);
+    }
+  });
+
+  it("reads a stamp of an unknown version as stale, not as an mtime question", () => {
+    // Every kragg-ts before the content hash wrote `version: 1`, whose numbers
+    // this build cannot verify. Falling back to the mtime relation — the
+    // instrument reserved for a file NOBODY stamped — would let that older
+    // claim buy freshness anyway. It does not crash on it either.
+    const root = project({ "src/a.ts": "export const a = 1;\n" });
+    writeData(root);
+    writeFileSync(
+      stampPath(root),
+      JSON.stringify({
+        version: 1,
+        scan_paths: ["src"],
+        files: 1,
+        bytes: 20,
+        newest_mtime_ms: statSync(join(root, "src", "a.ts")).mtimeMs,
+      }),
+    );
     assert.equal(criticalityFreshness(root), "stale");
   });
 
@@ -418,6 +560,59 @@ describe("derive-with-cache", () => {
     assert.equal(statSync(criticalityPath(root)).mtimeMs, when);
   });
 
+  it("builds no program at all when the data is already fresh", () => {
+    // The laziness half of the same fact: `ensure()` answers the freshness
+    // question BEFORE it touches the handle, so `kragg map` at session start
+    // on an up-to-date repo compiles nothing. This is the assertion
+    // `map.test.ts` used to make by seeding a process-global handle cache,
+    // which no longer exists — the run owns its program.
+    const root = project(FIXTURE);
+    cacheFor(root).ensure();
+    assert.equal(criticalityFreshness(root), "fresh");
+
+    const analysis = analysisProgram({ root, api: ts });
+    criticalityCache({ root, scanPaths: ["src"], analysis }).ensure();
+    assert.equal(analysis.loaded(), false);
+  });
+
+  it("never reports data it could not write as fresh", () => {
+    // A read-only `.kragg` is a legitimate state — a checked-out artifact
+    // directory, a container with a read-only mount. What it may NEVER become
+    // is a pass on stale data: the derivation cannot land, so the file on disk
+    // is still the one the edit outran, and every consumer must keep refusing
+    // it and keep saying why.
+    if (process.getuid?.() === 0) {
+      return; // root ignores the mode bits, so there is nothing to observe.
+    }
+    const root = project(FIXTURE);
+    cacheFor(root).ensure();
+    const derived = readFileSync(criticalityPath(root), "utf8");
+    // A new FUNCTION, so a derivation that landed would be visible in the file
+    // as a record naming it — the assertion below is about a write that did
+    // not happen, not about two identical writes.
+    writeFileSync(
+      join(root, "src", "b.ts"),
+      "export function extra(): number {\n  return 1;\n}\n",
+    );
+    assert.equal(criticalityFreshness(root), "stale");
+
+    chmodSync(criticalityPath(root), 0o400);
+    chmodSync(stampPath(root), 0o400);
+    chmodSync(join(root, ".kragg"), 0o500);
+    try {
+      cacheFor(root).ensure();
+      assert.equal(readFileSync(criticalityPath(root), "utf8"), derived, "nothing was written");
+      assert.doesNotMatch(derived, /src\/b#extra/u);
+      assert.equal(criticalityFreshness(root), "stale");
+      assert.deepEqual(readJson(root), [], "no consumer may see the outrun records");
+      assert.equal(noCriticalityReason(root), STALE_CRITICALITY_REASON);
+    } finally {
+      chmodSync(join(root, ".kragg"), 0o700);
+      chmodSync(criticalityPath(root), 0o600);
+      chmodSync(stampPath(root), 0o600);
+    }
+  });
+
   it("writes nothing when the program cannot be built, and claims nothing", () => {
     // Fail closed with no second code path: the derivation failed, so the
     // file stays whatever it was, and freshness still refuses it.
@@ -482,7 +677,7 @@ describe("writeStamp when the stamp cannot be written", () => {
     const stamp: unknown = JSON.parse(readFileSync(stampPath(root), "utf8"));
     assert.ok(typeof stamp === "object" && stamp !== null);
     const record: Readonly<Record<string, unknown>> = { ...stamp };
-    assert.equal(record["version"], 1);
+    assert.equal(record["version"], 2); // STAMP_VERSION: content-hash stamps since TOR-1366
     assert.deepEqual(record["scan_paths"], ["src"]);
     assert.equal(record["files"], 1);
   });

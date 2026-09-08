@@ -30,6 +30,12 @@
  * rather than from a caller, because the gates that later judge freshness read
  * the same policy, and two answers to "which files does this depend on" is one
  * too many.
+ *
+ * A WRITE THAT DID NOT HAPPEN IS NOT A SUCCESS. On a read-only checkout the
+ * artifact writes fail; the command reports the failure and exits 3 rather
+ * than printing `Wrote …` for files that are not there. A stamp that alone
+ * cannot be written is milder — the data is correct, just unvouched-for — so
+ * that is a stderr line and exit 0, with the consequence spelled out.
  */
 
 import { isAbsolute, join, relative, resolve } from "node:path";
@@ -113,7 +119,7 @@ export function runCriticality(options: CriticalityCommandOptions): number {
     return EXIT_ENVIRONMENT;
   }
   return options.write
-    ? writeAll(options.root, result.profiles, policy, log)
+    ? writeAll(options.root, result.profiles, policy, log, logError)
     : printTable(result.profiles, log);
 }
 
@@ -198,13 +204,35 @@ function writeAll(
   profiles: readonly FunctionProfile[],
   policy: KraggPolicy,
   log: (line: string) => void,
+  logError: (line: string) => void,
 ): number {
   const markdown = join(root, "CRITICALITY.md");
   const json = criticalityPath(root);
-  writeReport(profiles, markdown);
-  writeJson(profiles, json);
-  writeStamp(root, scanPaths(policy));
+  try {
+    writeReport(profiles, markdown);
+    writeJson(profiles, json);
+  } catch (error: unknown) {
+    // A read-only checkout is a legitimate state, but it is not a success:
+    // this command exists to produce these files, and printing `Wrote …` for
+    // files that are not there is the shape of lie the whole tool refuses.
+    logError(
+      `could not write the criticality artifacts: ${errorText(error)}\n` +
+        `Fix: make ${markdown} and ${json} writable, or run from a checkout ` +
+        `that is.`,
+    );
+    return EXIT_ENVIRONMENT;
+  }
   log(`Wrote ${markdown} and ${json}`);
+  if (!writeStamp(root, scanPaths(policy))) {
+    // The data is correct; nothing on disk can vouch for it. Freshness will
+    // read it as stale and every `check` will derive it again, which is the
+    // safe direction but is worth one line rather than a silent mystery.
+    logError(
+      "wrote the data but could not write its freshness stamp in .kragg/, " +
+        "so the gates will treat it as stale and re-derive it on every run.\n" +
+        "Fix: make the .kragg directory writable.",
+    );
+  }
   return EXIT_OK;
 }
 
@@ -251,6 +279,10 @@ function scopeFiles(
 function contains(directory: string, file: string): boolean {
   const rel = relative(directory, resolve(file));
   return rel === "" || (!rel.startsWith("..") && !isAbsolute(rel));
+}
+
+function errorText(error: unknown): string {
+  return error instanceof Error ? error.message : String(error);
 }
 
 /**

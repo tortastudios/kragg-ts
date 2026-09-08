@@ -58,6 +58,14 @@
  * own violation with its own code, and it can be reported alongside green
  * tests.
  *
+ * THE NUMBER IS THE PROJECT'S, NOT THE REPORT'S. Every runner reports only
+ * the files the run loaded, so a percentage over the report alone is a
+ * percentage over whichever files happened to load. `projectTotals`
+ * (`support/coverage.ts`) restricts the count to `source_paths` and adds
+ * every source file the report does not mention with all of its statement
+ * lines uncovered; the headline names those files. See
+ * `coverage/inventory.ts` for where the line count comes from.
+ *
  * ── COVERAGE ARTIFACTS, PER RUNNER ─────────────────────────────────────────
  *  - **vitest**: istanbul `coverage-final.json`. Its `json` coverage reporter
  *    is in the DEFAULT reporter set, and kragg names it explicitly anyway.
@@ -79,14 +87,11 @@ import { mkdirSync } from "node:fs";
 import type { LineCoverageReport } from "../coverage/model.ts";
 import type { CompletedCommand, Violation } from "../engine/models.ts";
 import { runCommand } from "../engine/runner.ts";
-import {
-  missingTool as missingToolName,
-  missingToolMessage,
-  remediation,
-} from "../environment/project.ts";
 import type { ProjectEnvironment } from "../environment/project.ts";
-import { coverageTotals, readCoverageReport } from "./support/coverage.ts";
-import type { CoverageTotals } from "./support/coverage.ts";
+import type { TypeScriptApi } from "../analysis/sourceFile.ts";
+import { sourceInventory } from "../coverage/inventory.ts";
+import { projectTotals, readCoverageReport } from "./support/coverage.ts";
+import type { ProjectTotals } from "./support/coverage.ts";
 import { detectTestRunner } from "./support/detect.ts";
 import type { RunnerDetection, TestRunnerChoice, TestRunnerName } from "./support/detect.ts";
 import type { JsonObject } from "./support/json.ts";
@@ -97,7 +102,7 @@ import { parseVitestJson } from "./support/vitestReport.ts";
 import { readTextFile } from "./support/manifest.ts";
 import { EMPTY_SUMMARY } from "./support/testReport.ts";
 import type { TestReport, TestSummary } from "./support/testReport.ts";
-import { capped, crashed, missingTool, notConfigured } from "./support/outcome.ts";
+import { capped, crashed, notConfigured } from "./support/outcome.ts";
 import type { Unavailable } from "./support/outcome.ts";
 import { runOptions } from "./support/run.ts";
 import {
@@ -109,27 +114,58 @@ import {
   resolveRunner,
 } from "./support/testCommands.ts";
 import type { Artifacts } from "./support/testCommands.ts";
-import { crashMessage, killedMessage } from "./support/testEvidence.ts";
+import {
+  belowThreshold,
+  COVERAGE_ADVICE,
+  coverageLine,
+  crashMessage,
+  killedMessage,
+  runnerMissing,
+  skipReason,
+} from "./support/testEvidence.ts";
 
 /** Gate name, matching the Python gate this replaces. */
 export const TEST_GATE = "test-coverage";
 
 /** `code` for the coverage threshold, distinct from any test failure. */
-export const COVERAGE_BELOW_THRESHOLD = "coverage-below-threshold";
+export { COVERAGE_BELOW_THRESHOLD } from "./support/testEvidence.ts";
 
+/**
+ * Everything one invocation of the suite needs.
+ *
+ * `choice` and `testPaths` are REQUIRED, and that is the point: they are the
+ * two settings that decide WHICH runner runs WHICH files, and an optional
+ * field is a field a caller can forget. `kragg flaky --rerun` forgot both —
+ * it re-ran the suite under whatever runner inference happened to pick, over
+ * a selection `node --test` cannot expand — and then reported the resulting
+ * non-suite as evidence that nothing was flaky. Every caller now has to say
+ * what it is running, in the same words the policy uses.
+ */
 export interface TestRunnerOptions {
   readonly env: ProjectEnvironment;
-  /** `test_runner` policy setting. Defaults to `"auto"`. */
-  readonly choice?: TestRunnerChoice | undefined;
+  /** `test_runner` policy setting; `"auto"` to infer. */
+  readonly choice: TestRunnerChoice;
   /** `coverage_fail_under`. Zero or less disables coverage entirely. */
   readonly coverageFailUnder: number;
   /** `coverage_report_path`, relative to the project root. */
   readonly coverageReportPath?: string | undefined;
   /** `max_violations_per_gate`. */
   readonly maxViolations: number;
-  /** Paths passed to `node --test`; ignored by the other runners. */
-  readonly testPatterns?: readonly string[] | undefined;
+  /**
+   * `test_paths` policy setting, as directories. Expanded to globs for
+   * `node --test` by `support/testCommands.ts`; the other runners discover
+   * their own files and ignore it.
+   */
+  readonly testPaths: readonly string[];
   readonly timeoutMs?: number | undefined;
+  /**
+   * Policy `source_paths`: the files the coverage number is reconciled
+   * against. Only files under them count, and a source file the run never
+   * loaded counts as uncovered — see `support/coverage.ts`, `projectTotals`.
+   */
+  readonly sourcePaths: readonly string[];
+  /** Compiler used to count a never-loaded file's lines. Defaults to the project's own. */
+  readonly api?: TypeScriptApi | undefined;
 }
 
 /**
@@ -147,7 +183,7 @@ export type CoverageEvidence =
 export type CoverageOutcome =
   | {
       readonly ok: true;
-      readonly totals: CoverageTotals;
+      readonly totals: ProjectTotals;
       readonly reportPath: string;
       readonly violation: Violation | undefined;
       readonly evidence: CoverageEvidence;
@@ -183,7 +219,7 @@ export type TestRunOutcome = TestRunFindings | Unavailable;
 /** Detect, run, parse. See the module docs for every judgement call. */
 export async function runTests(options: TestRunnerOptions): Promise<TestRunOutcome> {
   const { env } = options;
-  const detection = detectTestRunner(env.root, options.choice ?? "auto");
+  const detection = detectTestRunner(env.root, options.choice);
   if (detection.runner === undefined) {
     return notConfigured(skipReason(detection, env));
   }
@@ -215,10 +251,10 @@ async function runInto(
   if (withCoverage) {
     mkdirIgnoringErrors(layout.coverageDir);
   }
-  const command = buildCommand(bin, runner, layout, withCoverage, options.testPatterns ?? []);
+  const command = buildCommand(bin, runner, layout, withCoverage, options.testPaths);
   const result = await runCommand(TEST_GATE, command, layout.root, runOptions(options.timeoutMs));
 
-  const environmentFailure = runnerMissing(options.env, runner, result.stdout, result.stderr);
+  const environmentFailure = runnerMissing(TEST_GATE, options.env, runner, result.stdout, result.stderr);
   if (environmentFailure !== undefined) {
     return environmentFailure;
   }
@@ -230,7 +266,7 @@ async function runInto(
     return crashed(crashMessage(runner, result, layout));
   }
 
-  const coverage = withCoverage ? readCoverage(runner, layout, options.coverageFailUnder) : null;
+  const coverage = withCoverage ? readCoverage(runner, layout, options) : null;
   const published = coverage?.ok === true ? publishCoverage(layout, runner) : undefined;
   return assemble(detection, runner, command, report, coverage, published, options.maxViolations);
 }
@@ -257,48 +293,6 @@ function parseResults(
   return parseBunTest(`${result.stdout}\n${result.stderr}`, result.returncode);
 }
 
-/**
- * Was the RUNNER ITSELF missing?
- *
- * The `_is_tool_module` twin. `missingToolName` reports whatever name the
- * output said could not be found; only when that name IS the runner does this
- * become an environment failure. A test file that cannot import
- * `./helpers.ts` produces the same class of message and is a test failure —
- * reported through the normal parse path, against the file that failed.
- */
-function runnerMissing(
-  env: ProjectEnvironment,
-  runner: TestRunnerName,
-  stdout: string,
-  stderr: string,
-): Unavailable | undefined {
-  const missing = missingToolName({
-    name: TEST_GATE,
-    command: [],
-    cwd: env.root,
-    returncode: 127,
-    stdout,
-    stderr,
-  });
-  if (missing === null) {
-    return undefined;
-  }
-  const binName = runner === "vitest" ? "vitest" : runner;
-  if (missing !== binName && !missing.endsWith(`/${binName}`)) {
-    return undefined;
-  }
-  if (runner === "vitest") {
-    return missingTool(missingToolMessage(env, "vitest", "vitest"));
-  }
-  return missingTool(
-    `${binName} could not be started, so no tests ran.\n` +
-      (runner === "bun"
-        ? "Install bun (https://bun.com) or set `test_runner` to a runner this project has."
-        : "kragg runs `node --test` on its own interpreter; this should not happen.") +
-      `\n${remediation(env.packageManager, binName)}`,
-  );
-}
-
 /** What a coverage read yields: the line model plus the document to share. */
 type CoverageRead =
   | {
@@ -322,11 +316,20 @@ function readCoverageArtifact(runner: TestRunnerName, layout: Artifacts): Covera
     : read;
 }
 
-/** Read whichever coverage artifact this runner writes, and apply the floor. */
+/**
+ * Read whichever coverage artifact this runner writes, and apply the floor.
+ *
+ * The number is the PROJECT's, not the report's: `projectTotals` restricts
+ * it to `source_paths` and adds every source file the run never loaded with
+ * all of its statement lines uncovered. A report that leaves no line to count
+ * under the source paths is not 100%; it is coverage that was not collected
+ * for this project, and it is reported as such — `percent()`'s 100 here would
+ * be the most misleading number this gate could produce.
+ */
 function readCoverage(
   runner: TestRunnerName,
   layout: Artifacts,
-  failUnder: number,
+  options: TestRunnerOptions,
 ): CoverageOutcome {
   const read = readCoverageArtifact(runner, layout);
   if (!read.ok) {
@@ -337,42 +340,25 @@ function readCoverage(
         `${COVERAGE_ADVICE[runner]}`,
     };
   }
-  const totals = coverageTotals(read.report);
+  const inventory = sourceInventory(layout.root, options.sourcePaths, options.api);
+  const totals = projectTotals(read.report, layout.root, options.sourcePaths, inventory);
   if (totals.totalLines === 0) {
-    // A report with no measurable lines is not 100% coverage; it is coverage
-    // that was not collected. Reporting `percent()`'s 100 here would be the
-    // most misleading number this gate could produce.
     return {
       ok: false,
       message:
-        `${read.report.reportPath} measured no executable lines. ` +
-        `${COVERAGE_ADVICE[runner]}`,
+        `${read.report.reportPath} measured no executable lines under ` +
+        `${options.sourcePaths.join(", ")} (${totals.reportFiles} files in the report, ` +
+        `${totals.measuredFiles} of them under the source paths; ${totals.sourceFiles} ` +
+        `source files on disk). ${COVERAGE_ADVICE[runner]}`,
     };
   }
+  const failUnder = options.coverageFailUnder;
   return {
     ok: true,
     totals,
     reportPath: read.report.reportPath,
     violation: totals.pct < failUnder ? belowThreshold(totals, failUnder) : undefined,
     evidence: read.evidence,
-  };
-}
-
-const COVERAGE_ADVICE: Readonly<Record<TestRunnerName, string>> = {
-  vitest:
-    "vitest writes it via its `json` coverage reporter; check that " +
-    "`coverage.provider` is installed (@vitest/coverage-v8 or -istanbul).",
-  node: "node --test writes lcov via `--test-reporter=lcov`; coverage needs Node 20.1+.",
-  bun: "bun test writes lcov via `--coverage-reporter=lcov`.",
-};
-
-function belowThreshold(totals: CoverageTotals, failUnder: number): Violation {
-  return {
-    message:
-      `line coverage ${totals.pct}% is below the required ${failUnder}% ` +
-      `(${totals.coveredLines}/${totals.totalLines} lines)`,
-    code: COVERAGE_BELOW_THRESHOLD,
-    fixHint: "run `kragg coverage` for the uncovered lines of the highest-fan-in functions",
   };
 }
 
@@ -433,36 +419,13 @@ function describe(
   ];
   if (coverage !== null) {
     parts.push(
-      coverage.ok
-        ? `line coverage ${coverage.totals.pct}% ` +
-          `(${coverage.totals.coveredLines}/${coverage.totals.totalLines} lines)`
-        : `coverage unavailable — ${coverage.message}`,
+      coverage.ok ? coverageLine(coverage.totals) : `coverage unavailable — ${coverage.message}`,
     );
   }
   if (published !== undefined) {
     parts.push(`note: ${published}`);
   }
   return parts.join("\n");
-}
-
-/** Why no runner ran, with the commands that would make one available. */
-function skipReason(detection: RunnerDetection, env: ProjectEnvironment): string {
-  if (detection.source.startsWith("policy:")) {
-    return `${detection.source} — the test gate is switched off in kragg.json`;
-  }
-  if (detection.unsupported !== undefined) {
-    return (
-      `this project's test script runs ${detection.unsupported}, which kragg does not ` +
-      "drive yet. Nothing was checked — set `test_runner` explicitly if one of " +
-      "vitest / node / bun can run this suite."
-    );
-  }
-  return (
-    "no test runner detected (looked at package.json#scripts.test, vitest.config.*, " +
-    "a vitest dependency, and bunfig.toml). No tests were run, so nothing was verified.\n" +
-    `${remediation(env.packageManager, "vitest @vitest/coverage-v8")}\n` +
-    "or use Node's built-in runner: set `\"test\": \"node --test\"` in package.json."
-  );
 }
 
 /** Best-effort mkdir. A failure surfaces later as a missing artifact. */

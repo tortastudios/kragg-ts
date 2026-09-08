@@ -12,74 +12,60 @@
  * follow-up question.
  *
  * ── IT IS A REPORT, NOT A GATE ─────────────────────────────────────────────
- * Exit code is always `0`, including the "no coverage data" case, where it
- * prints `no coverage data (run \`kragg check\` first)` and stops — byte for
- * byte what `cmd_coverage` prints. The gating equivalent is
- * `gates/criticalCoverage.ts`, which fails the build on the same data. Two
- * surfaces, one computation: this command calls `criticalCoverageGaps`, the
- * function that gate already exports, so the report and the gate can never
- * disagree about what is uncovered.
+ * "No coverage data" is a STATE and exits `0` with the line `cmd_coverage`
+ * prints, byte for byte, followed by the path that was expected. The gating
+ * equivalent is `gates/criticalCoverage.ts`, which fails the build on the
+ * same data. Two surfaces, one computation: this command calls
+ * `criticalCoverageGaps`, the function that gate already exports, so the
+ * report and the gate can never disagree about what is uncovered or which
+ * functions are unmeasured.
  *
- * ── WHERE THE DATA COMES FROM ──────────────────────────────────────────────
- * coverage.py hands Python a per-function `missing_lines` list. The
- * JavaScript ecosystem has nothing equivalent — it has istanbul's raw
- * `coverage-final.json` from vitest and lcov tracefiles from `node --test` and
- * `bun test`. `coverage/istanbul.ts` and `coverage/lcov.ts` normalise both
- * into the one line model. Nothing here re-parses a report; this command
- * only decides which artifact to look for.
+ * A report that IS there but cannot be used — unreadable, truncated, or
+ * naming no file under the source paths — is not "no data": it is an ERROR,
+ * exit 3, with the file named. Printing "no coverage data" for a corrupt
+ * file would send the reader to re-run a suite that already ran.
+ *
+ * ── WHAT IT READS, AND FROM WHERE ──────────────────────────────────────────
+ * The artifact the project's OWN test runner publishes, and nothing else.
+ * `kragg check` moves the coverage its run produced to `coverage_report_path`
+ * (istanbul JSON, from vitest) or to the `lcov.info` beside it (from `node
+ * --test` and `bun test`) — see `adapters/support/testCommands.ts`. This
+ * command detects the runner the same way the gate does (`test_runner`, then
+ * the project's manifest) and reads the ONE file that runner writes. It does
+ * not look for "whichever report exists": after a switch from vitest to
+ * `node --test` the older istanbul file is still on disk beside the new
+ * tracefile, and preferring the richer format would read the other runner's
+ * stale coverage. This command is on demand; the gate never reads from here.
  *
  * ── THE UNMEASURED ROW IS NOT A ZERO ───────────────────────────────────────
- * A critical function with no unambiguous entry in the report is reported
- * separately, as `no coverage entry`, and is NOT counted as covered or
- * uncovered. Python calls this `measured=False` and prints "no test imports
- * it"; the TypeScript phrasing is deliberately weaker, because in this
- * ecosystem the likelier cause is a name collision inside `fnMap` (two
- * same-named functions in one file, which istanbul cannot tell apart) or a
- * path-key mismatch, not an untested function. Saying "no test imports it"
- * here would be a confident claim about something that was never measured.
+ * A critical function the report says nothing usable about is listed
+ * separately, with the cause the gate found — never loaded, a name the
+ * source could not disambiguate, a body the report is silent on — and is
+ * NOT counted as covered or uncovered. The gate fails such a function; this
+ * command shows the same row with the same words.
  */
 
-import { isAbsolute, join } from "node:path";
+import { relative } from "node:path";
 
-import { readTextFile } from "../adapters/support/manifest.ts";
 import type { TypeScriptApi } from "../analysis/sourceFile.ts";
-import { readIstanbulReport } from "../coverage/istanbul.ts";
-import { EXIT_OK, EXIT_USAGE } from "../engine/report.ts";
+import { readCoverageReport } from "../adapters/support/coverage.ts";
+import type { CoverageReadFailure } from "../adapters/support/coverage.ts";
+import { detectTestRunner } from "../adapters/support/detect.ts";
+import type { TestRunnerName } from "../adapters/support/detect.ts";
+import { readLcov } from "../adapters/support/lcov.ts";
+import { publishedPaths } from "../adapters/support/testCommands.ts";
+import { EXIT_ENVIRONMENT, EXIT_OK, EXIT_USAGE } from "../engine/report.ts";
 import {
+  coverageEvidenceProblem,
+  coverageModel,
   criticalCoverageGaps,
   type CriticalCoverageGap,
+  type CriticalCoverageOptions,
 } from "../gates/criticalCoverage.ts";
 import { loadPolicy, PolicyError, type KraggPolicy } from "../policy/policy.ts";
 
 /** What `cmd_coverage` prints when the report is missing. Exit code stays 0. */
 export const NO_COVERAGE_DATA_MESSAGE = "no coverage data (run `kragg check` first)";
-
-/**
- * Where the istanbul report is looked for, in order.
- *
- * vitest's own default first, then `.kragg/`, which is where a runner that
- * had to be pointed somewhere (node:test, or a converted Bun report) is told
- * to write. Both are checked because the alternative — one hard-coded path —
- * makes the command print "no coverage data" on a project that has plenty.
- */
-export const DEFAULT_REPORT_PATHS: readonly string[] = [
-  join("coverage", "coverage-final.json"),
-  join(".kragg", "coverage-final.json"),
-];
-
-/**
- * Where the lcov tracefile is looked for, in order.
- *
- * `node --test` and `bun test` cannot write istanbul JSON at all — node's
- * reporters are `spec`/`dot`/`tap`/`junit`/`lcov` and bun's coverage reporters
- * are `text` and `lcov`. Without these paths this command printed "no coverage
- * data" on two of the three runners kragg drives, however much coverage the
- * project had.
- */
-export const DEFAULT_LCOV_PATHS: readonly string[] = [
-  join("coverage", "lcov.info"),
-  join(".kragg", "lcov.info"),
-];
 
 /** How many uncovered lines are listed before `+N more`, as in Python. */
 export const LINE_CAP = 12;
@@ -89,8 +75,8 @@ export interface CoverageOptions {
   /** Project root. Defaults to the current working directory. */
   readonly root?: string | undefined;
   /**
-   * Explicit istanbul report path, relative to the root or absolute. When
-   * absent, {@link DEFAULT_REPORT_PATHS} are tried in order.
+   * Overrides the policy's `coverage_report_path`: where the istanbul report
+   * is, relative to the root or absolute, with the lcov tracefile beside it.
    */
   readonly reportPath?: string | undefined;
   /** Pre-loaded policy. Loaded from the root when absent. */
@@ -99,11 +85,20 @@ export interface CoverageOptions {
   readonly api?: TypeScriptApi | undefined;
 }
 
+/** The one artifact this project's runner publishes. */
+export interface CoverageSource {
+  readonly runner: TestRunnerName;
+  readonly format: "istanbul" | "lcov";
+  /** Absolute path. */
+  readonly path: string;
+}
+
 /**
  * Print criticality-ranked coverage gaps.
  *
- * Always `0` except on a malformed `kragg.json`. Missing coverage data is a
- * state, not a failure — see the module header.
+ * `0` on data or on no data; `2` on a malformed `kragg.json`; `3` when a
+ * report is present and unusable, or the project has no runner to publish
+ * one — see the module header.
  */
 export async function runCoverage(options: CoverageOptions = {}): Promise<number> {
   const root = options.root ?? process.cwd();
@@ -117,60 +112,85 @@ export async function runCoverage(options: CoverageOptions = {}): Promise<number
     }
     throw error;
   }
-  const report = readReport(root, options.reportPath);
-  const lcov = report === null ? readLcovText(root) : null;
-  if (report === null && lcov === null) {
-    process.stdout.write(`${NO_COVERAGE_DATA_MESSAGE}\n`);
-    return EXIT_OK;
+  const source = coverageSource(root, policy, options.reportPath);
+  if (source === null) {
+    process.stderr.write(NO_RUNNER_MESSAGE);
+    return EXIT_ENVIRONMENT;
   }
-  const gaps = criticalCoverageGaps({
+  const read = readPublished(source);
+  if (!read.ok) {
+    if (read.reason === "missing") {
+      process.stdout.write(missingMessage(root, source));
+      return EXIT_OK;
+    }
+    process.stderr.write(`coverage report unusable: ${read.message}\n`);
+    return EXIT_ENVIRONMENT;
+  }
+  const gateOptions: CriticalCoverageOptions = {
     root,
     sourcePaths: policy.sourcePaths,
-    report,
-    ...(lcov === null ? {} : { lcov }),
-    ...(options.api === undefined ? {} : { api: options.api }),
-  });
-  process.stdout.write(`${renderGaps(gaps).join("\n")}\n`);
+    ...read.document,
+    api: options.api,
+  };
+  const problem = evidenceProblem(gateOptions);
+  if (problem !== null) {
+    process.stderr.write(`coverage report unusable: ${relative(root, source.path)} — ${problem}\n`);
+    return EXIT_ENVIRONMENT;
+  }
+  process.stdout.write(`${renderGaps(criticalCoverageGaps(gateOptions)).join("\n")}\n`);
   return EXIT_OK;
 }
 
-/**
- * Read the istanbul report from the first candidate path that parses.
- *
- * `null` means no usable report anywhere — missing, unreadable, or not JSON.
- * A file that parses to a non-object is also `null`: `normalizeIstanbul`
- * would return an empty model for it, and an empty model renders as "every
- * critical function is unmeasured", which reads as a finding when it is
- * really a broken input.
- */
-export function readReport(root: string, reportPath?: string | undefined): unknown {
-  const candidates = reportPath === undefined ? DEFAULT_REPORT_PATHS : [reportPath];
-  for (const candidate of candidates) {
-    const parsed = readIstanbulReport(
-      isAbsolute(candidate) ? candidate : join(root, candidate),
-    );
-    if (typeof parsed === "object" && parsed !== null && !Array.isArray(parsed)) {
-      return parsed;
-    }
+const NO_RUNNER_MESSAGE =
+  "no test runner detected, so `kragg check` publishes no coverage for this project " +
+  "(set `test_runner`, or see `kragg doctor`)\n";
+
+/** cmd_coverage's line, then the path this project's runner would have written. */
+function missingMessage(root: string, source: CoverageSource): string {
+  return (
+    `${NO_COVERAGE_DATA_MESSAGE}\n  expected ${relative(root, source.path)}, ` +
+    `the ${source.format} report \`kragg check\` publishes for ${source.runner}\n`
+  );
+}
+
+/** The gate's own verdict on whether the document can serve as evidence. */
+function evidenceProblem(options: CriticalCoverageOptions): string | null {
+  const model = coverageModel(options);
+  return model === null ? null : coverageEvidenceProblem(model, options.sourcePaths);
+}
+
+/** The published artifact as the gate takes it, or why it could not be read. */
+type PublishedRead =
+  | { readonly ok: true; readonly document: Pick<CriticalCoverageOptions, "report" | "lcov"> }
+  | CoverageReadFailure;
+
+/** Read the one artifact `source` names, in that runner's format. */
+function readPublished(source: CoverageSource): PublishedRead {
+  if (source.format === "istanbul") {
+    const read = readCoverageReport(source.path);
+    return read.ok ? { ok: true, document: { report: read.report.raw } } : read;
   }
-  return null;
+  const read = readLcov(source.path);
+  return read.ok ? { ok: true, document: { report: null, lcov: read.report } } : read;
 }
 
 /**
- * The first lcov tracefile that has any content, or `null`.
- *
- * Tried only when no istanbul report was found: istanbul states each
- * function's full body span and lcov states only where it starts, so the
- * richer document wins when a project somehow has both.
+ * Which published artifact to read, decided by the runner — never by which
+ * file happens to exist. `null` when no runner is configured or detected.
  */
-export function readLcovText(root: string): string | null {
-  for (const candidate of DEFAULT_LCOV_PATHS) {
-    const text = readTextFile(join(root, candidate));
-    if (text !== undefined && text.trim() !== "") {
-      return text;
-    }
+export function coverageSource(
+  root: string,
+  policy: KraggPolicy,
+  reportPath?: string | undefined,
+): CoverageSource | null {
+  const runner = detectTestRunner(root, policy.testRunner).runner;
+  if (runner === undefined) {
+    return null;
   }
-  return null;
+  const paths = publishedPaths(root, reportPath ?? policy.coverageReportPath);
+  return runner === "vitest"
+    ? { runner, format: "istanbul", path: paths.publishedIstanbulFile }
+    : { runner, format: "lcov", path: paths.publishedLcovFile };
 }
 
 /**
@@ -214,8 +234,10 @@ function gapLine(row: CriticalCoverageGap): string {
   );
 }
 
+/** An unmeasured row names its cause; Python prints "no test imports it". */
 function unmeasuredLine(row: CriticalCoverageGap): string {
-  return `  ${row.file} ${row.qualname} (${why(row)}) — no coverage entry`;
+  const where = row.line === undefined ? row.file : `${row.file}:${String(row.line)}`;
+  return `  ${where} ${row.qualname} (${why(row)}) — unmeasured: ${row.reason ?? ""}`;
 }
 
 /**

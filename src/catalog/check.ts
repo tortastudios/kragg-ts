@@ -250,28 +250,6 @@ function dataAndTestGates(ctx: CatalogContext): readonly GateSpec[] {
   ];
 }
 
-/**
- * `test_paths` -> globs `node --test` can actually consume.
- *
- * A BARE DIRECTORY DOES NOT WORK, and it fails in the worst available way.
- * `node --test test` treats the argument as a module specifier and dies with
- * `Cannot find module .../test` before running anything, which the TAP reader
- * then parses as one failed test named after the directory. The gate goes red
- * with a violation that says nothing about the code, and the real suite never
- * ran. Node's runner does take globs, so each configured directory becomes one.
- *
- * Brace expansion only, deliberately: `{a,b}` works on every Node this package
- * supports, while extglob (`@(a|b)`) is not guaranteed to. A glob that matches
- * nothing costs nothing — the runner reports zero tests for it and moves on.
- *
- * vitest and bun ignore this list entirely and discover their own files.
- */
-const TEST_FILE_GLOB = "**/*.{test,spec}.{ts,tsx,mts,cts,js,jsx,mjs,cjs}";
-
-function testPatterns(testPaths: readonly string[]): readonly string[] {
-  return testPaths.map((path) => `${path.replace(/\/+$/u, "")}/${TEST_FILE_GLOB}`);
-}
-
 /** The suite, the critical-path coverage it produced, and the audit. */
 function slowGates(ctx: CatalogContext): readonly GateSpec[] {
   const { policy } = ctx;
@@ -286,7 +264,9 @@ function slowGates(ctx: CatalogContext): readonly GateSpec[] {
           coverageFailUnder: policy.coverageFailUnder,
           coverageReportPath: policy.coverageReportPath,
           maxViolations: policy.maxViolationsPerGate,
-          testPatterns: testPatterns(policy.testPaths),
+          testPaths: policy.testPaths,
+          sourcePaths: policy.sourcePaths,
+          api: ctx.api,
         });
         // Recorded for `critical-coverage`, which reads THIS run's coverage
         // from here and never from disk. See `RunEvidence` in `context.ts`.

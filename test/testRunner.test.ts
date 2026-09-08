@@ -405,6 +405,11 @@ test("a vitest config, then a vitest dependency, then bun evidence", () => {
     ).runner,
     "vitest",
   );
+  const bunTypes = project({ "package.json": '{"devDependencies":{"@types/bun":"1.2.0"}}' });
+  assert.deepEqual(detectTestRunner(bunTypes, "auto"), {
+    runner: "bun",
+    source: "package.json dependency: @types/bun",
+  });
   assert.equal(
     detectTestRunner(project({ "package.json": "{}", "bunfig.toml": "[test]\n" }), "auto").runner,
     "bun",
@@ -458,7 +463,21 @@ test("node pairs each reporter with the destination that follows it", () => {
   assert.ok(tap >= 0 && tapTo === tap + 1, "tap destination must follow tap");
   assert.ok(lcov > tapTo, "lcov reporter must come after the tap pair");
   assert.equal(command[lcov + 1], `--test-reporter-destination=${layout.lcovFile}`);
-  assert.equal(command.at(-1), "test/");
+  // `test_paths` are DIRECTORIES, and `node --test test` runs nothing at all:
+  // it resolves the argument as a module, dies with `Cannot find module`, and
+  // the TAP reader turns that into "1 test, 1 failed". `buildCommand` is the
+  // one place that expands them, so no caller can reintroduce the bare form.
+  assert.equal(command.at(-1), "test/**/*.{test,spec}.{ts,tsx,mts,cts,js,jsx,mjs,cjs}");
+  assert.ok(!command.includes("test/"), "a bare directory must never reach node --test");
+});
+
+test("every configured test path becomes its own glob, trailing slash or not", () => {
+  const layout = artifacts("/repo", "coverage/coverage-final.json", RUN_DIR);
+  const command = buildCommand("/usr/bin/node", "node", layout, false, ["test", "tests/"]);
+  assert.deepEqual(command.slice(-2), [
+    "test/**/*.{test,spec}.{ts,tsx,mts,cts,js,jsx,mjs,cjs}",
+    "tests/**/*.{test,spec}.{ts,tsx,mts,cts,js,jsx,mjs,cjs}",
+  ]);
 });
 
 test("bun asks for lcov, the only coverage format it can write", () => {
@@ -492,8 +511,11 @@ test("a project with no runner skips visibly with install commands", async () =>
     env: resolveProjectEnvironment(
       project({ "package.json": '{"name":"x"}', "pnpm-lock.yaml": "" }),
     ),
+    choice: "auto",
     coverageFailUnder: 80,
     maxViolations: 25,
+    testPaths: ["test"],
+    sourcePaths: ["src"],
   });
   assert.equal(outcome.ok, false);
   assert.equal(outcome.kind, "not-configured");
@@ -512,8 +534,11 @@ test("a missing vitest is an environment error, not a passing gate", async () =>
         }),
       }),
     ),
+    choice: "auto",
     coverageFailUnder: 80,
     maxViolations: 25,
+    testPaths: ["test"],
+    sourcePaths: ["src"],
   });
   assert.equal(outcome.ok, false);
   assert.equal(outcome.kind, "missing-tool");
@@ -526,6 +551,8 @@ test("`test_runner: off` is a deliberate skip that says so", async () => {
     choice: "off",
     coverageFailUnder: 80,
     maxViolations: 25,
+    testPaths: ["test"],
+    sourcePaths: ["src"],
   });
   assert.equal(outcome.ok, false);
   assert.match(outcome.message, /switched off/u);
@@ -604,9 +631,12 @@ const GREEN = vitestReport([{ title: "adds", status: "passed" }]);
 const RED = vitestReport([{ title: "subtracts", status: "failed" }]);
 
 /** An istanbul report with one fully covered statement. */
+// Keyed relatively, as c8 and CI path rewrites produce: the totals count only
+// files under the project's `source_paths`, and a key under a foreign root
+// would resolve to none of them.
 const FULL_COVERAGE = JSON.stringify({
-  "/repo/src/a.ts": {
-    path: "/repo/src/a.ts",
+  "src/a.ts": {
+    path: "src/a.ts",
     statementMap: { "0": { start: { line: 1, column: 0 }, end: { line: 1, column: 9 } } },
     fnMap: {},
     branchMap: {},
@@ -643,8 +673,11 @@ function vitestProject(script: string, stale: Record<string, string> = STALE_LOC
 function run(root: string, timeoutMs?: number): Promise<TestRunOutcome> {
   return runTests({
     env: resolveProjectEnvironment(root),
+    choice: "auto",
     coverageFailUnder: 80,
     maxViolations: 25,
+    testPaths: ["test"],
+    sourcePaths: ["src"],
     ...(timeoutMs === undefined ? {} : { timeoutMs }),
   });
 }
@@ -776,9 +809,11 @@ test("switching runners: node's lcov is this run's evidence; vitest's stale ista
   try {
     outcome = await runTests({
       env: resolveProjectEnvironment(root),
+      choice: "auto",
       coverageFailUnder: 1,
       maxViolations: 25,
-      testPatterns: ["test/**/*.test.js"],
+      testPaths: ["test"],
+      sourcePaths: ["src"],
     });
   } finally {
     if (testContext !== undefined) {

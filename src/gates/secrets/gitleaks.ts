@@ -45,7 +45,8 @@
 
 import { isAbsolute, join } from "node:path";
 
-import type { Violation } from "../../engine/models.ts";
+import type { CompletedCommand, Violation } from "../../engine/models.ts";
+import { missingTool } from "../../environment/project.ts";
 import {
   isRecord,
   own,
@@ -131,6 +132,91 @@ export function versionSupported(version: readonly [number, number, number]): bo
 /** The argv for the version probe. */
 export function versionCommand(bin: string): readonly string[] {
   return [bin, "version"];
+}
+
+/** Where to get gitleaks; it is not installable through a package manager. */
+export const GITLEAKS_RELEASES = "https://github.com/gitleaks/gitleaks/releases";
+
+/**
+ * The gitleaks install line.
+ *
+ * gitleaks is a Go binary, so there is no package-manager command to generate
+ * from `remediation()`; homebrew is the one-liner on macOS and the release
+ * page is the honest answer everywhere else.
+ */
+export function installHint(): string {
+  if (process.platform === "darwin") {
+    return "Fix: brew install gitleaks";
+  }
+  if (process.platform === "linux") {
+    return `Fix: brew install gitleaks, or download a binary from ${GITLEAKS_RELEASES}`;
+  }
+  return `Fix: download a binary from ${GITLEAKS_RELEASES}`;
+}
+
+/**
+ * Why this gitleaks cannot be used, or `null` if it can.
+ *
+ * TWO KINDS, AND THE DIFFERENCE IS WHETHER THE TOOL IS THERE:
+ *
+ *  - `"unusable"` — absent, or present but of a version we cannot vouch for
+ *    (unreadable, or below `MINIMUM_VERSION`). That is a MISSING scanner, so
+ *    `"auto"` moves on to secretlint and an explicit choice ends in the
+ *    required-tool error. Never a pass either way.
+ *  - `"broken"` — the binary is installed and `gitleaks version` CRASHED. The
+ *    tool is there and does not work, which is a failed scan and an ERROR
+ *    under every setting, `"auto"` included. Falling through to secretlint
+ *    here would delete the evidence: the run would come back green from the
+ *    second scanner and nobody would ever learn the first one is broken.
+ *
+ * The probe's own stderr is quoted, because it is a diagnostic and NOT a
+ * report — a `version` invocation has no findings to leak — and because
+ * "gitleaks exited 1" without it sends the reader nowhere.
+ */
+export interface VersionProblem {
+  readonly kind: "unusable" | "broken";
+  readonly reason: string;
+}
+
+export function versionProblem(probe: CompletedCommand, bin: string): VersionProblem | null {
+  if (probe.returncode !== 0) {
+    const missing = missingTool(probe);
+    if (missing !== null) {
+      return {
+        kind: "unusable",
+        reason: `gitleaks was not found on PATH (${missing}). ${installHint()}`,
+      };
+    }
+    const detail = probe.stderr.trim();
+    return {
+      kind: "broken",
+      reason:
+        `gitleaks is installed (${bin}) but \`gitleaks version\` exited ` +
+        `${probe.returncode}; the repository was NOT scanned, and kragg does ` +
+        "not fall back to another scanner after a crash." +
+        (detail === "" ? "" : `\n${detail}`),
+    };
+  }
+  const version = parseVersion(probe.stdout);
+  if (version === null) {
+    return {
+      kind: "unusable",
+      reason:
+        "could not determine the gitleaks version, so kragg cannot confirm it " +
+        `supports \`--report-path -\`; without that the scan would write ` +
+        `credentials to a file. ${installHint()}`,
+    };
+  }
+  if (!versionSupported(version)) {
+    return {
+      kind: "unusable",
+      reason:
+        `gitleaks ${version.join(".")} is too old; kragg needs ` +
+        `${MINIMUM_VERSION.join(".")} or newer (for \`dir\` and for ` +
+        `\`--report-path -\`, which keeps the report off disk). ${installHint()}`,
+    };
+  }
+  return null;
 }
 
 /**

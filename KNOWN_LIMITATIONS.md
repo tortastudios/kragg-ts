@@ -69,9 +69,11 @@ properties, parameter defaults, object-literal properties, and
 
 ### `detect-secrets` bundles nothing
 
-kragg-ts ships no secret scanner. It uses **gitleaks** if it is on `PATH`,
-else **secretlint** if the project has it, else it **skips visibly** with both
-install commands.
+kragg-ts ships no secret scanner. Under the default `secret_scanner: "auto"`
+it uses **gitleaks** if it is on `PATH`, else **secretlint** if the project has
+it, else it **skips visibly** with both install commands. Naming one in the
+policy instead makes it **required**: unavailable, too old, or installed and
+crashing is `error: true` and exit 3, never a skip and never the other tool.
 
 This is deliberate. A scanner is only as good as its rule set, and a
 hand-rolled one reporting "clean" produces the same green as a genuinely clean
@@ -120,6 +122,14 @@ accept string fallbacks yields **31 hits**, almost all intended
 (`accountType || "self_serve"`). That is the noise level at which a gate gets
 switched off, and a disabled gate protects nothing. The gate is calibrated
 *below* the Python original's hit rate on purpose.
+
+Re-measured 2026-09-08 on a wider corpus (`docs/calibration.md`): **0 findings
+across 2,038 candidate sites** — 1,049 `||`/`||=` sites and 989 arithmetic sites
+in two real applications, plus kragg-ts itself. Stated plainly: **this gate has
+never fired on real code**, so its precision in production is undefined and its
+recall is unproven. What is proven is that it *can* fire — `test/fixtures/
+knownDefects.ts` holds one site for each rule and `test/knownDefects.test.ts`
+fails if either stops being reported.
 
 So: it misses far more than it catches, by design. It is a high-precision
 probe, not a safety net.
@@ -182,6 +192,74 @@ Measured on real code:
 `logicalLines` is our definition, not radon's (which infers logical lines from
 `:`/`;` tokens). It is exact rather than heuristic, but it is a translation,
 and the MI formula is sensitive to it.
+
+### Constructs that inflate a metric
+
+Measured across two real applications and a pnpm workspace (472 application
+files, 3,025 blocks, 3,099 annotation sites) in
+[`docs/calibration.md`](docs/calibration.md), which carries the full tables,
+the per-finding precision assessment and the method. The limits below are the
+ones a reader needs before trusting a number.
+
+- **`??` and `?.` have no radon equivalent and supply 12–19% of every
+  TypeScript cyclomatic score.** Counting them is defensible — `a?.b` is a real
+  edge in the control-flow graph — but it means the *ported* band is
+  systematically tighter here than in Python, by roughly one grade step's worth
+  of points. A short function full of narrowing idioms (`typeof x ===
+  "string" && x`, `?? 0`, ternary fallbacks) can grade C on 15 lines.
+- **In React, roughly a third of a cyclomatic score is markup.** 31.5% of the
+  decision points in the Next.js sample sit inside JSX: `{cond && <Row/>}` and
+  `{a ? <X/> : <Y/>}` are conditional *rendering*, not control flow. 69% of
+  that sample's complexity failures depended on JSX-resident operators or on
+  `??`/`?.`; in the less React-heavy workspace only 21% did. **The gate's
+  firing rate varies with how much of a project is JSX**, which is not a
+  property of its complexity.
+- **Halstead counts static JSX as operators and operands.** The worst Halstead
+  offender in the whole corpus is a 1,175-line marketing page with 472 JSX
+  elements and **cyclomatic complexity 1** — effort 12× the ceiling, estimated
+  bugs 15× it, and nothing to fix. 90% of the Next.js sample's worst effort and
+  bugs findings are in `.tsx` files. Halstead was defined over imperative code;
+  markup embedded in the expression grammar is outside anything it was
+  validated against.
+- **A Halstead block includes its nested closures; its cyclomatic score does
+  not.** That asymmetry is radon's and is preserved deliberately, but it bites
+  far harder in TypeScript, where closures are the dominant idiom. A React hook
+  or component is a thin shell around many `useEffect`/`useCallback` bodies, so
+  the shell is charged for all of them at once and reads as difficulty 65 while
+  the complexity gate grades it A. **When the two gates disagree loudly about
+  the same function, this is usually why**, and the message does not say so.
+- **Estimated bugs is the binding Halstead ceiling in TypeScript**, not effort.
+  `bugs = volume / 3000` trips at volume > 1,200 — about a screen of JSX — and
+  fired 1.9× as often as effort across the corpus. It is a pure size proxy,
+  duplicates effort's signal at a lower bar, and carries most of the static-JSX
+  false positives.
+- **`maintainability` is a size gate in disguise, and its recall is low.** Five
+  findings across 472 application files, all five true positives, all five on
+  files of 486–1,386 lines. Measured on comment-free code of uniform shape, the
+  A/B boundary sits near **180–200 logical lines**; a well-commented file can
+  carry twice that and still grade A, because the `+50*sin(...)` comment term is
+  worth up to 50 points before normalizing.
+- **`type-complexity` is bound by length, not depth, by about an order of
+  magnitude.** 210 length-only failures against 18 depth-only ones across both
+  applications; 58–70% of all annotations are depth 0. The dominant single class
+  is React props declared as an inline object type on a destructured parameter
+  (56 of the 60 worst findings in the Next.js sample). Those are true positives
+  by the gate's own contract — the fix is a named `Props` interface, and it
+  takes a minute — but a React project should expect this gate to talk mostly
+  about that one idiom.
+- **The type-aware tier sees one tsconfig, so a workspace is partly
+  unmeasured.** The pnpm workspace sample has no root `tsconfig.json`: pointed
+  at one package's config, the program held **189 files against the 309** the
+  syntax tier walked, and `resolveTypeScript` fell back to the **bundled**
+  compiler because a workspace root has no hoisted `typescript`. A clean
+  `nullable-default` result on a monorepo is clean over the program, not over
+  the repository. Run kragg per package there.
+
+Precision, from reading the code behind a sample of findings: `type-complexity`
+7 true positives / 0 false positives; `maintainability` 5/0 (its whole output);
+`complexity` 6 true / 2 arguable / 0 false; `halstead` 3 true / 3 arguable / 1
+false. `nullable-default` produced **no findings at all** across 2,038 candidate
+sites, so its precision on real code is undefined — see below.
 
 ---
 

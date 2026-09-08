@@ -37,6 +37,27 @@
  * file is still stale, so `readJson` still refuses it and the gates still skip
  * with the reason they already have. Fail-closed by construction, with no
  * second code path to keep in agreement.
+ *
+ * ── A READ-ONLY `.kragg` IS THE SAME SHAPE ─────────────────────────────────
+ * The artifacts are two writes, in this order: the DATA, then the STAMP that
+ * vouches for it. Either can fail on a read-only checkout, and neither failure
+ * may be allowed to look like success:
+ *
+ *  - The DATA write fails: nothing is written and nothing is stamped, so the
+ *    file on disk is the one that was already stale. The gates skip with
+ *    `STALE_CRITICALITY_REASON`, which names the command that would fix it.
+ *  - The STAMP write fails after the data was written: the data is current but
+ *    unvouched-for, and an older stamp beside it now disagrees with the tree.
+ *    Freshness answers "stale" and the next run derives again. Wasteful, and
+ *    the SAFE direction — the alternative is claiming freshness we cannot
+ *    check. `attempted` still holds within the run, so one failure does not
+ *    become one failed derivation per gate.
+ *
+ * `ensure` therefore never marks anything fresh that it did not successfully
+ * stamp. It stays silent about it because the visible signal already exists
+ * where a user will see it — the gate skip — and a second one printed from
+ * inside a pipeline would land in the middle of a report. `kragg criticality
+ * --write`, whose whole job IS producing the artifact, says so on stderr.
  */
 
 import {
@@ -107,7 +128,8 @@ export function criticalityCache(input: CriticalityCacheInput): CriticalityCache
       }
       // Stamped only after the data it describes is on disk. The reverse order
       // would, on a write failure, leave a stamp asserting freshness about a
-      // file that was never regenerated.
+      // file that was never regenerated. A stamp that could not be written
+      // leaves the data unvouched-for, which reads as stale — see the header.
       writeStamp(input.root, input.scanPaths);
     },
   };

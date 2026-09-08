@@ -14,12 +14,23 @@
  * Two rules follow, and they are structural, not an optimization to add
  * later:
  *
- *  1. ONE program per run. A handle is memoized per tsconfig, so a gate that
- *     asks for the program twice — or two gates that each ask once — get the
- *     same instance and the same checker.
+ *  1. ONE program per run. The run's context (`catalog/context.ts`) creates
+ *     ONE handle and hands it to every gate, so a gate that asks for the
+ *     program twice — or two gates that each ask once — get the same instance
+ *     and the same checker.
  *  2. LAZY. Construction happens on the first `load()`, never at handle
  *     creation. A `kragg check --changed` run over three files where no
  *     type-aware gate fires must not pay a millisecond of program cost.
+ *
+ * THE SHARING IS PER RUN, NOT PER PROCESS. This module used to memoize handles
+ * in a module-level map keyed by tsconfig path, and that was a correctness bug
+ * as soon as anything outran a single CLI invocation: a long-lived process
+ * using the library API (`runCommand`, a watcher, an MCP server) that ran,
+ * edited files and ran again was handed the FIRST run's `ts.Program`, whose
+ * source files were parsed before the edit. It reported on code that no longer
+ * existed and said nothing — the same failure shape as a stale criticality
+ * cache, one tier down. There is no process-global handle any more; the owner
+ * of a handle is whoever created it, and that is the run.
  *
  * Gates that need no type information must NOT come here at all — they use
  * the syntax tier in `sourceFile.ts`.
@@ -103,23 +114,17 @@ export interface AnalysisProgramOptions {
 }
 
 /**
- * Handles keyed by tsconfig path — the guarantee behind "one program per run".
+ * Create an analysis handle for a project.
  *
- * Sharing through this cache rather than through a context object means an
- * accidentally re-created gate context cannot quietly double the cost of a
- * run. The handle is what is cached, not the program, so the laziness
- * survives sharing: a memoized handle nobody loads still costs nothing.
- */
-const handleCache = new Map<string, AnalysisProgram>();
-
-/**
- * Get the shared analysis handle for a project.
+ * A FRESH HANDLE EVERY TIME, and that is the point. Creating one is cheap —
+ * it resolves the compiler and nothing else — so the only thing a cache here
+ * would buy is the risk of handing a second run the first run's program. The
+ * sharing that matters (one program for all the gates in ONE run) is the
+ * run context's job: `catalog/context.ts` creates the handle once and passes
+ * it down. See the header for the bug the old module-level cache caused.
  *
- * Memoized on the resolved tsconfig path. An explicit `api` bypasses the
- * cache in both directions — it neither reads nor populates it — because two
- * callers asking for the same project with different compilers must not be
- * handed each other's program, and a test compiler must not leak into a
- * later production lookup.
+ * An explicit `api` is for tests and for a caller that has already resolved a
+ * compiler; leaving it unset resolves the project's own.
  */
 export function analysisProgram(options: AnalysisProgramOptions): AnalysisProgram {
   const root = resolve(options.root);
@@ -133,24 +138,7 @@ export function analysisProgram(options: AnalysisProgramOptions): AnalysisProgra
       note: "compiler supplied by the caller",
     });
   }
-  const cached = handleCache.get(tsconfigPath);
-  if (cached !== undefined) {
-    return cached;
-  }
-  const handle = createHandle(root, tsconfigPath, resolveTypeScript(root));
-  handleCache.set(tsconfigPath, handle);
-  return handle;
-}
-
-/**
- * Drop every cached handle, and with it every cached program.
- *
- * For tests and for a long-lived process (a watcher, an MCP server) that must
- * not serve results from a program built before the files changed. A single
- * CLI run never needs it.
- */
-export function clearAnalysisProgramCache(): void {
-  handleCache.clear();
+  return createHandle(root, tsconfigPath, resolveTypeScript(root));
 }
 
 function createHandle(

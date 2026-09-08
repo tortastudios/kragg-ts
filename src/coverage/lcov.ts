@@ -126,17 +126,19 @@ function addFunction(
 function finalize(merged: ReadonlyMap<string, Accumulator>): Map<string, FileCoverage> {
   const files = new Map<string, FileCoverage>();
   for (const [path, accumulator] of merged) {
-    const uncovered = [...accumulator.counts]
-      .filter(([, count]) => count === 0)
-      .map(([line]) => line)
-      .sort((left, right) => left - right);
+    const lines = [...accumulator.counts].sort(([left], [right]) => left - right);
     const functions: FunctionSpan[] = [...accumulator.functions.values()].map((span) => ({
       name: span.name,
       startLine: span.startLine,
       endLine: span.endLine,
       hits: span.hits,
     }));
-    files.set(path, { path, uncoveredLines: uncovered, functions });
+    files.set(path, {
+      path,
+      uncoveredLines: lines.filter(([, count]) => count === 0).map(([line]) => line),
+      coveredLines: lines.filter(([, count]) => count > 0).map(([line]) => line),
+      functions,
+    });
   }
   return files;
 }

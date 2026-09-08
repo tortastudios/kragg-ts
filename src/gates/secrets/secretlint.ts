@@ -7,7 +7,8 @@
  *
  *  - the positional argument is a FILE PATH OR PICOMATCH GLOB, and the help
  *    text's own example is `secretlint "**` + `/*"`. It is not a directory
- *    walker; see `globFor` for the translation we do;
+ *    walker; see `targetArgument` for the translation we do, and why a file
+ *    and a directory cannot be translated the same way;
  *  - `--format json` selects the JSON formatter, which is literally
  *    `JSON.stringify(results)` over `SecretLintCoreResult[]`;
  *  - `--output <path>` writes the report to a file AND, per the documented
@@ -39,6 +40,7 @@
 import { isAbsolute, join } from "node:path";
 
 import type { Violation } from "../../engine/models.ts";
+import { classifyTarget, GLOB_CHARACTERS } from "./targets.ts";
 import {
   isRecord,
   own,
@@ -85,23 +87,41 @@ export function scanCommand(context: SecretScanContext): readonly string[] {
     command.push("--secretlintignore", absolutePath(context.root, context.baselinePath));
   }
   for (const target of context.targets) {
-    command.push(globFor(target));
+    command.push(targetArgument(context.root, target));
   }
   return command;
 }
 
 /**
- * Turn a kragg target into something secretlint will match.
+ * One target, as secretlint should receive it.
  *
- * kragg targets are directories (`src`, `.`) because that is what every other
- * gate takes and what the Python sibling passes around. secretlint matches
- * paths and globs, and a bare `src` matches the directory ENTRY, not the files
- * under it — it would silently scan nothing, which is the fail-open case this
- * gate cannot have. A target that already looks like a glob is passed through
- * untouched so a project can be precise when it wants to be.
+ * THE DISTINCTION IS THE POINT. A directory has to become a recursive glob
+ * (see `globFor`); a FILE must be passed as itself, because appending the
+ * glob to it produces `src/a.ts/` + `**` + `/*`, which matches nothing at
+ * all. That is not a narrower scan — it is secretlint exiting 0 having read
+ * no file, and the gate then reporting a clean scan of the file the caller
+ * asked about. `--file`, `--changed` and the Claude hook all pass files.
+ *
+ * A missing target keeps the directory translation only so this stays a total
+ * function; `unreadableTargets` in `targets.ts` refuses the run before the
+ * argv is ever built, so the scan never actually reaches this branch.
+ */
+export function targetArgument(root: string, target: string): string {
+  return classifyTarget(root, target) === "file" ? target : globFor(target);
+}
+
+/**
+ * Turn a kragg DIRECTORY target into something secretlint will match.
+ *
+ * kragg targets are usually directories (`src`, `.`) because that is what
+ * every other gate takes and what the Python sibling passes around. secretlint
+ * matches paths and globs, and a bare `src` matches the directory ENTRY, not
+ * the files under it — it would silently scan nothing, which is the fail-open
+ * case this gate cannot have. A target that already looks like a glob is
+ * passed through untouched so a project can be precise when it wants to be.
  */
 export function globFor(target: string): string {
-  if (/[*?[\]{}]/u.test(target)) {
+  if (GLOB_CHARACTERS.test(target)) {
     return target;
   }
   const trimmed = target.replace(/\/+$/u, "");

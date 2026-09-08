@@ -9,6 +9,7 @@
  * gate — the rule it establishes is not optional.
  */
 
+import { statSync } from "node:fs";
 import { createRequire } from "node:module";
 import { join, resolve } from "node:path";
 
@@ -36,10 +37,28 @@ export interface CompilerResolution {
 }
 
 /**
+ * A cached resolution and the compiler identity it was made under.
+ *
+ * The identity is what makes the cache safe in a process that outlives one
+ * run: it is the resolved entry path plus that file's size and mtime, all of
+ * which are cheap to obtain WITHOUT executing the module. A project that
+ * upgrades, downgrades or relinks its `typescript` between two runs of a
+ * long-lived host changes at least one of them, so the second run resolves
+ * again instead of analyzing with the compiler the first run happened to
+ * load.
+ */
+interface CachedCompiler {
+  readonly identity: string;
+  readonly resolution: CompilerResolution;
+}
+
+/**
  * Resolved compilers, keyed by project root. Resolution hits the filesystem
  * and loads a multi-megabyte module; doing it once per gate would be absurd.
+ * One entry per root, replaced when the identity moves — never accumulated,
+ * so a long-running host cannot grow this without bound.
  */
-const compilerCache = new Map<string, CompilerResolution>();
+const compilerCache = new Map<string, CachedCompiler>();
 
 /**
  * Resolve the compiler to analyze a project with — the project's, if it has
@@ -73,16 +92,57 @@ const compilerCache = new Map<string, CompilerResolution>();
  * by running the project's `tsc`, `vitest` and auditors, and it is deliberate
  * — but it is a boundary, and it belongs in the threat model rather than
  * being discovered later.
+ *
+ * CACHING, AND WHAT INVALIDATES IT. Memoized per root — but on the compiler's
+ * IDENTITY, not merely on the root, because this map is module-level and a
+ * long-lived host (the library API, a watcher, an MCP server) can outlive the
+ * project's `node_modules`. `compilerIdentity` recomputes the entry path and
+ * that file's size and mtime on every call, all without executing anything;
+ * when any of them moves the resolution is redone. The residual limit is
+ * Node's own CJS module cache: a compiler REPLACED IN PLACE at the same path
+ * still re-`require`s to the module object already loaded in this process, so
+ * only the version string and the path can be trusted to have moved with it.
  */
 export function resolveTypeScript(root: string): CompilerResolution {
   const key = resolve(root);
+  const entry = resolveEntry(key);
+  const identity = compilerIdentity(entry);
   const cached = compilerCache.get(key);
-  if (cached !== undefined) {
-    return cached;
+  if (cached !== undefined && cached.identity === identity) {
+    return cached.resolution;
   }
-  const resolution = loadTypeScript(key);
-  compilerCache.set(key, resolution);
+  const resolution = loadTypeScript(key, entry);
+  compilerCache.set(key, { identity, resolution });
   return resolution;
+}
+
+/**
+ * Where the project's own `typescript` lives, or `null` when it has none.
+ *
+ * `createRequire` anchored on the project's package.json gives us exactly the
+ * resolution the project's own source would get, including workspace hoisting.
+ * Resolving is not loading: this executes no project code, which is what makes
+ * it safe to call on every `resolveTypeScript` in order to check the cache.
+ */
+function resolveEntry(root: string): string | null {
+  try {
+    return createRequire(join(root, "package.json")).resolve("typescript");
+  } catch {
+    return null;
+  }
+}
+
+/** A cheap fingerprint of the compiler at `entry`: path, size, mtime. */
+function compilerIdentity(entry: string | null): string {
+  if (entry === null) {
+    return "bundled";
+  }
+  try {
+    const stats = statSync(entry);
+    return `${entry}:${stats.size}:${stats.mtimeMs}`;
+  } catch {
+    return entry;
+  }
 }
 
 /** Drop cached compilers. For tests and long-lived processes only. */
@@ -90,7 +150,7 @@ export function clearCompilerCache(): void {
   compilerCache.clear();
 }
 
-function loadTypeScript(root: string): CompilerResolution {
+function loadTypeScript(root: string, entry: string | null): CompilerResolution {
   const bundled: CompilerResolution = {
     api: bundledTs,
     version: bundledTs.version,
@@ -102,14 +162,11 @@ function loadTypeScript(root: string): CompilerResolution {
       `which may disagree with the project's own compiler`,
   };
 
-  // `createRequire` anchored on the project's package.json gives us exactly
-  // the resolution the project's own source would get, including workspace
-  // hoisting. It is synchronous, which keeps every gate free of an await it
+  // `resolveEntry` already asked, without loading anything; a project with no
+  // `typescript` of its own gets the bundled compiler and the note that says
+  // so. Resolution is synchronous, which keeps every gate free of an await it
   // would otherwise need only for this.
-  let entry: string;
-  try {
-    entry = createRequire(join(root, "package.json")).resolve("typescript");
-  } catch {
+  if (entry === null) {
     return bundled;
   }
 
