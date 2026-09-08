@@ -4,9 +4,12 @@
  * The load path parses untrusted JSON, so most of what is worth testing is
  * what happens when the JSON is WRONG. The rule this file pins down is the
  * fail-closed one: a malformed value may never make the resulting policy more
- * permissive than what the project asked for. In particular, a broken fix
- * hint must never remove a forbidden-call ban — that is the failure mode where
- * a project reads its own config, believes a call is banned, and it is not.
+ * permissive than what the project asked for — and since kragg cannot know
+ * what a malformed value meant, it REJECTS it by name rather than guessing a
+ * default. In particular, a broken fix hint must never remove a forbidden-call
+ * ban — that is the failure mode where a project reads its own config,
+ * believes a call is banned, and it is not. `test/policyValidation.test.ts`
+ * covers unknown keys, ranges and the documented valid configurations.
  */
 
 import assert from "node:assert/strict";
@@ -133,9 +136,14 @@ describe("loadPolicy: closed vocabularies fail closed", () => {
     assert.equal(loadPolicy(configured({ audit_severity: "low" })).auditSeverity, "low");
   });
 
-  it("degrades a wrong-typed secret_baseline to none", () => {
-    // The strict direction: no baseline means nothing is suppressed.
-    assert.equal(loadPolicy(configured({ secret_baseline: 7 })).secretBaseline, undefined);
+  it("rejects a wrong-typed secret_baseline; null is the explicit none", () => {
+    // Reading `7` as "no baseline" would be the strict direction, but it is
+    // still a guess about what the project meant; the setting is named instead.
+    assert.throws(() => loadPolicy(configured({ secret_baseline: 7 })), {
+      name: "PolicyError",
+      message: /kragg\.json#secret_baseline must be a string or null \(got 7\)/u,
+    });
+    assert.equal(loadPolicy(configured({ secret_baseline: null })).secretBaseline, undefined);
     assert.equal(loadPolicy(configured({ secret_baseline: ".gl" })).secretBaseline, ".gl");
   });
 });
@@ -161,9 +169,16 @@ describe("loadPolicy: source precedence", () => {
     assert.equal(policy.maxPublicSymbols, DEFAULT_POLICY.maxPublicSymbols);
   });
 
-  it("ignores a kragg key of the wrong shape", () => {
-    const root = project({ "package.json": JSON.stringify({ kragg: ["nope"] }) });
-    assert.deepEqual(loadPolicy(root), DEFAULT_POLICY);
+  it("rejects a kragg key of the wrong shape, naming package.json#kragg", () => {
+    // The project wrote a policy block; running the defaults in its place
+    // is the silent fall-back the loader refuses everywhere else.
+    for (const kragg of [["nope"], "nope", 7, null, true]) {
+      const root = project({ "package.json": JSON.stringify({ kragg }) });
+      assert.throws(() => loadPolicy(root), {
+        name: "PolicyError",
+        message: /package\.json#kragg must be a JSON object/u,
+      });
+    }
   });
 });
 
@@ -199,31 +214,34 @@ describe("loadPolicy: scalar readers", () => {
     assert.equal(loadPolicy(root).maxFileLines, 250);
   });
 
-  it("falls back to the default for a wrong-typed scalar", () => {
-    const root = configured({
-      profile: 42,
-      max_file_lines: "500",
-      max_public_symbols: null,
+  it("rejects a wrong-typed scalar, naming the setting and what was found", () => {
+    // `max_file_lines: "100"` used to silently read as the 500 default: a
+    // budget the project tightened, quietly loosened again.
+    assert.throws(() => loadPolicy(configured({ profile: 42 })), {
+      message: /kragg\.json#profile must be a string \(got 42\)/u,
     });
-    const policy = loadPolicy(root);
-    assert.equal(policy.profile, DEFAULT_POLICY.profile);
-    assert.equal(policy.maxFileLines, DEFAULT_POLICY.maxFileLines);
-    assert.equal(policy.maxPublicSymbols, DEFAULT_POLICY.maxPublicSymbols);
+    assert.throws(() => loadPolicy(configured({ max_file_lines: "100" })), {
+      message: /kragg\.json#max_file_lines must be an integer of at least 0 \(got "100"\)/u,
+    });
+    assert.throws(() => loadPolicy(configured({ max_public_symbols: null })), {
+      message: /kragg\.json#max_public_symbols must be an integer/u,
+    });
   });
 
   it("rejects a boolean where an integer is expected", () => {
     // Python's isinstance(True, int) is true, so TOML `true` would silently
-    // become 1. JSON booleans are not numbers here; we take the default.
-    const root = configured({ max_file_lines: true });
-    assert.equal(loadPolicy(root).maxFileLines, DEFAULT_POLICY.maxFileLines);
+    // become 1. JSON booleans are not numbers here, and are named as such.
+    assert.throws(() => loadPolicy(configured({ max_file_lines: true })), {
+      name: "PolicyError",
+      message: /max_file_lines must be an integer of at least 0 \(got true\)/u,
+    });
   });
 
   it("rejects a non-integer number rather than rounding it", () => {
-    const root = configured({ coverage_fail_under: 82.5 });
-    assert.equal(
-      loadPolicy(root).coverageFailUnder,
-      DEFAULT_POLICY.coverageFailUnder,
-    );
+    assert.throws(() => loadPolicy(configured({ coverage_fail_under: 82.5 })), {
+      name: "PolicyError",
+      message: /coverage_fail_under must be an integer from 0 to 100 \(got 82\.5\)/u,
+    });
   });
 
   it("accepts an integer-valued JSON number written with a fraction", () => {
@@ -231,10 +249,19 @@ describe("loadPolicy: scalar readers", () => {
     assert.equal(loadPolicy(root).coverageFailUnder, 90);
   });
 
-  it("accepts zero and negative integers verbatim", () => {
-    const root = configured({ coverage_fail_under: 0, max_file_lines: -1 });
+  it("accepts zero verbatim: it is the documented opt-out, not a default", () => {
+    const root = configured({ coverage_fail_under: 0, max_violations_per_gate: 0 });
     assert.equal(loadPolicy(root).coverageFailUnder, 0);
-    assert.equal(loadPolicy(root).maxFileLines, -1);
+    assert.equal(loadPolicy(root).maxViolationsPerGate, 0);
+  });
+
+  it("rejects a negative count and a percentage above 100", () => {
+    assert.throws(() => loadPolicy(configured({ max_file_lines: -1 })), {
+      message: /max_file_lines must be an integer of at least 0 \(got -1\)/u,
+    });
+    assert.throws(() => loadPolicy(configured({ coverage_fail_under: 250 })), {
+      message: /coverage_fail_under must be an integer from 0 to 100 \(got 250\)/u,
+    });
   });
 });
 
@@ -254,17 +281,23 @@ describe("loadPolicy: string lists", () => {
     assert.deepEqual(loadPolicy(root).layers, []);
   });
 
-  it("falls back when any element is not a string", () => {
-    const root = configured({ source_paths: ["src", 7] });
-    assert.deepEqual(loadPolicy(root).sourcePaths, DEFAULT_POLICY.sourcePaths);
+  it("rejects a non-string element by index rather than dropping the list", () => {
+    // `layers: ["src/cli", 3]` used to read as "no layers", which switched
+    // the boundaries gate off with no error anywhere.
+    assert.throws(() => loadPolicy(configured({ source_paths: ["src", 7] })), {
+      name: "PolicyError",
+      message: /kragg\.json#source_paths\[1\] must be a string \(got 7\)/u,
+    });
+    assert.throws(() => loadPolicy(configured({ layers: ["src/cli", 3] })), {
+      message: /kragg\.json#layers\[1\] must be a string \(got 3\)/u,
+    });
   });
 
-  it("falls back for a non-list, non-string value", () => {
-    const root = configured({ structure_exclude: { a: 1 } });
-    assert.deepEqual(
-      loadPolicy(root).structureExclude,
-      DEFAULT_POLICY.structureExclude,
-    );
+  it("rejects a non-list, non-string value, naming the setting", () => {
+    assert.throws(() => loadPolicy(configured({ structure_exclude: { a: 1 } })), {
+      name: "PolicyError",
+      message: /kragg\.json#structure_exclude must be a string or a list of strings \(got \{"a":1\}\)/u,
+    });
   });
 
   it("reads the mutation scope knobs independently", () => {
@@ -296,23 +329,26 @@ describe("loadPolicy: forbidden_calls is fail-closed", () => {
     );
   });
 
-  it("KEEPS the ban when the hint is not a string", () => {
-    // The whole point. A typo in the advice must not un-ban the call.
+  it("REJECTS a malformed hint by entry; the ban is never silently altered", () => {
+    // The whole point. A typo in the advice must not un-ban the call, and it
+    // must not be quietly repaired either: the load stops (exit 2, no report)
+    // with the entry named, so the project fixes the hint and keeps the ban.
     for (const badHint of [42, null, true, ["a"], { why: "x" }]) {
-      assert.deepEqual(
-        forbidden({ "child_process.exec": badHint }),
-        [["child_process.exec", ""]],
-        `hint ${JSON.stringify(badHint)} must degrade, not drop`,
+      assert.throws(
+        () => forbidden({ "child_process.exec": badHint }),
+        {
+          name: "PolicyError",
+          message: /kragg\.json#forbidden_calls\["child_process\.exec"\] must be a string/u,
+        },
+        `hint ${JSON.stringify(badHint)} must be rejected by name`,
       );
     }
   });
 
-  it("keeps every ban when only some hints are malformed", () => {
-    assert.deepEqual(forbidden({ "a.b": "fine", "c.d": 0, "e.f": null }), [
-      ["a.b", "fine"],
-      ["c.d", ""],
-      ["e.f", ""],
-    ]);
+  it("names the one malformed hint when the others are fine", () => {
+    assert.throws(() => forbidden({ "a.b": "fine", "c.d": 0, "e.f": "fine" }), {
+      message: /forbidden_calls\["c\.d"\] must be a string \(got 0\)/u,
+    });
   });
 
   it("accepts a bare list of entries, with empty hints", () => {
@@ -336,20 +372,36 @@ describe("loadPolicy: forbidden_calls is fail-closed", () => {
     assert.deepEqual(forbidden({}), []);
   });
 
-  it("falls back only when there is no entry to preserve", () => {
-    // A scalar or a mixed array carries no recoverable entry, so there is
-    // nothing to keep; Python does the same.
-    assert.deepEqual(forbidden("child_process.exec"), DEFAULT_POLICY.forbiddenCalls);
-    assert.deepEqual(forbidden(42), DEFAULT_POLICY.forbiddenCalls);
-    assert.deepEqual(forbidden(["a.a", 7]), DEFAULT_POLICY.forbiddenCalls);
-    assert.deepEqual(forbidden(null), DEFAULT_POLICY.forbiddenCalls);
+  it("rejects a mixed list by index instead of dropping every ban", () => {
+    // `["node:child_process", 7]` used to fall back to the EMPTY default,
+    // un-banning child_process with no error anywhere. Python still does.
+    assert.throws(() => forbidden(["a.a", 7]), {
+      name: "PolicyError",
+      message: /kragg\.json#forbidden_calls\[1\] must be a string \(got 7\)/u,
+    });
+  });
+
+  it("rejects a value of the wrong shape, naming the setting", () => {
+    for (const value of ["child_process.exec", 42, null, true]) {
+      assert.throws(
+        () => forbidden(value),
+        {
+          name: "PolicyError",
+          message: /kragg\.json#forbidden_calls must be an object of banned call to fix hint, or a list of strings/u,
+        },
+        `value ${JSON.stringify(value)}`,
+      );
+    }
   });
 
   it("keeps a ban whose key collides with an Object.prototype member", () => {
-    assert.deepEqual(forbidden({ constructor: "banned", toString: 5 }), [
+    assert.deepEqual(forbidden({ constructor: "banned", toString: "also" }), [
       ["constructor", "banned"],
-      ["toString", ""],
+      ["toString", "also"],
     ]);
+    assert.throws(() => forbidden({ toString: 5 }), {
+      message: /forbidden_calls\["toString"\] must be a string \(got 5\)/u,
+    });
   });
 });
 

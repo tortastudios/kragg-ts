@@ -200,6 +200,7 @@ snake_case, matching the Python implementation.
 
 ```json
 {
+  "$schema": "./node_modules/kragg/kragg.schema.json",
   "source_paths": ["src"],
   "test_paths": ["test"],
   "layers": ["src/cli", "src/commands", "src/gates", "src/engine"],
@@ -216,10 +217,33 @@ snake_case, matching the Python implementation.
 }
 ```
 
-**Malformed config fails closed.** An unparseable file or an unrecognised enum
-value is exit 2 with a message naming the key — never a silent fall back to
-defaults, because running a *permissive* policy over a project that configured
-a stricter one is the worst available outcome.
+**Editor validation.** The package ships `kragg.schema.json`, a JSON Schema
+that mirrors exactly the keys, types and ranges the loader enforces (a test
+keeps the two in lockstep; nothing is validated by a dependency). Point your
+editor at it with the `"$schema"` line above — `$schema` is the one key that
+is not a setting — and typos, wrong types and out-of-range values are flagged
+as you type, before kragg ever runs.
+
+**Malformed config is rejected, never defaulted.** Every setting is in one of
+three states:
+
+| | |
+| --- | --- |
+| **absent** | the default applies |
+| **configured** | honoured exactly — including deliberate opt-outs such as `"layers": []`, `"forbidden_calls": {}`, `"coverage_fail_under": 0`, `"max_violations_per_gate": 0` (no cap), `"secret_baseline": null` and `"lint_tool": "off"` |
+| **invalid** | exit **2**, no report, and a message naming the file and the setting: `kragg.json#forbidden_calls[1] must be a string (got 7)` |
+
+Invalid means a wrong type (`"max_file_lines": "100"`), an out-of-range value
+(a negative count, a coverage floor above 100), a wrong shape (a
+`package.json#kragg` that is not an object), an element of the wrong type
+inside a list (`"layers": ["src/cli", 3]`), a `forbidden_calls` hint that is
+not a string, or a key kragg does not know (`forbiden_calls is not a kragg
+setting (did you mean forbidden_calls?)`). None of these ever falls back to a
+default: a ban list that silently reads as *no bans*, or a misspelled key that
+silently configures nothing, is a project that believes it is protected and
+is not. A malformed hint is rejected rather than repaired for the same reason
+— the ban is never dropped, and the project learns about the mistake at the
+one moment it can fix it.
 
 ## Differences from the Python sibling
 
@@ -237,6 +261,7 @@ Deliberate, and documented at each site:
 | `secret_name_suffixes` | Includes `ServiceKey`, which Python's default list lacks. |
 | pipeline halting | A **skip never halts** the slow tier or `--fail-fast`; only a gate that ran and did not pass does. Python branches on `not result.passed`, which counts a visible skip as a failure. |
 | a gate that throws | Reported as that gate's `error: true` — the rest of the pipeline still runs and the consolidated report survives. Python lets the exception kill the process. |
+| config validation | Python degrades a mismatched value to its default and ignores unknown keys; kragg-ts rejects both with exit 2, naming the setting. Strictly narrower: every config Python accepts *and reads as written* loads identically here. |
 
 ## Supply chain
 

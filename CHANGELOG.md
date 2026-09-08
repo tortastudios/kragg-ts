@@ -45,6 +45,28 @@ a previously green run red — see [Gate additions](#gate-additions) below.
   The remaining gates still run, the report and the journal entry still list
   every gate, and the exception is not swallowed.
 
+### Added
+
+- TOR-1363: `kragg.schema.json`, shipped in the package, mirrors the keys,
+  types and ranges the loader enforces so an editor can validate `kragg.json`
+  (`"$schema": "./node_modules/kragg/kragg.schema.json"`); `$schema` is
+  accepted by the loader as the one non-setting key. A test keeps schema and
+  loader in lockstep; no validator dependency is involved.
+
+### Changed
+
+- TOR-1363: malformed policy is rejected instead of silently becoming a
+  default. A wrong-typed value (`"max_file_lines": "100"`), an out-of-range
+  budget, a list with a non-string element, a `forbidden_calls` hint that is
+  not a string, a `package.json#kragg` that is not an object, and any key
+  kragg does not know are all exit 2 with a message naming the file and the
+  setting (`kragg.json#forbidden_calls[1] must be a string (got 7)`; unknown
+  keys suggest the nearest setting). Absent keys still take the defaults;
+  explicit opt-outs (`[]`, `{}`, `0`, `null`, `"off"`) load exactly as
+  written. Previously a ban list written as `["node:child_process", 7]`
+  loaded as *no bans* and a misspelled key configured nothing, with no error
+  in either case.
+
 ## [0.0.0] — unreleased
 
 Initial implementation. Not published to npm.

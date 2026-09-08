@@ -1,0 +1,115 @@
+{
+  "$schema": "http://json-schema.org/draft-07/schema#",
+  "title": "kragg policy",
+  "description": "Settings for kragg, read from kragg.json or from the \"kragg\" key of package.json. Every key, type and range here is exactly what the loader (src/policy/policy.ts) enforces: a value this schema rejects is one kragg rejects with exit 2, naming the setting. Absent keys take the defaults listed per property.",
+  "type": "object",
+  "additionalProperties": false,
+  "definitions": {
+    "stringList": {
+      "description": "A list of strings. A bare string is accepted as a one-element list; an empty list is an explicit, honoured empty.",
+      "anyOf": [
+        { "type": "string" },
+        { "type": "array", "items": { "type": "string" } }
+      ]
+    },
+    "count": {
+      "type": "integer",
+      "minimum": 0
+    }
+  },
+  "properties": {
+    "$schema": {
+      "type": "string",
+      "description": "Editor validation pointer, e.g. \"./node_modules/kragg/kragg.schema.json\". Not a setting."
+    },
+    "profile": {
+      "type": "string",
+      "description": "Name of the policy pack, reported in kragg status. Default: \"strict-ai-typescript\"."
+    },
+    "source_paths": {
+      "$ref": "#/definitions/stringList",
+      "description": "Directories holding first-party source, relative to the project root. Default: [\"src\"]."
+    },
+    "test_paths": {
+      "$ref": "#/definitions/stringList",
+      "description": "Directories holding tests, relative to the project root. Default: [\"test\", \"tests\"]."
+    },
+    "coverage_fail_under": {
+      "type": "integer",
+      "minimum": 0,
+      "maximum": 100,
+      "description": "Line-coverage percentage below which the coverage gate fails. 0 means coverage is not asked for. Default: 80."
+    },
+    "type_max_nesting_depth": {
+      "$ref": "#/definitions/count",
+      "description": "Depth above which a type fails the type-complexity gate. Default: 2."
+    },
+    "type_max_length": {
+      "$ref": "#/definitions/count",
+      "description": "Rendered length above which a type must be named. Default: 40."
+    },
+    "max_violations_per_gate": {
+      "$ref": "#/definitions/count",
+      "description": "Cap on violations reported per gate. 0 means no cap. Default: 25."
+    },
+    "layers": {
+      "$ref": "#/definitions/stringList",
+      "description": "Architectural layers, outermost first, for the boundaries gate; a module may import its own layer or a lower one. Empty means the gate skips visibly. Default: []."
+    },
+    "max_file_lines": {
+      "$ref": "#/definitions/count",
+      "description": "Maximum lines in one source file, comments included, before the structure gate fails. Default: 500."
+    },
+    "max_public_symbols": {
+      "$ref": "#/definitions/count",
+      "description": "Maximum exported symbols in one module before the structure gate fails. Default: 20."
+    },
+    "structure_exclude": {
+      "$ref": "#/definitions/stringList",
+      "description": "Glob patterns exempt from the structure budgets. Default: []."
+    },
+    "mutation_include": {
+      "$ref": "#/definitions/stringList",
+      "description": "Glob patterns scoping mutation testing in. Empty means everything. Default: []."
+    },
+    "mutation_exclude": {
+      "$ref": "#/definitions/stringList",
+      "description": "Glob patterns scoping mutation testing out. Default: []."
+    },
+    "forbidden_calls": {
+      "description": "Banned call targets. An object maps each banned call to the hint that says what to use instead; a list bans each entry with no hint. Every hint must be a string — a malformed hint is an error, and the ban is never dropped. {} is an explicit empty ban list. Default: {}.",
+      "anyOf": [
+        { "type": "object", "additionalProperties": { "type": "string" } },
+        { "type": "array", "items": { "type": "string" } }
+      ]
+    },
+    "secret_name_suffixes": {
+      "$ref": "#/definitions/stringList",
+      "description": "Identifier suffixes that mark a binding as holding a secret, for the secret-default gate. Default: [\"Secret\", \"Token\", \"Password\", \"Passphrase\", \"ApiKey\", \"SigningKey\", \"SecretKey\", \"PrivateKey\", \"AccessKey\", \"ServiceKey\"]."
+    },
+    "lint_tool": {
+      "enum": ["auto", "oxlint", "biome", "eslint", "off"],
+      "description": "Which linter the lint gate drives. \"auto\" detects; \"off\" skips visibly. Default: \"auto\"."
+    },
+    "test_runner": {
+      "enum": ["auto", "vitest", "node", "bun", "off"],
+      "description": "Which test runner the coverage gate drives. Default: \"auto\"."
+    },
+    "secret_scanner": {
+      "enum": ["auto", "gitleaks", "secretlint", "off"],
+      "description": "Which secret scanner the detect-secrets gate drives. Default: \"auto\"."
+    },
+    "secret_baseline": {
+      "type": ["string", "null"],
+      "description": "Reviewed-findings baseline for the secret scanner, relative to the project root. null means none. Default: null."
+    },
+    "audit_severity": {
+      "enum": ["low", "moderate", "high", "critical"],
+      "description": "Advisories below this severity are counted but not reported. Default: \"high\"."
+    },
+    "coverage_report_path": {
+      "type": "string",
+      "description": "Where the test runner writes its istanbul JSON, relative to the project root. Default: \"coverage/coverage-final.json\"."
+    }
+  }
+}
