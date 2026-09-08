@@ -135,7 +135,8 @@ higher one, and the `boundaries` gate enforces that on this repo.
 - `src/gates/` — the built-in checks. A directory per gate large enough to
   split: `architecture/` (layers, structure, aliases, barrels, star exports),
   `complexity/` (cyclomatic, maintainability, lines, grades), `criticality/`
-  (register, graph, profile, report, scope, freshness), `forbiddenCalls/`
+  (register, graph, profile, report, scope, freshness, declared),
+  `forbiddenCalls/`
   (scan, resolver, symbols, rules, declarationPath), `halstead/` (walk,
   partition, metrics, blocks, report), `nullableDefault/`, `secretDefault/`,
   `secrets/` (gitleaks, secretlint, lookup), `testDepth/` (shared by the

@@ -233,9 +233,34 @@ is written.
   "secret_scanner": "auto",
   "forbidden_calls": {
     "node:child_process": "use runCommand in src/engine/runner.ts"
+  },
+  "critical_functions": {
+    "src/auth/login#verifyPassword": "authorization entrypoint"
   }
 }
 ```
+
+**Reviewed critical functions.** Centrality finds what other code leans on; it
+says nothing about *consequence*. An authorization check called from one route
+handler, or a payment capture called once at the end of a checkout, has fan-in
+1 and no betweenness — bottom of the ranked table, and invisible to every
+criticality-driven gate. `critical_functions` is where a reviewer says
+otherwise: each key names a function the way the call graph does
+(`<module>#<name>`, where the module is the repo-root-relative path without its
+extension and the name is the function or `Class.method`), and each value is
+the reason, which is **required**. A declaration is *additive* — it never
+demotes a function the graph selected — and from there it flows into
+`critical-tests`, `test-quality`, `critical-coverage`, `kragg coverage` and
+mutation targeting exactly like an automatically critical one. `CRITICALITY.md`
+and the terminal table grow a `Why` column saying which is which
+(`declared: authorization entrypoint` against `fan-in 7, betweenness 0.3000`),
+and a gate that names a declared function quotes the reason in the violation.
+
+Rename the function and leave the entry behind, and kragg does **not** go
+quiet: `kragg criticality` exits **3** naming the stale entry (with the nearest
+matching function, when a rename is obvious) and writes nothing, and the three
+gates that consume the data report `error: true`. Silently returning such a
+function to "not critical" would retire a protection nobody asked to retire.
 
 **Editor validation.** The package ships `kragg.schema.json`, a JSON Schema
 that mirrors exactly the keys, types and ranges the loader enforces (a test
@@ -280,6 +305,7 @@ Deliberate, and documented at each site:
 | criticality | Fingerprinted by a sidecar stamp, so stale call-graph data is re-derived rather than trusted. `criticality.json` itself stays byte-compatible with Python's reader. |
 | criticality (top-20) | Python's `top_n=20` truncates the analysis, so its `criticality.json` — the input the criticality gates enforce on — never names more than twenty functions. Here twenty is a *display* limit on `CRITICALITY.md` and the terminal table only; the sidecar carries every ranked function, so the gates enforce on the whole eligible population. Same record shape, same ranking, more rows. |
 | `criticality --path` | Scopes the printed table only. Combined with `--write` it is a usage error, where Python persists the scoped result — a partial `criticality.json` reads downstream as "everything else is uncritical". |
+| `critical_functions` | Reviewed declarations make a low-fan-in function critical in *addition* to the graph's own selection. Python has no such setting; the sidecar keeps its six-key record shape either way, and the reason is re-derived from the policy rather than stored. |
 | `check --file` with `--changed`/`--since` | A usage error. Python silently prefers git's file set and discards the explicit list. |
 | `secret_name_suffixes` | Includes `ServiceKey`, which Python's default list lacks. |
 | pipeline halting | A **skip never halts** the slow tier or `--fail-fast`; only a gate that ran and did not pass does. Python branches on `not result.passed`, which counts a visible skip as a failure. |

@@ -12,6 +12,13 @@
  * a gate that sees twenty enforces on twenty. `criticality/report.ts` holds
  * both halves of that decision.
  *
+ * REVIEWED DECLARATIONS ARE PART OF THE ANSWER. `critical_functions` in the
+ * policy names functions a human decided are critical — the authorization
+ * entrypoint the call graph ranks last — and they appear here exactly like the
+ * graph's own selection, with the reason in the `Why` column. An entry that
+ * names no function in the program is an ERROR (exit 3) and nothing is
+ * written, because a rename must not quietly retire the protection.
+ *
  * Those gates SKIP VISIBLY when the JSON is absent or STALE rather than
  * passing silently, so this command is the documented remedy printed in their
  * skip reason — keep the two in sync.
@@ -36,12 +43,13 @@ import {
   analyze,
   criticalityPath,
   formatTable,
+  staleDeclarationMessage,
   writeJson,
   writeReport,
   writeStamp,
 } from "../gates/criticality.ts";
 import type { FunctionProfile } from "../gates/criticality.ts";
-import { DEFAULT_POLICY, loadPolicy } from "../policy/policy.ts";
+import { loadPolicy, type CriticalDeclarations, type KraggPolicy } from "../policy/policy.ts";
 
 export interface CriticalityCommandOptions {
   readonly root: string;
@@ -64,26 +72,71 @@ export interface CriticalityCommandOptions {
  * contract keeps those distinguishable without parsing output — and
  * `EXIT_USAGE` when `--path` names nothing the program contains, because that
  * is a command line to fix and not a project to fix.
+ *
+ * A `critical_functions` entry naming a function this program does not define
+ * is also `EXIT_ENVIRONMENT`, and nothing is written: the declaration was a
+ * reviewer's decision about a function that has since been renamed or deleted,
+ * and carrying on would silently retire the protection they asked for.
  */
 export function runCriticality(options: CriticalityCommandOptions): number {
-  const log = options.log ?? ((line: string): void => void process.stdout.write(`${line}\n`));
-  const logError =
-    options.logError ?? ((line: string): void => void process.stderr.write(`${line}\n`));
-
+  const { log, logError } = loggers(options);
   const paths = options.paths ?? [];
   if (options.write && paths.length > 0) {
     logError(scopedWriteRefusal());
     return EXIT_USAGE;
   }
-  const result = analyzeScoped(options.root, paths);
+  // NOT caught: a `kragg.json` that will not load is a `PolicyError` the CLI
+  // turns into exit 2. It used to be swallowed here because the only thing the
+  // policy contributed was the stamp's scan paths, and an unstamped write is
+  // still a correct write. It now also contributes the DECLARED critical
+  // functions, and running with an unread policy would write a report that
+  // quietly omits them.
+  const policy = loadPolicy(options.root);
+  const result = analyzeScoped(options.root, paths, policy.criticalFunctions);
   if (!result.ok) {
     logError(result.message);
     return result.code;
   }
-  if (options.write) {
-    return writeAll(options.root, result.profiles, log);
+  // Only an UNSCOPED analysis knows the whole program, so only it can conclude
+  // that a declaration matches nothing: under `--path` a declaration outside
+  // the scope is legitimately absent, and reporting it would make the flag
+  // unusable in a repo that declares anything.
+  const stale =
+    paths.length > 0
+      ? null
+      : staleDeclarationMessage(
+          policy.criticalFunctions,
+          result.profiles.map((profile) => profile.name),
+        );
+  if (stale !== null) {
+    logError(stale);
+    return EXIT_ENVIRONMENT;
   }
-  for (const line of formatTable(result.profiles)) {
+  return options.write
+    ? writeAll(options.root, result.profiles, policy, log)
+    : printTable(result.profiles, log);
+}
+
+/** Where the command's two output streams go; injectable for tests. */
+interface CommandLoggers {
+  readonly log: (line: string) => void;
+  readonly logError: (line: string) => void;
+}
+
+function loggers(options: CriticalityCommandOptions): CommandLoggers {
+  return {
+    log: options.log ?? ((line: string): void => void process.stdout.write(`${line}\n`)),
+    logError:
+      options.logError ?? ((line: string): void => void process.stderr.write(`${line}\n`)),
+  };
+}
+
+/** Print the ranked table; always the successful outcome. */
+function printTable(
+  profiles: readonly FunctionProfile[],
+  log: (line: string) => void,
+): number {
+  for (const line of formatTable(profiles)) {
     log(line);
   }
   return EXIT_OK;
@@ -95,13 +148,21 @@ type ScopedAnalysis =
   | { readonly ok: false; readonly message: string; readonly code: number };
 
 /** Build the program once, narrow it to `paths`, and analyze what is left. */
-function analyzeScoped(root: string, paths: readonly string[]): ScopedAnalysis {
+function analyzeScoped(
+  root: string,
+  paths: readonly string[],
+  declared: CriticalDeclarations,
+): ScopedAnalysis {
   const analysis = analysisProgram({ root });
   const scoped = scopeFiles(analysis, root, paths);
   if (scoped !== null && !scoped.ok) {
     return scoped;
   }
-  const result = analyze({ analysis, ...(scoped === null ? {} : { files: scoped.files }) });
+  const result = analyze({
+    analysis,
+    declared,
+    ...(scoped === null ? {} : { files: scoped.files }),
+  });
   return result.ok
     ? { ok: true, profiles: result.profiles }
     : { ok: false, message: result.message, code: EXIT_ENVIRONMENT };
@@ -135,13 +196,14 @@ function scopedWriteRefusal(): string {
 function writeAll(
   root: string,
   profiles: readonly FunctionProfile[],
+  policy: KraggPolicy,
   log: (line: string) => void,
 ): number {
   const markdown = join(root, "CRITICALITY.md");
   const json = criticalityPath(root);
   writeReport(profiles, markdown);
   writeJson(profiles, json);
-  writeStamp(root, scanPaths(root));
+  writeStamp(root, scanPaths(policy));
   log(`Wrote ${markdown} and ${json}`);
   return EXIT_OK;
 }
@@ -195,16 +257,11 @@ function contains(directory: string, file: string): boolean {
  * The paths the freshness stamp should watch: the policy's sources AND tests.
  *
  * Both are in the program, so both contribute call-graph nodes and an edit to
- * either can change the answer. A policy that will not load falls back to the
- * defaults rather than failing the command: an unstampable write is still a
- * correct write, and the only cost of watching the wrong paths is that the
- * next `check` re-derives.
+ * either can change the answer. The policy comes from the caller, which loaded
+ * it once for the declarations too — the gates that later judge freshness read
+ * the same file, and two answers to "which files does this depend on" is one
+ * too many.
  */
-function scanPaths(root: string): readonly string[] {
-  try {
-    const policy = loadPolicy(root);
-    return [...policy.sourcePaths, ...policy.testPaths];
-  } catch {
-    return [...DEFAULT_POLICY.sourcePaths, ...DEFAULT_POLICY.testPaths];
-  }
+function scanPaths(policy: KraggPolicy): readonly string[] {
+  return [...policy.sourcePaths, ...policy.testPaths];
 }

@@ -20,8 +20,14 @@
 import { mkdirSync, readFileSync, writeFileSync } from "node:fs";
 import { dirname } from "node:path";
 
+import { declaredCritical, declaredReasons } from "./declared.ts";
 import { criticalityFreshness, criticalityPath } from "./freshness.ts";
-import { riskLabel, type FunctionProfile } from "./profile.ts";
+import {
+  BETWEENNESS_THRESHOLD,
+  FAN_IN_THRESHOLD,
+  riskLabel,
+  type FunctionProfile,
+} from "./profile.ts";
 
 export { criticalityPath } from "./freshness.ts";
 
@@ -43,6 +49,8 @@ export const TOP_N = 20;
  * in `.kragg/criticality.json` for the gates.
  */
 export function formatReport(profiles: readonly FunctionProfile[]): string {
+  const shown = rendered(profiles);
+  const declared = shown.some((profile) => profile.declaredReason !== undefined);
   const lines: string[] = [
     "# Critical Functions",
     "",
@@ -52,15 +60,21 @@ export function formatReport(profiles: readonly FunctionProfile[]): string {
     "When editing them, full types, docstrings, and tests are mandatory.",
     "",
   ];
-  const shown = profiles.slice(0, TOP_N);
+  if (declared) {
+    lines.push(
+      "The `Why` column says what made each one critical: its call-graph",
+      "metrics, or a reviewed `critical_functions` declaration in the policy.",
+      "",
+    );
+  }
   const critical = shown.filter((profile) => profile.isCritical);
   const nonCritical = shown.filter((profile) => !profile.isCritical);
 
   if (critical.length > 0) {
-    lines.push(...formatSection("Critical", critical));
+    lines.push(...formatSection("Critical", critical, declared));
   }
   if (nonCritical.length > 0) {
-    lines.push(...formatSection("Non-critical", nonCritical));
+    lines.push(...formatSection("Non-critical", nonCritical, declared));
   }
   if (shown.length === 0) {
     lines.push("No functions found.");
@@ -68,21 +82,64 @@ export function formatReport(profiles: readonly FunctionProfile[]): string {
   return `${lines.join("\n")}\n`;
 }
 
-function formatSection(title: string, profiles: readonly FunctionProfile[]): string[] {
+function formatSection(
+  title: string,
+  profiles: readonly FunctionProfile[],
+  declared: boolean,
+): string[] {
   const lines: string[] = [
     `## ${title}`,
     "",
-    "| Function | Fan-in | Fan-out | Centrality | Risk |",
-    "| --- | ---: | ---: | ---: | --- |",
+    `| Function | Fan-in | Fan-out | Centrality | Risk |${declared ? " Why |" : ""}`,
+    `| --- | ---: | ---: | ---: | --- |${declared ? " --- |" : ""}`,
   ];
   for (const profile of profiles) {
     lines.push(
       `| \`${profile.name}\` | ${profile.fanIn} | ${profile.fanOut} | ` +
-        `${profile.betweenness.toFixed(4)} | ${riskLabel(profile)} |`,
+        `${profile.betweenness.toFixed(4)} | ${riskLabel(profile)} |` +
+        `${declared ? ` ${why(profile)} |` : ""}`,
     );
   }
   lines.push("");
   return lines;
+}
+
+/**
+ * What made this function critical, in one phrase.
+ *
+ * Rendered from the profile rather than from the thresholds: "fan-in 7,
+ * betweenness 0.3000" is a fact about the function and stays true whatever
+ * thresholds the caller analysed with, while "over the fan-in threshold" would
+ * be a claim about a number this renderer does not have. A declared function
+ * shows the REASON A HUMAN GAVE, which is the whole reason the setting exists,
+ * and shows the metrics alongside it when the graph would have selected it
+ * anyway — both reasons are true and a reviewer should see both.
+ */
+function why(profile: FunctionProfile): string {
+  const metrics = `fan-in ${profile.fanIn}, betweenness ${profile.betweenness.toFixed(4)}`;
+  if (profile.declaredReason === undefined) {
+    return profile.isCritical ? metrics : "—";
+  }
+  const graphCritical = profile.fanIn >= FAN_IN_THRESHOLD ||
+    profile.betweenness >= BETWEENNESS_THRESHOLD;
+  const declared = `declared: ${profile.declaredReason}`;
+  return graphCritical ? `${declared}; ${metrics}` : declared;
+}
+
+/**
+ * The profiles a HUMAN sees: the {@link TOP_N} riskiest, plus every declared
+ * one the cut would have hidden.
+ *
+ * A declared function is typically the LOWEST-ranked thing in the graph — that
+ * is why it needed declaring — so the display limit would drop exactly the
+ * rows a reviewer added on purpose, and the report would silently disagree
+ * with the gates enforcing on them. Declared rows are appended in ranked
+ * order, after the top slice, so the ranking still reads top-down.
+ */
+function rendered(profiles: readonly FunctionProfile[]): readonly FunctionProfile[] {
+  const top = profiles.slice(0, TOP_N);
+  const rest = profiles.slice(TOP_N).filter((profile) => profile.declaredReason !== undefined);
+  return [...top, ...rest];
 }
 
 /** Write the Markdown criticality report. */
@@ -199,10 +256,43 @@ export function readJson(root: string): readonly CriticalityRecord[] {
   if (!Array.isArray(data)) {
     return [];
   }
-  return data.filter(
+  const records = data.filter(
     (entry): entry is CriticalityRecord =>
       typeof entry === "object" && entry !== null && !Array.isArray(entry),
   );
+  return withDeclared(records, root);
+}
+
+/**
+ * Apply the policy's reviewed declarations to records read off disk.
+ *
+ * THE POLICY WINS AT READ TIME, and that is the point. The file is a cache
+ * whose freshness stamp watches the source tree, so adding a declaration to
+ * `kragg.json` — which touches no source file — would otherwise leave every
+ * gate reading a sidecar written before the declaration existed, enforcing
+ * nothing and saying nothing. Re-deriving the flag here means a declaration is
+ * in force the moment it is written, and cannot silently disagree with the
+ * config.
+ *
+ * ADDITIVE ONLY: a record already `is_critical: true` is untouched, and no
+ * record is ever flipped to false — a declaration cannot demote what the graph
+ * selected. No key is added; `is_critical` is the key that was already there.
+ */
+function withDeclared(
+  records: readonly CriticalityRecord[],
+  root: string,
+): readonly CriticalityRecord[] {
+  const reasons = declaredReasons(declaredCritical(root));
+  if (reasons.size === 0) {
+    return records;
+  }
+  return records.map((record) => {
+    const name = record["name"];
+    if (record["is_critical"] === true || typeof name !== "string" || !reasons.has(name)) {
+      return record;
+    }
+    return { ...record, is_critical: true };
+  });
 }
 
 /**
@@ -213,13 +303,19 @@ export function readJson(root: string): readonly CriticalityRecord[] {
  * {@link TOP_N}, like the Markdown report and for the same reason.
  */
 export function formatTable(profiles: readonly FunctionProfile[]): string[] {
-  const shown = profiles.slice(0, TOP_N);
+  const shown = rendered(profiles);
   if (shown.length === 0) {
     return ["No functions found."];
   }
+  // The `Why` column appears only when something is declared. A project that
+  // declares nothing sees the columns Python prints, byte for byte, which is
+  // what makes the two tools' tables comparable side by side; a project that
+  // declares something has asked for the extra column by asking the question
+  // it answers.
+  const declared = shown.some((profile) => profile.declaredReason !== undefined);
   const lines: string[] = [
     `${"Function".padEnd(55)} ${"Fan-in".padStart(8)} ${"Fan-out".padStart(8)} ` +
-      `${"Centrality".padStart(12)} ${"Risk".padStart(8)}`,
+      `${"Centrality".padStart(12)} ${"Risk".padStart(8)}${declared ? "  Why" : ""}`,
     "-".repeat(96),
   ];
   for (const profile of shown) {
@@ -227,7 +323,7 @@ export function formatTable(profiles: readonly FunctionProfile[]): string[] {
       `${profile.name.padEnd(55)} ${String(profile.fanIn).padStart(8)} ` +
         `${String(profile.fanOut).padStart(8)} ` +
         `${profile.betweenness.toFixed(4).padStart(12)} ` +
-        `${riskLabel(profile).padStart(8)}`,
+        `${riskLabel(profile).padStart(8)}${declared ? `  ${why(profile)}` : ""}`,
     );
   }
   return lines;

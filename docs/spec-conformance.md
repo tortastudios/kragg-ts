@@ -211,6 +211,15 @@ it does open is unchanged. See
 [`src/gates/criticality/freshness.ts`](../src/gates/criticality/freshness.ts)
 for the full argument and the two known gaps in the fingerprint.
 
+**Reviewed declarations do not change that file's shape either.** A
+`critical_functions` entry in the policy (kragg-ts only, divergence 20) makes a
+function critical that the thresholds did not select, and it appears here as an
+ordinary record whose `is_critical` is `true` — no seventh key, no second file.
+The reviewer's REASON is never stored: it is re-derived from `kragg.json`
+wherever it is shown, which keeps the record shape frozen and makes it
+impossible for the stored flag to disagree with the policy. Python's `read_json`
+therefore reads such a file exactly as it reads its own.
+
 The numbers are the contract. `betweenness` is normalized betweenness
 centrality to 4 decimal places (kragg-ts reproduces networkx's algorithm; a
 Python `0.0` and a TypeScript `0` are the same number). Records are sorted by
@@ -341,7 +350,7 @@ A conformance runner must not flag these; a suite that diffs the two
 implementations naively will flag every one. Rows 1–9 are this repository's
 original table, re-verified against both trees while the spec was written; rows
 10–12 were added by that verification and are also SPEC.md section 10's rows
-10–12; rows 13–19 were introduced by TOR-1358, TOR-1363, TOR-1361 and TOR-1369 on this branch. Fixtures that exercise a row carry a `divergences` entry naming its id.
+10–12; rows 13–20 were introduced by TOR-1358, TOR-1363, TOR-1361, TOR-1369 and TOR-1374 on this branch. Fixtures that exercise a row carry a `divergences` entry naming its id.
 
 | # | Divergence | Why it is intentional |
 | --- | --- | --- |
@@ -363,6 +372,7 @@ original table, re-verified against both trees while the spec was written; rows
 | 16 | `criticality.json` holds the **whole** ranked graph | Python's `analyze_criticality(top_n=20)` truncates the analysis itself, so its sidecar — the input every criticality gate enforces on — carries at most twenty records. kragg-ts truncates only the `CRITICALITY.md` tables and the terminal table, and persists every ranked function. Record SHAPE, key order and ranking are unchanged; only the number of records differs, and the `criticality` fixture is `applies_to: ["python"]`, so no TypeScript golden covers it. |
 | 17 | `criticality --write --path` is exit 2 | Python writes whatever the scoped analysis produced. A partial `.kragg/criticality.json` is not read as partial: `critical-tests` and `critical-coverage` would treat every function outside the scope as uncritical. Refusing keeps the file whole-project by construction. |
 | 18 | `check --file` with `--changed`/`--since` is exit 2 | Python's `_check_targets` takes the git branch first and drops `--file` on the floor. Same file set either way; kragg-ts declines to guess which one the caller meant. |
+| 20 | reviewed `critical_functions` declarations make a function critical | Python has no such setting: its `is_critical` is `fan_in >= 3 or betweenness >= 0.1` and nothing else. A declaration is ADDITIVE (it never demotes a graph-selected function) and reaches the sidecar as an ordinary record with `is_critical: true` — **no key is added** to the six-key record shape, and the reason is re-derived from the policy wherever it is shown, never stored. Python's reader therefore consumes such a file unchanged; the only observable difference is that one more record says `true` than Python's own thresholds would produce, in a repo whose `kragg.json` says so. A declaration that matches no analysed function is exit 3 from `kragg criticality` and `error: true` from the three gates, so a rename cannot silently drop the protection. Fixtures declare nothing, so every golden is unaffected. |
 | 19 | `check` with an empty `--changed` set under `--format json` | Python prints `no changed Python files` in both formats. kragg-ts prints that only for text and emits the ordinary payload with `gates: []` for JSON, so every `--format json` path is parseable. No key is added, and the text path is byte-identical apart from the language name. |
 
 Four defects found in the Python implementation during the port are recorded in

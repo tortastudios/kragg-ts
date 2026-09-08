@@ -76,11 +76,13 @@ import { parseLcov } from "../adapters/support/lcov.ts";
 import type { Violation } from "../engine/models.ts";
 import {
   criticalFunctions,
+  declarationProblem,
   hasCriticalityData,
   simpleName,
   type CriticalFunction,
 } from "./testDepth/criticalFunctions.ts";
 import {
+  failed,
   NO_CRITICALITY_REASON,
   ran,
   skipped,
@@ -132,6 +134,8 @@ export interface CriticalCoverageGap {
   readonly missingLines: readonly number[];
   /** False when the report has no unambiguous entry for this function. */
   readonly measured: boolean;
+  /** Why a reviewer declared it critical, when one did; see the policy. */
+  readonly declaredReason?: string;
 }
 
 /** Return violations for critical functions with uncovered lines. */
@@ -140,6 +144,12 @@ export function checkCriticalCoverage(
 ): TestDepthOutcome {
   if (!hasCriticalityData(options.root)) {
     return skipped(NO_CRITICALITY_REASON);
+  }
+  // A `critical_functions` entry that names nothing means this gate would
+  // measure a population a reviewer believes is larger. Error, not silence.
+  const stale = declarationProblem(options.root);
+  if (stale !== null) {
+    return failed(stale);
   }
   if (normalize(options) === null) {
     return skipped(NO_COVERAGE_REASON);
@@ -237,7 +247,14 @@ function measure(
   file: FileCoverage | undefined,
   extents: SourceExtents,
 ): CriticalCoverageGap {
-  const base = { qualname: critical.qualname, file: critical.file, fanIn: critical.fanIn };
+  const base = {
+    qualname: critical.qualname,
+    file: critical.file,
+    fanIn: critical.fanIn,
+    ...(critical.declaredReason === undefined
+      ? {}
+      : { declaredReason: critical.declaredReason }),
+  };
   if (file === undefined) {
     return { ...base, missingLines: [], measured: false };
   }
@@ -273,9 +290,13 @@ function measure(
 function toViolation(gap: CriticalCoverageGap): Violation {
   const simple = simpleName(gap.qualname);
   const preview = gap.missingLines.slice(0, PREVIEW_LIMIT).join(", ");
+  // A declared function is named with the reviewer's reason, for the same
+  // purpose as in `critical-tests`: "fan-in 1, why is this gated" is the
+  // question the message has to answer before anybody acts on it.
+  const why = gap.declaredReason === undefined ? "" : ` (declared: ${gap.declaredReason})`;
   return {
     message:
-      `critical function ${gap.qualname} has ` +
+      `critical function ${gap.qualname}${why} has ` +
       `${gap.missingLines.length} uncovered lines`,
     file: gap.file,
     line: gap.missingLines[0] ?? 1,

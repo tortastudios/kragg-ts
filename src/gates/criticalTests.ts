@@ -44,10 +44,12 @@ import type { Violation } from "../engine/models.ts";
 import type { TypeScriptApi } from "../analysis/sourceFile.ts";
 import {
   criticalFunctions,
+  declarationProblem,
   hasCriticalityData,
   type CriticalFunction,
 } from "./testDepth/criticalFunctions.ts";
 import {
+  failed,
   NO_CRITICALITY_REASON,
   ran,
   skipped,
@@ -87,6 +89,13 @@ export async function checkCriticalTests(
   if (!hasCriticalityData(options.root)) {
     return skipped(NO_CRITICALITY_REASON);
   }
+  // A reviewed declaration that names nothing is a protection that has gone
+  // missing, not a finding about the code: `error: true`, exit 3, before any
+  // conclusion is drawn from a population it should have been part of.
+  const stale = declarationProblem(options.root);
+  if (stale !== null) {
+    return failed(stale);
+  }
   const changed = await changedFiles(options.root, options.since ?? null, [
     ...options.sourcePaths,
     ...options.testPaths,
@@ -112,10 +121,21 @@ export async function checkCriticalTests(
   return ran(violations);
 }
 
+/**
+ * WHY IT IS CRITICAL travels with the finding.
+ *
+ * A violation about a function with fan-in 1 reads like a false positive
+ * unless it says who asked for it, so a declared function is named with the
+ * reviewer's reason instead of a metric nobody gated on.
+ */
 function toViolation(critical: CriticalFunction): Violation {
+  const why =
+    critical.declaredReason === undefined
+      ? `fan-in ${critical.fanIn}`
+      : `declared: ${critical.declaredReason}`;
   return {
     message:
-      `critical function ${critical.qualname} (fan-in ${critical.fanIn}) ` +
+      `critical function ${critical.qualname} (${why}) ` +
       "changed without test changes",
     file: critical.file,
     code: CRITICAL_TESTS_CODE,

@@ -83,6 +83,12 @@
         { "type": "array", "items": { "type": "string" } }
       ]
     },
+    "critical_functions": {
+      "type": "object",
+      "additionalProperties": { "type": "string", "minLength": 1 },
+      "description": "Functions a reviewer declared critical, on top of the ones the call graph selects: each key names a function as \"<module>#<name>\" (repo-root-relative module path, then the function or Class.method, e.g. \"src/auth/login#verifyPassword\") and each value says why it is critical. The reason is required and must be a non-empty string. A declaration never demotes an automatically critical function, and one that matches no function in the analysed program is an error (exit 3), so a rename cannot silently drop the protection. {} is an explicit empty list. Default: {}.",
+      "propertyNames": { "pattern": "^[^#]+#.+$" }
+    },
     "secret_name_suffixes": {
       "$ref": "#/definitions/stringList",
       "description": "Identifier suffixes that mark a binding as holding a secret, for the secret-default gate. Default: [\"Secret\", \"Token\", \"Password\", \"Passphrase\", \"ApiKey\", \"SigningKey\", \"SecretKey\", \"PrivateKey\", \"AccessKey\", \"ServiceKey\"]."
