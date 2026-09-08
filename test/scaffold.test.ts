@@ -15,21 +15,32 @@
  */
 
 import assert from "node:assert/strict";
-import { existsSync, mkdirSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from "node:fs";
+import {
+  chmodSync,
+  existsSync,
+  mkdirSync,
+  mkdtempSync,
+  readdirSync,
+  readFileSync,
+  rmSync,
+  statSync,
+  writeFileSync,
+} from "node:fs";
 import { tmpdir } from "node:os";
-import { join } from "node:path";
+import { dirname, join } from "node:path";
 import { after, describe, it } from "node:test";
 
 import ts from "typescript";
 
 import { checkTypingStrictness } from "../src/gates/typingStrictness.ts";
-import { loadPolicy } from "../src/policy/policy.ts";
+import { DEFAULT_POLICY, loadPolicy } from "../src/policy/policy.ts";
 import { KINDS, type Kind } from "../src/scaffold/kinds.ts";
 import {
   createNewProject,
   generateModule,
   initializeProject,
   mergeJson,
+  planInitialization,
   ScaffoldError,
 } from "../src/scaffold/project.ts";
 import {
@@ -51,6 +62,39 @@ function temporaryRoot(): string {
   const root = mkdtempSync(join(tmpdir(), "kragg-scaffold-"));
   temporaryRoots.push(root);
   return root;
+}
+
+/** Write a JSON file into `root`, the way a real project would have one. */
+function writeJson(root: string, relative: string, value: unknown): void {
+  writeFileSync(join(root, relative), `${JSON.stringify(value, null, 2)}\n`, "utf8");
+}
+
+/** Read a JSON object back out of `root`. */
+function readJson(root: string, relative: string): Record<string, unknown> {
+  const parsed: unknown = JSON.parse(readFileSync(join(root, relative), "utf8"));
+  assert.equal(typeof parsed === "object" && parsed !== null, true, relative);
+  return parsed as Record<string, unknown>;
+}
+
+/**
+ * Every file under `root`, with its contents — the evidence that a dry run
+ * wrote nothing. A listing alone would miss a file rewritten in place.
+ */
+function snapshot(root: string): Record<string, string> {
+  const files: Record<string, string> = {};
+  const walk = (directory: string, prefix: string): void => {
+    for (const entry of readdirSync(directory).sort()) {
+      const path = join(directory, entry);
+      const relative = prefix === "" ? entry : `${prefix}/${entry}`;
+      if (statSync(path).isDirectory()) {
+        walk(path, relative);
+        continue;
+      }
+      files[relative] = readFileSync(path, "utf8");
+    }
+  };
+  walk(root, "");
+  return files;
 }
 
 /** Scaffold `kind` into a fresh temp directory and return its path. */
@@ -299,7 +343,13 @@ describe("initializeProject", () => {
     const record = merged as Record<string, unknown>;
     assert.equal(record["name"], "existing");
     assert.equal(record["version"], "3.1.4");
-    assert.equal(record["type"], "module");
+    // The four keys that redefine a project rather than adding to it. `type`
+    // is the one with teeth: absent means CommonJS, so ADDING it is what
+    // breaks the project — see PRESERVED_MANIFEST_KEYS in initPlan.ts.
+    assert.equal(record["type"], undefined);
+    assert.equal(record["engines"], undefined);
+    assert.equal(record["packageManager"], undefined);
+    assert.equal(record["private"], undefined);
     const scripts = record["scripts"] as Record<string, unknown>;
     assert.equal(scripts["test"], "mocha", "existing script must survive");
     assert.equal(scripts["lint"], "eslint .");
@@ -310,6 +360,168 @@ describe("initializeProject", () => {
     const root = temporaryRoot();
     initializeProject(root);
     assert.deepEqual(initializeProject(root).written, []);
+  });
+
+  it("preserves an explicitly declared module mode and toolchain", () => {
+    const root = temporaryRoot();
+    writeJson(root, "package.json", {
+      name: "existing",
+      type: "commonjs",
+      engines: { node: ">=18" },
+      packageManager: "yarn@4.5.0",
+      private: false,
+    });
+    initializeProject(root);
+    const record = readJson(root, "package.json");
+    assert.equal(record["type"], "commonjs");
+    assert.deepEqual(record["engines"], { node: ">=18" });
+    assert.equal(record["packageManager"], "yarn@4.5.0");
+    assert.equal(record["private"], false);
+  });
+
+  it("reports each manifest key it withheld, rather than withholding it silently", () => {
+    const root = temporaryRoot();
+    writeJson(root, "package.json", { name: "existing" });
+    const withheld = initializeProject(root)
+      .skipped.filter((skip) => skip.notable)
+      .map((skip) => skip.path.replace(`${root}/`, ""));
+    assert.deepEqual(withheld.filter((path) => path.startsWith("package.json#")).sort(), [
+      "package.json#engines",
+      "package.json#packageManager",
+      "package.json#private",
+      "package.json#type",
+    ]);
+  });
+
+  it("never shadows a policy embedded in package.json", () => {
+    // The reported bug: `kragg.json` wins outright over `package.json#kragg`,
+    // so writing a default one replaces every threshold this project tightened.
+    const root = temporaryRoot();
+    mkdirSync(join(root, "lib"), { recursive: true });
+    mkdirSync(join(root, "tests"), { recursive: true });
+    writeJson(root, "package.json", {
+      name: "legacy-cjs-app",
+      kragg: {
+        source_paths: ["lib"],
+        test_paths: ["tests"],
+        coverage_fail_under: 95,
+        type_max_length: 20,
+        forbidden_calls: { eval: "never eval" },
+      },
+    });
+    const before = loadPolicy(root);
+    const result = initializeProject(root);
+    assert.equal(existsSync(join(root, "kragg.json")), false);
+    assert.deepEqual(loadPolicy(root), before);
+    assert.equal(before.coverageFailUnder, 95);
+    assert.match(
+      result.skipped.map((skip) => skip.reason).join("\n"),
+      /package\.json#kragg/,
+    );
+  });
+
+  it("leaves an existing kragg.json byte-identical", () => {
+    // Merging defaults into a partial config is additive in the file and NOT
+    // additive in the effective policy: `test_paths` would go from the loader's
+    // ["test", "tests"] down to ["test"].
+    const root = temporaryRoot();
+    const contents = `{ "coverage_fail_under": 95 }\n`;
+    writeFileSync(join(root, "kragg.json"), contents);
+    const before = loadPolicy(root);
+    initializeProject(root);
+    assert.equal(readFileSync(join(root, "kragg.json"), "utf8"), contents);
+    assert.deepEqual(loadPolicy(root), before);
+    assert.deepEqual(loadPolicy(root).testPaths, ["test", "tests"]);
+  });
+
+  it("writes a policy that resolves to the defaults it replaced", () => {
+    // A project with no policy at all had the loader's defaults. The generated
+    // kragg.json has to mean the same thing, or init weakened something.
+    const root = temporaryRoot();
+    initializeProject(root);
+    assert.deepEqual(loadPolicy(root), DEFAULT_POLICY);
+  });
+
+  it("does not assert a layout the project does not have", () => {
+    const root = temporaryRoot();
+    mkdirSync(join(root, "lib"), { recursive: true });
+    mkdirSync(join(root, "tests"), { recursive: true });
+    const result = initializeProject(root);
+    const config = readJson(root, "kragg.json");
+    assert.equal(config["source_paths"], undefined, "src/ does not exist here");
+    assert.deepEqual(config["test_paths"], ["tests"], "test/ does not exist here");
+    assert.deepEqual(loadPolicy(root).testPaths, ["tests"]);
+    assert.match(
+      result.skipped.map((skip) => `${skip.path}: ${skip.reason}`).join("\n"),
+      /source_paths/,
+    );
+  });
+
+  it("preserves existing hooks, workflows and agent contracts", () => {
+    const root = temporaryRoot();
+    const existing = {
+      ".claude/settings.json": `{ "hooks": { "Stop": [] } }\n`,
+      ".github/workflows/quality.yml": "name: mine\n",
+      "AGENTS.md": "MINE\n",
+    };
+    for (const [relative, contents] of Object.entries(existing)) {
+      mkdirSync(dirname(join(root, relative)), { recursive: true });
+      writeFileSync(join(root, relative), contents);
+    }
+    const result = initializeProject(root);
+    for (const [relative, contents] of Object.entries(existing)) {
+      assert.equal(readFileSync(join(root, relative), "utf8"), contents, relative);
+      assert.ok(
+        result.skipped.some((skip) => skip.path === join(root, relative)),
+        `${relative} was not reported as left alone`,
+      );
+    }
+  });
+
+  it("refuses a read-only target instead of half-applying", (t) => {
+    if (process.getuid?.() === 0) {
+      t.skip("root ignores the write bit");
+      return;
+    }
+    const root = temporaryRoot();
+    chmodSync(root, 0o555);
+    try {
+      assert.throws(() => initializeProject(root), /cannot write to/);
+      assert.deepEqual(readdirSync(root), [], "a refused init must write nothing");
+    } finally {
+      chmodSync(root, 0o755);
+    }
+  });
+});
+
+describe("planInitialization", () => {
+  it("writes nothing at all, not even the target directory", () => {
+    const root = join(temporaryRoot(), "absent");
+    const plan = planInitialization(root);
+    assert.equal(existsSync(root), false);
+    assert.ok(plan.writes.length > 0, "the plan must still say what it would do");
+  });
+
+  it("leaves a populated project byte-for-byte unchanged", () => {
+    const root = temporaryRoot();
+    writeJson(root, "package.json", { name: "existing", kragg: { coverage_fail_under: 95 } });
+    writeFileSync(join(root, "AGENTS.md"), "MINE\n");
+    const before = snapshot(root);
+    planInitialization(root);
+    assert.deepEqual(snapshot(root), before);
+  });
+
+  it("plans exactly what a real run then does", () => {
+    const root = temporaryRoot();
+    writeJson(root, "package.json", { name: "existing" });
+    const planned = planInitialization(root);
+    const written = initializeProject(root).written;
+    assert.deepEqual(
+      written.slice().sort(),
+      [...planned.writes.map((file) => file.path), ...planned.merges.map((merge) => merge.path)]
+        .slice()
+        .sort(),
+    );
   });
 });
 

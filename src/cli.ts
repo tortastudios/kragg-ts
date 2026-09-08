@@ -108,6 +108,9 @@ Options for status:
   --format text|json     output format (default: text)
   --last <n>             how many runs to read (default: 10)
 
+Options for init:
+  --dry-run              print the changes init would make, and write nothing
+
 Global options:
   -h, --help             show this help and exit
   -v, --version          print the version and exit
@@ -175,7 +178,7 @@ const ALLOWED: FlagTable = {
   hook: [],
   new: [],
   gen: [],
-  init: [],
+  init: ["dry-run"],
 };
 
 type Values = ReturnType<typeof parseArgs<{ options: typeof OPTIONS; allowPositionals: true }>>["values"];

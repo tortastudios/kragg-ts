@@ -20,7 +20,7 @@
  */
 
 import assert from "node:assert/strict";
-import { chmodSync, mkdirSync, mkdtempSync, rmSync, writeFileSync } from "node:fs";
+import { chmodSync, mkdirSync, mkdtempSync, readdirSync, rmSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { fileURLToPath } from "node:url";
@@ -231,6 +231,31 @@ describe("the read-only commands", () => {
     assert.equal(result.code, EXIT_GATE_FAILURES);
     assert.match(result.out, /package.json: missing/);
     assert.match(result.out, /tsc: MISSING -> /);
+  });
+});
+
+describe("kragg init", () => {
+  it("leaves an embedded policy in charge, and says it did", async () => {
+    // The whole point of the command's restraint: a standalone kragg.json wins
+    // outright over package.json#kragg, so writing one here would silently
+    // replace a stricter policy with the generated defaults.
+    const root = project({
+      "package.json": '{"name": "legacy", "kragg": {"coverage_fail_under": 95}}',
+    });
+    const init = await run(["init", root], root);
+    assert.equal(init.code, EXIT_OK);
+    assert.match(init.out, /preserved .*kragg\.json/);
+    const policy = await run(["policy", "show"], root);
+    assert.equal(policy.code, EXIT_OK);
+    assert.match(policy.out, /"coverage_fail_under": 95/);
+  });
+
+  it("writes nothing under --dry-run", async () => {
+    const root = project({ "package.json": '{"name": "legacy"}' });
+    const result = await run(["init", root, "--dry-run"], root);
+    assert.equal(result.code, EXIT_OK);
+    assert.match(result.out, /Dry run/);
+    assert.deepEqual(readdirSync(root), ["package.json"]);
   });
 });
 
