@@ -341,7 +341,7 @@ A conformance runner must not flag these; a suite that diffs the two
 implementations naively will flag every one. Rows 1–9 are this repository's
 original table, re-verified against both trees while the spec was written; rows
 10–12 were added by that verification and are also SPEC.md section 10's rows
-10–12; rows 13–15 were introduced by TOR-1358 and TOR-1363 on this branch. Fixtures that exercise a row carry a `divergences` entry naming its id.
+10–12; rows 13–16 were introduced by TOR-1358, TOR-1363 and TOR-1361 on this branch. Fixtures that exercise a row carry a `divergences` entry naming its id.
 
 | # | Divergence | Why it is intentional |
 | --- | --- | --- |
@@ -360,6 +360,7 @@ original table, re-verified against both trees while the spec was written; rows
 | 13 | a SKIP does not halt the SLOW tier or `--fail-fast` | Python's `run_gates` branches on `if not result.passed`, and a visible skip is `passed=False, skipped=True`, so one gate stepping aside from inside its own run skips every slow gate with `static gates failed`. `crag/spec/SPEC.md` §2.3/§4.1 make the three states a contract and define `gates_failed` as not-passed-and-not-skipped; kragg-ts follows the spec. Recorded as a Python gap in KNOWN_LIMITATIONS. |
 | 14 | a gate that THROWS is an errored gate, not a dead process | Python's `run_gates` has no `try`, so an exception inside a gate kills the process and takes the consolidated report with it. `crag/spec/SPEC.md` §4.3 already names the outcome for a gate that could not run — `error: true`, `passed: false`, remediation in `raw_output`, exit 3 — and kragg-ts produces exactly that, so the remaining gates still run and still report. Recorded as a Python gap in KNOWN_LIMITATIONS. |
 | 15 | config values are validated, not defaulted | SPEC §8 describes Python: a type-mismatched value falls back to the default and a malformed `forbidden_calls` hint degrades to `""`. kragg-ts rejects a wrong type, an out-of-range budget, a non-string list element or hint, a wrong-shaped `package.json#kragg` and any unknown key with exit 2, naming the setting (`kragg.json#forbidden_calls[1] must be a string (got 7)`). A ban list read as *no bans* and a misspelled key that configures nothing are the fail-open cases this closes. Strictly narrower: everything Python reads as written loads identically. `kragg.schema.json` mirrors the rules for editors. |
+| 16 | `criticality.json` holds the **whole** ranked graph | Python's `analyze_criticality(top_n=20)` truncates the analysis itself, so its sidecar — the input every criticality gate enforces on — carries at most twenty records. kragg-ts truncates only the `CRITICALITY.md` tables and the terminal table, and persists every ranked function. Record SHAPE, key order and ranking are unchanged; only the number of records differs, and the `criticality` fixture is `applies_to: ["python"]`, so no TypeScript golden covers it. |
 
 Four defects found in the Python implementation during the port are recorded in
 [KNOWN_LIMITATIONS.md](../KNOWN_LIMITATIONS.md#found-in-the-python-implementation-during-this-port).

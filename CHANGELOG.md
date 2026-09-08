@@ -76,6 +76,20 @@ a previously green run red — see [Gate additions](#gate-additions) below.
   run's lcov. The coverage artifact is published to `coverage_report_path`
   afterwards for `kragg coverage`. `kragg mutation` refuses to start Stryker
   while an earlier report it could not remove is still at the report path.
+- **TOR-1361: `.kragg/criticality.json` keeps the complete eligible
+  population.** `analyze` truncated its result to the twenty riskiest
+  functions, and since both `kragg criticality --write` and the check
+  pipeline's derive-with-cache persist exactly what it returns, a *display*
+  limit was silently capping *enforcement*: on this repo `critical-tests`,
+  `test-quality`, `critical-coverage` and `kragg mutation`'s criticality
+  scoping saw 4 of 108 eligible critical functions. The analysis is now
+  complete and the twenty-row limit applies only where a human reads it —
+  `CRITICALITY.md` and the terminal table. The sidecar's record shape, key
+  order and ranking are unchanged; only the number of records grows. The
+  `topN` option is gone rather than raised, so enforcement cannot be capped
+  again. This is a new divergence from Python, which truncates the analysis
+  itself; see the divergence tables in `README.md` and
+  `docs/spec-conformance.md`.
 
 ### Added
 
