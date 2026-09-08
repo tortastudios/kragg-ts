@@ -83,6 +83,11 @@ function toolGates(ctx: CatalogContext): readonly GateSpec[] {
       name: "tsc",
       tier: FAST,
       run: async () => {
+        // The mirror image of `lint` above: a type checker is NOT per-file,
+        // so `ctx.paths` is an ORDER and never a scope. The whole project is
+        // checked through its own tsconfig on every run and every diagnostic
+        // is reported — the error a change causes is usually in a file that
+        // did not change. See `orderByPaths` in `adapters/tsc.ts`.
         const outcome = await runTypeCheck({ env: ctx.env, paths: ctx.paths });
         // A project with no TypeScript compiler is a broken environment, not
         // an unconfigured gate: exit 3 and an install command, never a skip.

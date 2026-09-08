@@ -100,9 +100,12 @@ export interface TypeCheckOptions {
   /** tsconfig to check, relative to the root. Defaults to `tsconfig.json`. */
   readonly project?: string | undefined;
   /**
-   * Restrict REPORTING to these files — the `--changed` path.
+   * Put diagnostics in these files FIRST in the report — the `--changed`
+   * path.
    *
-   * This is a filter, never a narrower invocation; see `filterToPaths`.
+   * An order, never a filter and never a narrower invocation; see
+   * `orderByPaths` for why either of those would hide the errors a change
+   * introduces.
    */
   readonly paths?: readonly string[] | undefined;
   /** Passed through to `runCommand`. */
@@ -129,11 +132,12 @@ export type TypeCheckOutcome =
     };
 
 /**
- * Narrow reported diagnostics to a changed file set.
+ * Put the diagnostics a change is most likely to explain first — the
+ * `--changed` path.
  *
- * WHY THIS IS A FILTER AND NOT `tsc <file>`. A linter is per-file, so
- * `--changed` can hand it a shorter list and get the same answer faster. A
- * TYPE CHECKER IS NOT. Two things break if the invocation is narrowed instead:
+ * WHY THIS IS AN ORDER AND NOT A NARROWER INVOCATION. A linter is per-file,
+ * so `--changed` can hand it a shorter list and get the same answer faster. A
+ * TYPE CHECKER IS NOT. Two things break if the invocation is narrowed:
  *
  *  1. `tsc a.ts b.ts` IGNORES tsconfig.json ENTIRELY. Passing files on the
  *     command line switches the compiler out of project mode, so `strict`,
@@ -147,25 +151,45 @@ export type TypeCheckOutcome =
  *     change. Type-checking only the changed files would miss precisely the
  *     errors a change introduces.
  *
- * So the full program is always checked and only the REPORT is scoped. The
- * cost is honest — incremental mode saves nothing here, and the correct place
- * to buy that time back is `tsc`'s own `--incremental` build info, not a
- * narrower file list.
+ * WHY IT IS NOT A FILTER EITHER. This used to be one: the whole program was
+ * checked and every diagnostic outside the changed set was dropped — which,
+ * by point 2's own argument, dropped exactly the error in `b.ts` that the
+ * edit to `a.ts` caused. The gate then reported `[PASS] tsc` for a change
+ * that broke its callers, while `tsc -p tsconfig.json` was failing. So
+ * nothing is dropped: the whole-project verdict is the verdict, and every
+ * diagnostic counts toward it. The report's dedupe and per-gate cap handle
+ * volume; this function decides what the cap keeps.
  *
- * A violation with NO FILE is always kept: config-level diagnostics are facts
- * about the project, not about any one file, and dropping them because they
- * matched no changed path would hide exactly the errors that stop the check
- * from being meaningful.
+ * THREE GROUPS, each in the compiler's own order (file, then position):
+ *
+ *  1. diagnostics with NO FILE — facts about the project rather than about
+ *     any one file (a missing global type, a config-level notice); few, and
+ *     the ones that explain everything below them, so they are never pushed
+ *     past the cap by per-file errors;
+ *  2. diagnostics IN the changed set — what the edit most likely caused where
+ *     the reader is already looking;
+ *  3. everything else — the errors the edit caused ELSEWHERE, the case the
+ *     filter used to hide.
+ *
+ * With no paths the list is returned as it came.
  */
-export function filterToPaths(
+export function orderByPaths(
   violations: readonly Violation[],
   root: string,
   paths: readonly string[],
 ): readonly Violation[] {
+  if (paths.length === 0) {
+    return violations;
+  }
   const wanted = new Set(paths.map((path) => normalize(path, root)));
-  return violations.filter(
-    (item) => item.file === undefined || wanted.has(normalize(item.file, root)),
-  );
+  const group = (item: Violation): number => {
+    if (item.file === undefined) {
+      return 0;
+    }
+    return wanted.has(normalize(item.file, root)) ? 1 : 2;
+  };
+  // `sort` is stable, so within a group the compiler's order survives.
+  return [...violations].sort((left, right) => group(left) - group(right));
 }
 
 /** A path as a root-relative posix string, for set comparison. */
@@ -271,7 +295,7 @@ function interpretRun(run: TypeCheckRun): TypeCheckOutcome {
   if (unusable !== null) {
     return { ok: false, message: unusable, command };
   }
-  return { ok: true, command, violations: scopeToPaths(all, run) };
+  return { ok: true, command, violations: orderByPaths(all, run.env.root, run.paths ?? []) };
 }
 
 /**
@@ -302,14 +326,6 @@ function unusableProject(run: TypeCheckRun, all: readonly Violation[]): string |
 
 function isConfigError(code: string | undefined): boolean {
   return code !== undefined && CONFIG_ERROR_CODES.has(code);
-}
-
-/** Apply the caller's `--changed` scope, if it gave one. */
-function scopeToPaths(all: readonly Violation[], run: TypeCheckRun): readonly Violation[] {
-  const { paths } = run;
-  return paths === undefined || paths.length === 0
-    ? all
-    : filterToPaths(all, run.env.root, paths);
 }
 
 function configErrorMessage(project: string, errors: readonly Violation[]): string {

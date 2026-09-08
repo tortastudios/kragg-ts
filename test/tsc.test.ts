@@ -31,7 +31,7 @@ import { after, describe, it } from "node:test";
 
 import {
   CONFIG_ERROR_CODES,
-  filterToPaths,
+  orderByPaths,
   parseTscOutput,
   runTypeCheck,
 } from "../src/adapters/tsc.ts";
@@ -183,35 +183,57 @@ describe("parseTscOutput", () => {
   });
 });
 
-describe("filterToPaths", () => {
+describe("orderByPaths", () => {
   const violations: readonly Violation[] = [
-    { message: "a", file: "src/a.ts", line: 1, code: "TS1" },
+    { message: "a1", file: "src/a.ts", line: 1, code: "TS1" },
+    { message: "a2", file: "src/a.ts", line: 9, code: "TS1" },
     { message: "b", file: "src/b.ts", line: 2, code: "TS2" },
-    { message: "config", code: "TS18003" },
+    { message: "global", code: "TS2318" },
   ];
 
-  it("keeps only the changed files", () => {
-    const kept = filterToPaths(violations, ROOT, ["src/a.ts"]);
+  it("drops nothing: the selected set comes first, the rest follows", () => {
+    // The bug this replaces: a filter that kept only `src/b.ts` and so hid
+    // the errors an edit to `b.ts` caused in `a.ts`.
+    const ordered = orderByPaths(violations, ROOT, ["src/b.ts"]);
+    assert.equal(ordered.length, violations.length);
     assert.deepEqual(
-      kept.map((item) => item.file),
-      ["src/a.ts", undefined],
+      ordered.map((item) => item.message),
+      ["global", "b", "a1", "a2"],
     );
   });
 
-  it("ALWAYS keeps a file-less diagnostic", () => {
-    // A config error is a fact about the project. Dropping it because it
-    // matched no changed path would hide the very thing that makes the
-    // check meaningless.
-    const kept = filterToPaths(violations, ROOT, ["src/nothing.ts"]);
-    assert.equal(kept.length, 1);
-    assert.equal(kept[0]?.code, "TS18003");
+  it("an error in b.ts survives a run scoped to src/a.ts", () => {
+    const only = [{ message: "b", file: "src/b.ts", line: 2, code: "TS2" }];
+    assert.deepEqual(orderByPaths(only, ROOT, ["src/a.ts"]), only);
+  });
+
+  it("puts a file-less diagnostic first, ahead of the selected set", () => {
+    // A fact about the whole project, not about a file: it is what explains
+    // the errors under it, and a per-gate cap must never push it out of view.
+    const ordered = orderByPaths(violations, ROOT, ["src/a.ts"]);
+    assert.deepEqual(
+      ordered.map((item) => item.message),
+      ["global", "a1", "a2", "b"],
+    );
+  });
+
+  it("keeps the compiler's order within each group", () => {
+    const ordered = orderByPaths(violations, ROOT, ["src/nothing.ts"]);
+    assert.deepEqual(
+      ordered.map((item) => item.message),
+      ["global", "a1", "a2", "b"],
+    );
   });
 
   it("matches absolute and ./-prefixed spellings of the same path", () => {
     for (const spelling of [`${ROOT}/src/b.ts`, "./src/b.ts", "src/b.ts"]) {
-      const kept = filterToPaths(violations, ROOT, [spelling]);
-      assert.equal(kept.some((item) => item.file === "src/b.ts"), true, spelling);
+      const ordered = orderByPaths(violations, ROOT, [spelling]);
+      assert.equal(ordered[1]?.file, "src/b.ts", spelling);
     }
+  });
+
+  it("returns the list as it came when there are no paths", () => {
+    assert.equal(orderByPaths(violations, ROOT, []), violations);
   });
 });
 
@@ -306,9 +328,10 @@ describe("runTypeCheck", () => {
     }
   });
 
-  it("checks the whole program and filters the REPORT to changed files", async () => {
+  it("checks the whole program and reports every diagnostic, selected files first", async () => {
     // The invocation must stay project-wide: `tsc <file>` ignores tsconfig
     // entirely, so narrowing it would check the project under default rules.
+    // And the REPORT must stay whole too — see the next test.
     const root = project({ "tsconfig.json": "{}" });
     fakeTsc(root, CHAINED, 2);
     const outcome = await runTypeCheck({
@@ -324,8 +347,50 @@ describe("runTypeCheck", () => {
         "--project",
         "tsconfig.json",
       ]);
+      assert.deepEqual(
+        outcome.violations.map((item) => `${item.file}:${item.line}`),
+        ["src/b.ts:6", "src/a.ts:3", "src/a.ts:4"],
+      );
+    }
+  });
+
+  it("keeps the error in an UNCHANGED caller when the run is scoped to src/a.ts", async () => {
+    // The incremental-mode bug: `f(x: string)` changed in a.ts, the caller
+    // in b.ts no longer type-checks, and b.ts is not in the changed set. The
+    // old filter dropped it and the gate reported [PASS] tsc for the edit,
+    // while `tsc -p tsconfig.json` was failing.
+    const root = project({ "tsconfig.json": "{}" });
+    fakeTsc(
+      root,
+      "src/b.ts(4,28): error TS2345: Argument of type 'number' is not assignable to parameter of type 'string'.",
+      2,
+    );
+    const outcome = await runTypeCheck({
+      env: resolveProjectEnvironment(root),
+      paths: ["src/a.ts"],
+    });
+    assert.equal(outcome.ok, true);
+    if (outcome.ok) {
       assert.equal(outcome.violations.length, 1);
       assert.equal(outcome.violations[0]?.file, "src/b.ts");
+      assert.equal(outcome.violations[0]?.line, 4);
+      assert.equal(outcome.violations[0]?.column, 28);
+      assert.equal(outcome.violations[0]?.code, "TS2345");
+    }
+  });
+
+  it("keeps every diagnostic when the selected file is not TypeScript at all", async () => {
+    // `--file README.md`: nothing matches the selection, and the whole-project
+    // verdict must survive that rather than collapsing to an empty list.
+    const root = project({ "tsconfig.json": "{}" });
+    fakeTsc(root, CHAINED, 2);
+    const outcome = await runTypeCheck({
+      env: resolveProjectEnvironment(root),
+      paths: ["README.md"],
+    });
+    assert.equal(outcome.ok, true);
+    if (outcome.ok) {
+      assert.equal(outcome.violations.length, 3);
     }
   });
 
