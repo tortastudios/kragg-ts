@@ -344,3 +344,51 @@ function temporaryProject(files: Readonly<Record<string, string>>): string {
   }
   return root;
 }
+
+/**
+ * The blocks `fileComplexity` refuses to report.
+ *
+ * An overload signature and an ambient declaration are function-like nodes
+ * with NO body. There is nothing in them to measure, and reporting them at
+ * complexity 1 would pad the block list with entries a reader cannot act on —
+ * and would make an overloaded function's real implementation harder to find
+ * in the report, not easier.
+ */
+describe("fileComplexity / declarations with no body", () => {
+  it("skips overload signatures and reports only the implementation", () => {
+    const result = fileComplexity(
+      parse(
+        "export function pick(value: string): string;\n" +
+          "export function pick(value: number): number;\n" +
+          "export function pick(value: string | number): string | number {\n" +
+          "  return typeof value === 'string' ? value.trim() : value;\n" +
+          "}\n",
+      ),
+      api,
+    );
+    assert.deepEqual(
+      result.blocks.map((block) => block.name),
+      ["pick"],
+    );
+    const only = result.blocks[0];
+    assert.ok(only !== undefined);
+    assert.equal(only.line, 3, "the implementation, not the first signature");
+    // One conditional expression on top of the base of 1.
+    assert.equal(only.complexity, 2);
+  });
+
+  it("skips an ambient declaration and a bodyless class method", () => {
+    const result = fileComplexity(
+      parse(
+        "declare function ambient(a: number): void;\n" +
+          "declare class Remote { call(a: number): void; }\n" +
+          "export function real(): number { return 1; }\n",
+      ),
+      api,
+    );
+    assert.deepEqual(
+      result.blocks.map((block) => block.name),
+      ["real"],
+    );
+  });
+});

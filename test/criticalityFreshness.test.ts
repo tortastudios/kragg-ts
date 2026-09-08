@@ -28,6 +28,7 @@ import assert from "node:assert/strict";
 import {
   mkdirSync,
   mkdtempSync,
+  readFileSync,
   rmSync,
   statSync,
   utimesSync,
@@ -441,5 +442,48 @@ describe("derive-with-cache", () => {
     const root = project(FIXTURE);
     cacheFor(root).ensure();
     assert.throws(() => statSync(join(root, "CRITICALITY.md")));
+  });
+
+  it("survives a `.kragg` it cannot write, and still claims nothing", () => {
+    // A read-only checkout, reproduced by making `.kragg` un-creatable: a
+    // plain file sits where the directory would go, so `mkdirSync` fails.
+    // Every gate that does not write must still run, and — the part that
+    // matters — nothing may be stamped, because a stamp with no data behind
+    // it is exactly the false `fresh` this module exists to prevent.
+    const root = project(FIXTURE);
+    writeFileSync(join(root, ".kragg"), "not a directory");
+
+    assert.doesNotThrow(() => cacheFor(root).ensure());
+
+    assert.equal(statSync(join(root, ".kragg")).isFile(), true, "the blocker is untouched");
+    assert.equal(criticalityFreshness(root), "missing");
+    assert.deepEqual(readJson(root), []);
+  });
+});
+
+describe("writeStamp when the stamp cannot be written", () => {
+  it("swallows the write failure instead of taking the run down with it", () => {
+    // Same read-only shape as above, but on `writeStamp` directly: a stamp is
+    // an optimization, and failing to record one must never be fatal. The
+    // next run simply re-derives.
+    const root = project({ "src/a.ts": "export const a = 1;\n" });
+    writeFileSync(join(root, ".kragg"), "not a directory");
+
+    assert.doesNotThrow(() => writeStamp(root, ["src"]));
+
+    assert.equal(statSync(join(root, ".kragg")).isFile(), true);
+    // No stamp may be left behind: there is nothing for it to vouch for.
+    assert.throws(() => statSync(stampPath(root)));
+  });
+
+  it("writes the stamp normally when the directory can be created", () => {
+    const root = project({ "src/a.ts": "export const a = 1;\n" });
+    writeStamp(root, ["src"]);
+    const stamp: unknown = JSON.parse(readFileSync(stampPath(root), "utf8"));
+    assert.ok(typeof stamp === "object" && stamp !== null);
+    const record: Readonly<Record<string, unknown>> = { ...stamp };
+    assert.equal(record["version"], 1);
+    assert.deepEqual(record["scan_paths"], ["src"]);
+    assert.equal(record["files"], 1);
   });
 });

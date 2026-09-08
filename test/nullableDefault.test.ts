@@ -37,6 +37,7 @@ import {
   checkNullableDefaults,
   NULLABLE_DEFAULT_CODE,
 } from "../src/gates/nullableDefault.ts";
+import { MAX_DEPTH, unwrap } from "../src/gates/nullableDefault/finding.ts";
 
 const TSCONFIG = JSON.stringify({
   compilerOptions: {
@@ -257,5 +258,73 @@ describe("nullable-default: outcome", () => {
       return;
     }
     assert.match(outcome.message, /tsconfig\.json/);
+  });
+});
+
+/**
+ * The wrapper stripper every rule in this gate starts from.
+ *
+ * `(value)!` and `value` are the same expression at runtime, so a gate that
+ * judged the parentheses instead of the value inside them would miss the
+ * finding entirely — a false PASS, which is the one outcome this codebase
+ * refuses. The bound matters for the opposite reason: `unwrap` walks a
+ * syntactic chain whose depth an author controls, and a gate that can be
+ * hung by a pathological file stops reporting everything else.
+ */
+describe("unwrap", () => {
+  function expressionOf(code: string): ts.Expression {
+    const file = ts.createSourceFile(
+      "snippet.ts",
+      `${code};\n`,
+      ts.ScriptTarget.Latest,
+      true,
+      ts.ScriptKind.TS,
+    );
+    const statement = file.statements[0];
+    assert.ok(statement !== undefined && ts.isExpressionStatement(statement));
+    return statement.expression;
+  }
+
+  it("returns an unwrapped expression untouched", () => {
+    const expression = expressionOf("value");
+    assert.equal(unwrap(expression, ts), expression);
+    assert.equal(ts.isIdentifier(unwrap(expressionOf("a.b"), ts)), false);
+    assert.equal(ts.isPropertyAccessExpression(unwrap(expressionOf("a.b"), ts)), true);
+  });
+
+  it("strips parentheses and non-null assertions, in any mixture", () => {
+    for (const code of ["(value)", "value!", "(value!)", "((value)!)!", "(((value)))"]) {
+      const stripped = unwrap(expressionOf(code), ts);
+      assert.ok(ts.isIdentifier(stripped), `${code} should reduce to an identifier`);
+      assert.equal(stripped.text, "value");
+    }
+  });
+
+  it("does not strip a cast, which is not one of the two forms it handles", () => {
+    const stripped = unwrap(expressionOf("(value as string)"), ts);
+    assert.equal(
+      ts.isAsExpression(stripped),
+      true,
+      "the parentheses come off; the `as` inside them stays",
+    );
+  });
+
+  it("stops at MAX_DEPTH rather than following an unbounded chain", () => {
+    const depth = MAX_DEPTH + 1;
+    const stripped = unwrap(
+      expressionOf(`${"(".repeat(depth)}value${")".repeat(depth)}`),
+      ts,
+    );
+    assert.equal(
+      ts.isParenthesizedExpression(stripped),
+      true,
+      "one layer past the bound is left in place, not walked",
+    );
+    // ...and exactly at the bound the walk still finishes the job.
+    const atBound = unwrap(
+      expressionOf(`${"(".repeat(MAX_DEPTH)}value${")".repeat(MAX_DEPTH)}`),
+      ts,
+    );
+    assert.equal(ts.isIdentifier(atBound), true);
   });
 });

@@ -29,8 +29,10 @@ import {
   checkSource,
   fileHalstead,
   formatHalsteadFailure,
+  functionBlockLabel,
   halsteadMetrics,
   halsteadViolations,
+  isFunctionBlock,
   MAX_BUGS,
   MAX_DIFFICULTY,
   MAX_EFFORT,
@@ -267,5 +269,82 @@ describe("halsteadViolations", () => {
     assert.equal(violation.fixHint, "reduce operators/operands; split the function");
     assert.equal(violation.message, "add: effort 8.0 exceeds max 1.0");
     assert.equal(violation.line, 1);
+  });
+});
+
+/**
+ * The block predicate and the block name, called on the nodes themselves.
+ *
+ * These two are shared with the complexity gate so the two can never disagree
+ * about what a function IS or what it is CALLED — a disagreement that would
+ * show up as two gates reporting different identifiers for the same code.
+ * `fileHalstead` above only ever observes them through a finished report, so
+ * the accessor prefixes, the computed name and the anonymous fallback are
+ * pinned here on the node.
+ */
+describe("isFunctionBlock / functionBlockLabel", () => {
+  /** Every measurable block in the snippet, in source order, by its label. */
+  function labels(code: string): readonly string[] {
+    const found: string[] = [];
+    const visit = (node: ts.Node): void => {
+      if (isFunctionBlock(node, api)) {
+        found.push(functionBlockLabel(node, api));
+      }
+      api.forEachChild(node, visit);
+    };
+    api.forEachChild(parse(code), visit);
+    return found;
+  }
+
+  it("accepts every function-like form that has a body", () => {
+    assert.deepEqual(
+      labels(
+        "function decl() {}\n" +
+          "const expr = function named() {};\n" +
+          "const arrow = () => {};\n" +
+          "class C { constructor() {} method() {} }\n",
+      ),
+      ["decl", "named", "arrow", "constructor", "method"],
+    );
+  });
+
+  it("rejects nodes that are not function-like at all", () => {
+    const sourceFile = parse("const x = 1;\n");
+    assert.equal(isFunctionBlock(sourceFile, api), false);
+    const statement = sourceFile.statements[0];
+    assert.ok(statement !== undefined);
+    assert.equal(isFunctionBlock(statement, api), false);
+  });
+
+  it("prefixes an accessor so a getter and a setter stay distinct", () => {
+    assert.deepEqual(
+      labels("class C { get size() { return 1; } set size(v: number) { this.n = v; } }\n"),
+      ["get size", "set size"],
+    );
+  });
+
+  it("reads a quoted or numeric member name, and says `<computed>` for the rest", () => {
+    assert.deepEqual(
+      labels('const o = { "a b"() {}, 7() {}, [Symbol.iterator]() {} };\n'),
+      ["a b", "7", "<computed>"],
+    );
+  });
+
+  it("infers a name from the binding an anonymous function is attached to", () => {
+    assert.deepEqual(
+      labels(
+        "const bound = () => {};\n" +
+          "const obj = { prop: () => {} };\n" +
+          "class C { field = () => {}; }\n" +
+          "let assigned;\n" +
+          "assigned = () => {};\n" +
+          "obj.member = () => {};\n",
+      ),
+      ["bound", "prop", "field", "assigned", "member"],
+    );
+  });
+
+  it("says `<anonymous>` for a callback with no binding to borrow", () => {
+    assert.deepEqual(labels("run(() => {});\n"), ["<anonymous>"]);
   });
 });

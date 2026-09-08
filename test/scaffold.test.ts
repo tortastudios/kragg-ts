@@ -42,6 +42,7 @@ import {
   mergeJson,
   planInitialization,
   ScaffoldError,
+  writeFiles,
 } from "../src/scaffold/project.ts";
 import {
   normalizePackageName,
@@ -602,5 +603,55 @@ describe("temp fixtures", () => {
     const root = temporaryRoot();
     mkdirSync(join(root, "nested"), { recursive: true });
     assert.equal(existsSync(root), true);
+  });
+});
+
+/**
+ * The writer under every scaffold command.
+ *
+ * Two of its rules are what make `kragg init` safe to run on a project that
+ * already exists: an existing file is left alone unless the caller asked for
+ * an overwrite, and a template slot with nothing in it is skipped rather than
+ * written as the string `undefined`. `init` above only ever exercises the
+ * first; both are pinned here, because "we replaced your file" is the failure
+ * that loses work.
+ */
+describe("writeFiles", () => {
+  it("creates parent directories and returns the paths in sorted order", () => {
+    const root = temporaryRoot();
+    const written = writeFiles(
+      root,
+      {
+        "src/deep/nested/mod.ts": "export const a = 1;\n",
+        "README.md": "# demo\n",
+      },
+      false,
+    );
+    assert.deepEqual(written, [join(root, "README.md"), join(root, "src/deep/nested/mod.ts")]);
+    assert.equal(readFileSync(join(root, "src/deep/nested/mod.ts"), "utf8"), "export const a = 1;\n");
+  });
+
+  it("leaves an existing file alone unless the caller asked for an overwrite", () => {
+    const root = temporaryRoot();
+    writeFileSync(join(root, "keep.txt"), "mine");
+
+    assert.deepEqual(writeFiles(root, { "keep.txt": "theirs" }, false), []);
+    assert.equal(readFileSync(join(root, "keep.txt"), "utf8"), "mine");
+
+    assert.deepEqual(writeFiles(root, { "keep.txt": "theirs" }, true), [join(root, "keep.txt")]);
+    assert.equal(readFileSync(join(root, "keep.txt"), "utf8"), "theirs");
+  });
+
+  it("skips a slot with no contents instead of writing the word `undefined`", () => {
+    const root = temporaryRoot();
+    // The record reaching this function is assembled from template parts, so a
+    // key really can survive with nothing behind it. `Object.assign` is how
+    // that shape is produced here without weakening the parameter's type.
+    const files: Record<string, string> = { "keep.ts": "export const a = 1;\n" };
+    Object.assign(files, { "gap.ts": undefined });
+    assert.deepEqual(Object.keys(files).sort(), ["gap.ts", "keep.ts"]);
+
+    assert.deepEqual(writeFiles(root, files, true), [join(root, "keep.ts")]);
+    assert.equal(existsSync(join(root, "gap.ts")), false, "an empty slot must not become a file");
   });
 });

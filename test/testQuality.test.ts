@@ -28,6 +28,7 @@ import ts from "typescript";
 
 import type { Violation } from "../src/engine/models.ts";
 import { writeStamp } from "../src/gates/criticality.ts";
+import { calleeChain, type CalleeChain } from "../src/gates/testDepth/testCases.ts";
 import {
   checkTestQuality,
   CRITICAL_UNTESTED_CODE,
@@ -376,5 +377,74 @@ describe("test-quality: when it cannot run", () => {
       assert.match(outcome.reason, /no test files found/);
       assert.match(outcome.reason, /test, tests/);
     }
+  });
+});
+
+/**
+ * The callee reducer that decides what a test call even IS.
+ *
+ * Everything above reaches `calleeChain` through `findTestCases`, which can
+ * only show the shapes that survive as test cases. The shapes that must NOT
+ * become one are just as load-bearing: a call on a computed member the gate
+ * cannot name, or on a literal, is not a runner entry point, and inventing a
+ * head for it would conjure test cases that do not exist — the opposite of
+ * what a test-quality gate is for.
+ */
+describe("calleeChain", () => {
+  /** Reduce the expression `code` denotes, as a callee would be reduced. */
+  function chainOf(code: string): CalleeChain | null {
+    const source = ts.createSourceFile(
+      "snippet.ts",
+      `${code};\n`,
+      ts.ScriptTarget.Latest,
+      true,
+      ts.ScriptKind.TS,
+    );
+    const statement = source.statements[0];
+    assert.ok(statement !== undefined && ts.isExpressionStatement(statement));
+    return calleeChain(statement.expression, ts);
+  }
+
+  it("reduces a bare identifier to a head with no modifiers", () => {
+    assert.deepEqual(chainOf("it"), { head: "it", props: [] });
+  });
+
+  it("keeps the property chain outermost last", () => {
+    assert.deepEqual(chainOf("it.concurrent.skip"), {
+      head: "it",
+      props: ["concurrent", "skip"],
+    });
+  });
+
+  it("reads a string-keyed element access as the property it names", () => {
+    assert.deepEqual(chainOf('it["skip"]'), { head: "it", props: ["skip"] });
+    assert.deepEqual(chainOf("it[`todo`]"), { head: "it", props: ["todo"] });
+    assert.deepEqual(chainOf('it["skip"].each'), {
+      head: "it",
+      props: ["skip", "each"],
+    });
+  });
+
+  it("refuses an element access whose key is not a literal", () => {
+    assert.equal(
+      chainOf("it[modifier]"),
+      null,
+      "a computed modifier could be anything; guessing would invent a test",
+    );
+    assert.equal(chainOf("it[0]"), null);
+  });
+
+  it("strips the layers that carry no name of their own", () => {
+    assert.deepEqual(chainOf("it.each([1, 2])"), { head: "it", props: ["each"] });
+    assert.deepEqual(chainOf("it.each`a`"), { head: "it", props: ["each"] });
+    assert.deepEqual(chainOf("(it.skip)"), { head: "it", props: ["skip"] });
+    assert.deepEqual(chainOf("it.skip!"), { head: "it", props: ["skip"] });
+    assert.deepEqual(chainOf("(it as Runner).skip"), { head: "it", props: ["skip"] });
+  });
+
+  it("gives up on a root that is not a plain identifier", () => {
+    assert.equal(chainOf("this.it"), null);
+    assert.equal(chainOf('"it".valueOf'), null);
+    assert.equal(chainOf("runners[0].it"), null);
   });
 });

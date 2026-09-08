@@ -29,7 +29,10 @@ import { after, describe, it } from "node:test";
 
 import ts from "typescript";
 
-import { criticalFunctions } from "../src/gates/testDepth/criticalFunctions.ts";
+import {
+  criticalFunctions,
+  simpleName,
+} from "../src/gates/testDepth/criticalFunctions.ts";
 
 const temporaryRoots: string[] = [];
 
@@ -372,5 +375,38 @@ describe("criticalFunctions", () => {
       },
     );
     assert.deepEqual(qualnames(root), ["src/good#fn"]);
+  });
+});
+
+/**
+ * The name a test and a coverage report actually spell.
+ *
+ * `criticality.json` records `src/a#Client.send`; istanbul's `fnMap` records
+ * `send`, and a test that exercises it writes `send`. Everything the three
+ * test-depth gates do — the substring search, the coverage match, the fix
+ * hint — is keyed on this reduction, so a wrong answer here does not fail
+ * loudly, it silently stops matching and every gate quietly checks less.
+ */
+describe("simpleName", () => {
+  it("keeps a free function's own name", () => {
+    assert.equal(simpleName("src/gates/criticality#buildCallGraph"), "buildCallGraph");
+  });
+
+  it("drops the qualifiers a report does not carry", () => {
+    assert.equal(simpleName("src/engine/gate#Pipeline.run"), "run");
+    assert.equal(simpleName("src/a#Outer.Inner.deep"), "deep");
+  });
+
+  it("strips the accessor prefix, which nothing downstream spells", () => {
+    // `criticality.ts` writes `get token`/`set token` to keep a getter and a
+    // setter distinct; neither a test nor a coverage report ever writes that.
+    assert.equal(simpleName("src/a#Client.get token"), "token");
+    assert.equal(simpleName("src/a#Client.set token"), "token");
+  });
+
+  it("handles a name that carries no module at all", () => {
+    // What the PYTHON sibling writes, in a repo where both share the file.
+    assert.equal(simpleName("build_call_graph"), "build_call_graph");
+    assert.equal(simpleName(""), "");
   });
 });
