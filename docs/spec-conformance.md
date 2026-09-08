@@ -187,6 +187,9 @@ naively will flag every one of them. They are enumerated with their evidence in
 | `secret_name_suffixes` includes `ServiceKey` | Python's default list lacks `_service_key`. Listed in KNOWN_LIMITATIONS as a Python gap found during the port. |
 | criticality freshness | kragg-ts refuses stale data via the sidecar stamp; Python consumes a stale `criticality.json` as if current. The *file* is identical; the trust decision is not. |
 | module naming in the syntax tier | kragg-ts names modules relative to the repo root, Python relative to the package root, because a TypeScript relative specifier is a filesystem path and a Python one is not. |
+| `criticality --write --path` is exit 2 | Python writes whatever the scoped analysis produced. A partial `.kragg/criticality.json` is not read as partial: `critical-tests` and `critical-coverage` would treat every function outside the scope as uncritical. Refusing keeps the file whole-project by construction. |
+| `check --file` with `--changed`/`--since` is exit 2 | Python's `_check_targets` takes the git branch first and drops `--file` on the floor. Same file set either way; kragg-ts declines to guess which one the caller meant. |
+| `check` with an empty `--changed` set under `--format json` | Python prints `no changed Python files` in both formats. kragg-ts prints that only for text and emits the ordinary payload with `gates: []` for JSON, so every `--format json` path is parseable. No key is added, and the text path is byte-identical apart from the language name. |
 
 Four defects found in the Python implementation during the port are recorded in
 [KNOWN_LIMITATIONS.md](../KNOWN_LIMITATIONS.md#found-in-the-python-implementation-during-this-port).

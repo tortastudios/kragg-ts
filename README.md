@@ -234,6 +234,8 @@ Deliberate, and documented at each site:
 | `detect-secrets` | Bundles no scanner. gitleaks, else secretlint, else a visible skip. |
 | `audit` | knip, which covers both vulture (dead code) and deptry (dependency hygiene). |
 | criticality | Fingerprinted by a sidecar stamp, so stale call-graph data is re-derived rather than trusted. `criticality.json` itself stays byte-compatible with Python's reader. |
+| `criticality --path` | Scopes the printed table only. Combined with `--write` it is a usage error, where Python persists the scoped result — a partial `criticality.json` reads downstream as "everything else is uncritical". |
+| `check --file` with `--changed`/`--since` | A usage error. Python silently prefers git's file set and discards the explicit list. |
 | `secret_name_suffixes` | Includes `ServiceKey`, which Python's default list lacks. |
 
 ## Supply chain

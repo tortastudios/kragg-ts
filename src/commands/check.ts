@@ -67,10 +67,7 @@ export async function runCheck(flags: CheckFlags): Promise<number> {
     return EXIT_ENVIRONMENT;
   }
   if (scope.mode !== "full" && scope.targets.length === 0) {
-    // Nothing to check is a clean run, not a vacuous pass over the project:
-    // say what happened so nobody reads it as "the whole repo is green".
-    process.stdout.write("no changed TypeScript files\n");
-    return EXIT_OK;
+    return await emptySelection(flags, policy, scope.mode);
   }
   const specs = buildCheckGates({
     root: flags.root,
@@ -82,6 +79,44 @@ export async function runCheck(flags: CheckFlags): Promise<number> {
     since: flags.since,
   });
   return runPipeline({ command: "check", mode: scope.mode, policy, specs, flags, targets: scope.targets });
+}
+
+/**
+ * Report a run that had nothing in scope — a clean run, not a vacuous pass
+ * over the project.
+ *
+ * The text form says so in words, so nobody reads it as "the whole repo is
+ * green". `--format json` USED TO PRINT THAT SAME SENTENCE, which is not
+ * JSON: every caller that asked for a machine format got a parse error on the
+ * one path where the answer is "nothing to do", and the exit code (0) told
+ * them the run had succeeded. So the JSON form is the ordinary report payload
+ * with an empty gate list — same schema, same keys, `mode: "changed"`,
+ * `targets: []`, every summary count 0 — which is exactly what happened.
+ *
+ * NOT JOURNALED, in either format. A run that assembled no gates is not a run
+ * `kragg status` should show a verdict for, and making that depend on
+ * `--format` would give the two formats different side effects.
+ */
+async function emptySelection(
+  flags: CheckFlags,
+  policy: KraggPolicy,
+  mode: string,
+): Promise<number> {
+  if (flags.format !== "json") {
+    process.stdout.write("no changed TypeScript files\n");
+    return EXIT_OK;
+  }
+  const report = buildReport({
+    command: "check",
+    mode,
+    targets: [],
+    results: [],
+    maxViolations: flags.maxViolations ?? policy.maxViolationsPerGate,
+    startedAt: utcNow(),
+    gitSha: await gitSha(flags.root),
+  });
+  process.stdout.write(`${renderJson(report)}\n`);
+  return reportExitCode(report);
 }
 
 /** What one invocation is scoped to. */

@@ -16,12 +16,20 @@
  */
 
 import assert from "node:assert/strict";
-import { mkdirSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from "node:fs";
+import {
+  existsSync,
+  mkdirSync,
+  mkdtempSync,
+  readFileSync,
+  rmSync,
+  writeFileSync,
+} from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { after, describe, it } from "node:test";
 
 import { runPipeline } from "../src/commands/check.ts";
+import { runCriticality } from "../src/commands/criticality.ts";
 import { runDoctor } from "../src/commands/doctor.ts";
 import { runPolicyShow } from "../src/commands/policyShow.ts";
 import { runStatus } from "../src/commands/status.ts";
@@ -32,7 +40,9 @@ import {
   EXIT_ENVIRONMENT,
   EXIT_GATE_FAILURES,
   EXIT_OK,
+  EXIT_USAGE,
 } from "../src/engine/report.ts";
+import { criticalityFreshness, criticalityPath } from "../src/gates/criticality.ts";
 import { DEFAULT_POLICY } from "../src/policy/policy.ts";
 
 const roots: string[] = [];
@@ -273,5 +283,103 @@ describe("runDoctor", () => {
     assert.match(result.out, /package.json: ok/);
     assert.match(result.out, /source path: ok/);
     assert.match(result.out, /test path: ok/);
+  });
+});
+
+describe("runCriticality: --path", () => {
+  // `--path` was in the CLI's accepted-flag table and read by nothing, so
+  // `kragg criticality --path anything` analyzed the whole program and said
+  // so in a table that looked exactly like a scoped one.
+  const CRITICALITY_TSCONFIG = JSON.stringify({
+    compilerOptions: {
+      target: "es2022",
+      module: "nodenext",
+      moduleResolution: "nodenext",
+      strict: true,
+      allowImportingTsExtensions: true,
+      noEmit: true,
+    },
+    include: ["src/**/*.ts"],
+  });
+
+  /** Two source files, so a scope can include one and exclude the other. */
+  function twoFileProject(): string {
+    const root = project({ "tsconfig.json": CRITICALITY_TSCONFIG });
+    mkdirSync(join(root, "src"));
+    writeFileSync(join(root, "src", "alpha.ts"), "export function alpha(): number {\n  return 1;\n}\n");
+    writeFileSync(
+      join(root, "src", "beta.ts"),
+      'import { alpha } from "./alpha.ts";\n\nexport function beta(): number {\n  return alpha();\n}\n',
+    );
+    return root;
+  }
+
+  interface Run {
+    readonly code: number;
+    readonly out: string;
+    readonly err: string;
+  }
+
+  /** Drive the handler with its own log hooks — no stdout capture needed. */
+  function criticality(root: string, options: { write?: boolean; paths?: string[] }): Run {
+    const out: string[] = [];
+    const err: string[] = [];
+    const code = runCriticality({
+      root,
+      write: options.write ?? false,
+      paths: options.paths ?? [],
+      log: (line) => out.push(line),
+      logError: (line) => err.push(line),
+    });
+    return { code, out: out.join("\n"), err: err.join("\n") };
+  }
+
+  it("analyzes the whole program when no path is given", () => {
+    const result = criticality(twoFileProject(), {});
+    assert.equal(result.code, EXIT_OK);
+    assert.match(result.out, /src\/alpha#alpha/);
+    assert.match(result.out, /src\/beta#beta/);
+  });
+
+  it("narrows the call graph to the files under the path", () => {
+    const result = criticality(twoFileProject(), { paths: ["src/beta.ts"] });
+    assert.equal(result.code, EXIT_OK);
+    assert.match(result.out, /src\/beta#beta/);
+    assert.doesNotMatch(result.out, /src\/alpha#alpha/);
+  });
+
+  it("takes several paths, and reads them relative to the root", () => {
+    const root = twoFileProject();
+    const result = criticality(root, { paths: [join(root, "src", "alpha.ts"), "src/beta.ts"] });
+    assert.equal(result.code, EXIT_OK);
+    assert.match(result.out, /src\/alpha#alpha/);
+    assert.match(result.out, /src\/beta#beta/);
+  });
+
+  it("is a usage error when the path matches nothing, not an empty table", () => {
+    // An empty table exits 0 and reads exactly like "this code has no risk".
+    const result = criticality(twoFileProject(), { paths: ["src/gamma.ts"] });
+    assert.equal(result.code, EXIT_USAGE);
+    assert.match(result.err, /--path matched no analyzed source file: src\/gamma\.ts/);
+    assert.equal(result.out, "");
+  });
+
+  it("refuses to WRITE a scoped report, and writes nothing at all", () => {
+    // A partial critical set is not read as partial downstream: every function
+    // outside the scope simply stops being critical, and two gates go quiet.
+    const root = twoFileProject();
+    const result = criticality(root, { write: true, paths: ["src/beta.ts"] });
+    assert.equal(result.code, EXIT_USAGE);
+    assert.match(result.err, /--write cannot be combined with --path/);
+    assert.equal(existsSync(criticalityPath(root)), false);
+    assert.equal(existsSync(join(root, "CRITICALITY.md")), false);
+  });
+
+  it("still writes the full report when no path narrows it", () => {
+    const root = twoFileProject();
+    const result = criticality(root, { write: true });
+    assert.equal(result.code, EXIT_OK);
+    assert.match(result.out, /Wrote /);
+    assert.equal(criticalityFreshness(root), "fresh");
   });
 });
