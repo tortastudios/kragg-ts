@@ -23,6 +23,7 @@ import {
   loadPolicy,
   policyAsDict,
   PolicyError,
+  type CriticalDeclaration,
   type ForbiddenCall,
 } from "../src/policy/policy.ts";
 
@@ -405,6 +406,83 @@ describe("loadPolicy: forbidden_calls is fail-closed", () => {
   });
 });
 
+describe("loadPolicy: critical_functions requires a reviewed reason", () => {
+  function declared(value: unknown): readonly CriticalDeclaration[] {
+    return loadPolicy(configured({ critical_functions: value })).criticalFunctions;
+  }
+
+  it("reads name/reason pairs, sorted by name", () => {
+    assert.deepEqual(
+      declared({
+        "src/billing/charge#capture": "moves money",
+        "src/auth/login#verifyPassword": "authorization entrypoint",
+      }),
+      [
+        ["src/auth/login#verifyPassword", "authorization entrypoint"],
+        ["src/billing/charge#capture", "moves money"],
+      ],
+    );
+  });
+
+  it("treats an empty object as an explicit empty list", () => {
+    assert.deepEqual(declared({}), []);
+    assert.deepEqual(loadPolicy(project({})).criticalFunctions, []);
+  });
+
+  it("REJECTS a declaration with no usable reason", () => {
+    // A declaration says a HUMAN decided this function is high-consequence.
+    // Without the reason there is nothing for the next reviewer to check, so
+    // an empty or non-string reason is rejected by name rather than repaired
+    // to "" the way a `forbidden_calls` hint may be omitted.
+    for (const reason of ["", "   ", 1, null, true, ["why"], {}]) {
+      assert.throws(
+        () => declared({ "src/a#f": reason }),
+        {
+          name: "PolicyError",
+          message:
+            /kragg\.json#critical_functions\["src\/a#f"\] must be a non-empty string saying why/u,
+        },
+        `reason ${JSON.stringify(reason)} must be rejected`,
+      );
+    }
+  });
+
+  it("REJECTS a name that is not in `module#function` form", () => {
+    // A bare name can never match a call-graph node, so it would be reported
+    // as a stale declaration on every run. Catch the typo at load time.
+    for (const name of ["verifyPassword", "#verifyPassword", "src/auth/login#"]) {
+      assert.throws(
+        () => declared({ [name]: "authorization" }),
+        {
+          name: "PolicyError",
+          message: /must be named "<module>#<function>"/u,
+        },
+        `name ${JSON.stringify(name)} must be rejected`,
+      );
+    }
+  });
+
+  it("rejects a list: there is nowhere in one to put the reason", () => {
+    for (const value of [["src/a#f"], "src/a#f", 42, null, true]) {
+      assert.throws(
+        () => declared(value),
+        {
+          name: "PolicyError",
+          message:
+            /kragg\.json#critical_functions must be an object of "module#function" to the reason/u,
+        },
+        `value ${JSON.stringify(value)}`,
+      );
+    }
+  });
+
+  it("keeps a declaration whose key collides with an Object.prototype member", () => {
+    assert.deepEqual(declared({ "src/a#constructor": "builds it" }), [
+      ["src/a#constructor", "builds it"],
+    ]);
+  });
+});
+
 describe("policyAsDict", () => {
   it("emits snake_case keys in the Python dataclass field order", () => {
     assert.deepEqual(Object.keys(policyAsDict(DEFAULT_POLICY)), [
@@ -425,6 +503,7 @@ describe("policyAsDict", () => {
       "secret_name_suffixes",
       // TypeScript-only tail: no Python counterpart, so it sorts last and the
       // shared prefix above still diffs key-for-key against `as_dict()`.
+      "critical_functions",
       "lint_tool",
       "test_runner",
       "secret_scanner",

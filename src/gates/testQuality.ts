@@ -47,8 +47,13 @@ import {
 import type { Violation } from "../engine/models.ts";
 import { suppressed } from "../util/suppress.ts";
 import { assertionContext, hasAssertion } from "./testDepth/assertions.ts";
-import { publicCriticalNames, simpleName } from "./testDepth/criticalFunctions.ts";
-import { ran, skipped, type TestDepthOutcome } from "./testDepth/outcome.ts";
+import {
+  criticalFunctions,
+  declarationProblem,
+  hasCriticalityData,
+  simpleName,
+} from "./testDepth/criticalFunctions.ts";
+import { failed, ran, skipped, type TestDepthOutcome } from "./testDepth/outcome.ts";
 import { findTestCases } from "./testDepth/testCases.ts";
 
 /** `Violation.code` for a test case with no assertion. */
@@ -90,6 +95,13 @@ export function checkTestQuality(options: TestQualityOptions): TestDepthOutcome 
     return skipped(
       `no test files found (looked in ${options.testPaths.join(", ")})`,
     );
+  }
+  // Same rule as `critical-tests`: a `critical_functions` entry that matches
+  // no analysed function is a lost protection, and this gate is one of the
+  // three that would otherwise quietly stop enforcing it.
+  const stale = hasCriticalityData(options.root) ? declarationProblem(options.root) : null;
+  if (stale !== null) {
+    return failed(stale);
   }
   return ran([
     ...assertionViolations(sources, api),
@@ -149,17 +161,21 @@ function referenceViolations(
   if (sourcePaths.length === 0) {
     return [];
   }
-  const critical = publicCriticalNames(root, sourcePaths, api);
+  const critical = criticalFunctions(root, sourcePaths, { api });
   if (critical.length === 0) {
     return [];
   }
   const corpus = sources.map((source) => source.lines.join("\n")).join("\n");
   const violations: Violation[] = [];
-  for (const qualname of critical) {
+  for (const { qualname, declaredReason } of critical) {
     const simple = simpleName(qualname);
     if (simple !== "" && !corpus.includes(simple)) {
+      // A declared function is named with the reviewer's reason: this gate's
+      // finding is "nobody tests the authorization entrypoint", and saying so
+      // is the difference between a fix and a suppression.
+      const why = declaredReason === undefined ? "" : ` (declared: ${declaredReason})`;
       violations.push({
-        message: `no test references critical function ${qualname}`,
+        message: `no test references critical function ${qualname}${why}`,
         code: CRITICAL_UNTESTED_CODE,
         fixHint: `add a test exercising ${simple} directly`,
       });

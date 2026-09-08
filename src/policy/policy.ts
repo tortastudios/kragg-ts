@@ -44,6 +44,7 @@
 import { join } from "node:path";
 
 import {
+  getCriticalDeclarations,
   getEnum,
   getInt,
   getOptionalString,
@@ -67,8 +68,29 @@ import {
  */
 export { PolicyError } from "./readers.ts";
 
+/**
+ * The "did you mean" helper, re-exported for the one consumer outside this
+ * directory: `gates/criticality/declared.ts`, which asks the same question of
+ * a `critical_functions` entry that names no function in the program.
+ */
+export { nearestName } from "./readers.ts";
+
 /** One `[callExpression, whyItIsBannedAndWhatToUseInstead]` entry. */
 export type ForbiddenCall = readonly [entry: string, fixHint: string];
+
+/**
+ * One reviewed critical-function declaration:
+ * `["<module>#<qualified.name>", "why it is critical"]`.
+ *
+ * The name is the same `module#name` the call graph and
+ * `.kragg/criticality.json` use. The reason is REQUIRED and is shown wherever
+ * the function is named — the report, the table and the violation messages —
+ * because a manual override that cannot be explained is one nobody can review.
+ */
+export type CriticalDeclaration = readonly [name: string, reason: string];
+
+/** Every reviewed declaration a project made, sorted by name. */
+export type CriticalDeclarations = readonly CriticalDeclaration[];
 
 /**
  * Tool-selection vocabularies.
@@ -123,6 +145,17 @@ export interface KraggPolicy {
   readonly mutationExclude: readonly string[];
   /** Banned call targets, each with the hint that says what to use instead. */
   readonly forbiddenCalls: readonly ForbiddenCall[];
+  /**
+   * Functions a REVIEWER declared critical, each with the reason.
+   *
+   * Additive to the call-graph selection and never subtractive: a declaration
+   * makes a function critical, and nothing here can make an automatically
+   * critical function stop being one. It exists for the consequential
+   * function the graph cannot see — an authorization or payment entrypoint
+   * with one caller has low fan-in and no betweenness, and is exactly where a
+   * missing test costs the most.
+   */
+  readonly criticalFunctions: CriticalDeclarations;
   /**
    * Identifier suffixes that mark a binding as holding a secret. A secret
    * given a fallback default never fails loudly — it runs unconfigured and
@@ -180,6 +213,13 @@ export const DEFAULT_POLICY: KraggPolicy = {
   mutationInclude: [],
   mutationExclude: [],
   forbiddenCalls: [],
+  /**
+   * NO PYTHON COUNTERPART, and empty by default: every critical function is
+   * one the call graph found until a reviewer says otherwise. See
+   * `docs/spec-conformance.md` for what an implementation that does not know
+   * this key reads out of a sidecar written with one.
+   */
+  criticalFunctions: [],
   /**
    * DIVERGES from Python's `("_secret", "_token", ...)` in CASING ONLY: the
    * suffixes exist to match the tail of an identifier, and JavaScript
@@ -271,7 +311,10 @@ type PolicyBudgets = Pick<
 >;
 
 /** The settings that enumerate what a gate looks FOR. */
-type PolicyRules = Pick<KraggPolicy, "forbiddenCalls" | "secretNameSuffixes" | "secretBaseline">;
+type PolicyRules = Pick<
+  KraggPolicy,
+  "forbiddenCalls" | "criticalFunctions" | "secretNameSuffixes" | "secretBaseline"
+>;
 
 /** Which external tool each gate drives, and how strict it is. */
 type PolicyTools = Pick<
@@ -327,6 +370,11 @@ function readRules(source: Source): PolicyRules {
   const base = DEFAULT_POLICY;
   return {
     forbiddenCalls: getStringPairs(source, "forbidden_calls", base.forbiddenCalls),
+    criticalFunctions: getCriticalDeclarations(
+      source,
+      "critical_functions",
+      base.criticalFunctions,
+    ),
     secretNameSuffixes: getStringList(source, "secret_name_suffixes", base.secretNameSuffixes),
     secretBaseline: getOptionalString(source, "secret_baseline", base.secretBaseline),
   };
@@ -372,8 +420,14 @@ export function policyAsDict(policy: KraggPolicy): Record<string, unknown> {
     forbidden_calls: policy.forbiddenCalls.map(([entry, hint]) => [entry, hint]),
     secret_name_suffixes: [...policy.secretNameSuffixes],
     // TypeScript-only tail: these settings have no Python counterpart (they
-    // name JavaScript tools), so they sort AFTER every shared field. A
-    // conformance diff can therefore compare the common prefix key-for-key.
+    // name JavaScript tools, or a rule Python does not have), so they sort
+    // AFTER every shared field. A conformance diff can therefore compare the
+    // common prefix key-for-key.
+    //
+    // An OBJECT, not the pair list `forbidden_calls` serializes to: there is
+    // no Python `asdict` to match here, and printing it in the shape it is
+    // written in is what makes `policy show` answer "what did I declare".
+    critical_functions: Object.fromEntries(policy.criticalFunctions),
     lint_tool: policy.lintTool,
     test_runner: policy.testRunner,
     secret_scanner: policy.secretScanner,

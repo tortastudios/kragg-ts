@@ -101,7 +101,7 @@ failed task, not a judgement call.
 
 ## Project Map
 
-174 modules under `src/`, listed top-down in the order `kragg.json`'s
+176 modules under `src/`, listed top-down in the order `kragg.json`'s
 `layers` declares — a module may import its own layer or a lower one, never a
 higher one, and the `boundaries` gate enforces that on this repo.
 
@@ -142,7 +142,8 @@ higher one, and the `boundaries` gate enforces that on this repo.
 - `src/gates/` — the built-in checks. A directory per gate large enough to
   split: `architecture/` (layers, structure, aliases, barrels, star exports),
   `complexity/` (cyclomatic, maintainability, lines, grades), `criticality/`
-  (register, graph, profile, report, scope, freshness), `forbiddenCalls/`
+  (register, graph, profile, report, scope, freshness, declared),
+  `forbiddenCalls/`
   (scan, resolver, symbols, rules, declarationPath), `halstead/` (walk,
   partition, metrics, blocks, report), `nullableDefault/`, `secretDefault/`,
   `secrets/` (gitleaks, secretlint, lookup), `testDepth/` (shared by the
@@ -193,7 +194,7 @@ higher one, and the `boundaries` gate enforces that on this repo.
   - `journal.ts` — `.kragg/history.jsonl`, append-only.
   - `runner.ts` — the only approved external-command wrapper, and the one
     legitimate `node:child_process` import in the repo.
-- `test/` — 50 test files using `node:test`, flat, plus `test/fixtures/`
+- `test/` — 53 test files using `node:test`, flat, plus `test/fixtures/`
   and one non-test helper, `conformanceContract.ts`. `conformance.test.ts`
   drives the versioned fixtures under `test/fixtures/conformance/` that pin
   the cross-language contract; see `docs/spec-conformance.md`.

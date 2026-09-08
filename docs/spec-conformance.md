@@ -214,6 +214,15 @@ it does open is unchanged. See
 [`src/gates/criticality/freshness.ts`](../src/gates/criticality/freshness.ts)
 for the full argument and the two known gaps in the fingerprint.
 
+**Reviewed declarations do not change that file's shape either.** A
+`critical_functions` entry in the policy (kragg-ts only, divergence 29) makes a
+function critical that the thresholds did not select, and it appears here as an
+ordinary record whose `is_critical` is `true` — no seventh key, no second file.
+The reviewer's REASON is never stored: it is re-derived from `kragg.json`
+wherever it is shown, which keeps the record shape frozen and makes it
+impossible for the stored flag to disagree with the policy. Python's `read_json`
+therefore reads such a file exactly as it reads its own.
+
 The numbers are the contract. `betweenness` is normalized betweenness
 centrality to 4 decimal places (kragg-ts reproduces networkx's algorithm; a
 Python `0.0` and a TypeScript `0` are the same number). Records are sorted by
@@ -344,7 +353,7 @@ A conformance runner must not flag these; a suite that diffs the two
 implementations naively will flag every one. Rows 1–9 are this repository's
 original table, re-verified against both trees while the spec was written; rows
 10–12 were added by that verification and are also SPEC.md section 10's rows
-10–12; rows 13–28 were introduced by TOR-1358, TOR-1363, TOR-1361, TOR-1369, TOR-1375, TOR-1364 and TOR-1365 on this branch. Fixtures that exercise a row carry a `divergences` entry naming its id.
+10–12; rows 13–29 were introduced by TOR-1358, TOR-1363, TOR-1361, TOR-1369, TOR-1375, TOR-1364, TOR-1365 and TOR-1374 on this branch. Fixtures that exercise a row carry a `divergences` entry naming its id.
 
 | # | Divergence | Why it is intentional |
 | --- | --- | --- |
@@ -376,6 +385,7 @@ original table, re-verified against both trees while the spec was written; rows
 | 26 | a change set whose only source change is a **deletion** is likewise a FULL run | Both implementations drop deletions from the selection (a deleted file cannot be checked), which turned "the module half the tree imports is gone" into an empty selection and exit 0. A deleted file is still never handed to a per-file tool; it just stops being mistaken for "nothing changed". |
 | 27 | `check --file <path that does not exist>` is exit 2, naming the path | Python runs the pipeline over a selection that matches nothing, which reads as a clean pass: the linter errors about *itself* finding no files while every path-aware gate prints a `[PASS]` over zero files. `targets` for a path that DOES exist is unchanged — including a directory, which stays verbatim on the wire and is expanded only into the internal narrowing. |
 | 28 | git plumbing runs with `-z`; a git failure carries git's message | Python reads `git diff --name-only` with `core.quotePath` on, so `src/café.ts` arrives as `"src/caf\303\251.ts"`, fails the existence check and leaves the selection silently. It also treats any non-zero git exit as an empty diff, so a repository with no commit yet (`git diff HEAD` has no HEAD) reports only untracked files. kragg-ts parses NUL-separated records and reports a git failure as exit 3 with git's own diagnostic. |
+| 29 | reviewed `critical_functions` declarations make a function critical | Python has no such setting: its `is_critical` is `fan_in >= 3 or betweenness >= 0.1` and nothing else. A declaration is ADDITIVE (it never demotes a graph-selected function) and reaches the sidecar as an ordinary record with `is_critical: true` — **no key is added** to the six-key record shape, and the reason is re-derived from the policy wherever it is shown, never stored. Python's reader therefore consumes such a file unchanged; the only observable difference is that one more record says `true` than Python's own thresholds would produce, in a repo whose `kragg.json` says so. A declaration that matches no analysed function is exit 3 from `kragg criticality` and `error: true` from the three gates, so a rename cannot silently drop the protection. Fixtures declare nothing, so every golden is unaffected. |
 
 Four defects found in the Python implementation during the port are recorded in
 [KNOWN_LIMITATIONS.md](../KNOWN_LIMITATIONS.md#found-in-the-python-implementation-during-this-port).

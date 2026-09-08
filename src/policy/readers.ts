@@ -25,7 +25,7 @@
 
 import { readFileSync } from "node:fs";
 
-import type { ForbiddenCall } from "./policy.ts";
+import type { CriticalDeclaration, CriticalDeclarations, ForbiddenCall } from "./policy.ts";
 
 /** A parsed JSON object. Values are `unknown` until narrowed. */
 export type Table = Readonly<Record<string, unknown>>;
@@ -308,11 +308,69 @@ export function getStringPairs(
   return reject(source, key, "an object of banned call to fix hint, or a list of strings", value);
 }
 
-function sortPairs(pairs: readonly ForbiddenCall[]): readonly ForbiddenCall[] {
-  return [...pairs].sort((left, right) => compare(left, right));
+/**
+ * Read `{ "<module>#<name>": "<why it is critical>" }` — reviewed critical
+ * function declarations.
+ *
+ * AN OBJECT, AND ONLY AN OBJECT. `getStringPairs` accepts a bare list because
+ * a `forbidden_calls` entry means something without a hint: the ban stands and
+ * the hint is a courtesy. A declaration without a reason means nothing anybody
+ * can review — the whole point of the setting is that a HUMAN decided this
+ * low-fan-in function is high-consequence, and the reason is that decision.
+ * So a list is rejected with the shape that carries one, and an empty or
+ * non-string reason is rejected by name rather than repaired to `""`.
+ *
+ * THE NAME IS CHECKED FOR SHAPE, not for existence. `criticality.ts` names
+ * every node `"<module>#<qualified.name>"`, so a name with no `#`, or with an
+ * empty half, can never match anything and is a typo worth catching at load
+ * time. Whether the function EXISTS is a question about the analysed program,
+ * not about the config, and `gates/criticality/declared.ts` answers it — a
+ * declaration that matches no function is an error there, so a rename cannot
+ * silently drop the protection.
+ *
+ * Sorted by name, then reason, exactly like {@link getStringPairs}, so
+ * `kragg policy show` is stable regardless of key order in the file.
+ */
+export function getCriticalDeclarations(
+  source: Source,
+  key: string,
+  fallback: CriticalDeclarations,
+): CriticalDeclarations {
+  const value = take(source, key);
+  if (value === undefined) {
+    return fallback;
+  }
+  if (!isTable(value)) {
+    return reject(source, key, "an object of \"module#function\" to the reason it is critical", value);
+  }
+  const declarations = Object.entries(value).map(([name, reason]): CriticalDeclaration => {
+    const at = `${key}[${JSON.stringify(name)}]`;
+    if (typeof reason !== "string" || reason.trim() === "") {
+      return reject(source, at, "a non-empty string saying why the function is critical", reason);
+    }
+    if (!isQualifiedName(name)) {
+      return reject(source, at, "named \"<module>#<function>\", e.g. \"src/auth/login#verifyPassword\"", name);
+    }
+    return [name, reason];
+  });
+  return [...declarations].sort((left, right) => comparePair(left, right));
 }
 
-function compare(left: ForbiddenCall, right: ForbiddenCall): number {
+/** `"<module>#<name>"` with both halves non-empty, and exactly one `#` split. */
+function isQualifiedName(name: string): boolean {
+  const index = name.indexOf("#");
+  return index > 0 && index < name.length - 1;
+}
+
+function sortPairs(pairs: readonly ForbiddenCall[]): readonly ForbiddenCall[] {
+  return [...pairs].sort((left, right) => comparePair(left, right));
+}
+
+/** Order two `[entry, text]` pairs by entry, then by text; code-unit order. */
+function comparePair(
+  left: readonly [string, string],
+  right: readonly [string, string],
+): number {
   const [leftEntry, leftHint] = left;
   const [rightEntry, rightHint] = right;
   if (leftEntry !== rightEntry) {
@@ -338,7 +396,7 @@ export function rejectUnknownKeys(source: Source, extra: readonly string[]): voi
   const problems = Object.keys(source.table)
     .filter((key) => !source.consumed.has(key) && !extra.includes(key))
     .map((key) => {
-      const nearest = nearestKey(key, known);
+      const nearest = nearestName(key, known);
       const hint = nearest === undefined ? "" : ` (did you mean ${nearest}?)`;
       return `${source.label}${key} is not a kragg setting${hint}`;
     });
@@ -347,8 +405,27 @@ export function rejectUnknownKeys(source: Source, extra: readonly string[]): voi
   }
 }
 
-/** The closest known key, or `undefined` when nothing is close enough to be obvious. */
-function nearestKey(key: string, known: readonly string[]): string | undefined {
+/**
+ * The closest known name, or `undefined` when nothing is close enough to be
+ * obvious.
+ *
+ * Shared with `gates/criticality/declared.ts`, which asks the same question
+ * about a different vocabulary: a `critical_functions` entry that names no
+ * function in the analysed program is the same typo in a different place, and
+ * a reader should get the same "did you mean" out of both.
+ *
+ * `maxDistance` is what that second vocabulary needs. A config key is a dozen
+ * characters, so three edits is already a different word; a qualified function
+ * name is thirty, and renaming `verifyPassword` to `verifyPasswordHash` is
+ * four edits away from a name that is obviously the same function. The
+ * proportional guard below (`bestDistance * 2 < key.length`) is what keeps a
+ * larger budget from producing nonsense, and it applies either way.
+ */
+export function nearestName(
+  key: string,
+  known: readonly string[],
+  maxDistance = 3,
+): string | undefined {
   const flat = (name: string): string => name.toLowerCase().replaceAll(/[-_]/gu, "");
   const sameLetters = known.find((candidate) => flat(candidate) === flat(key));
   if (sameLetters !== undefined) {
@@ -363,7 +440,7 @@ function nearestKey(key: string, known: readonly string[]): string | undefined {
       bestDistance = distance;
     }
   }
-  return bestDistance <= 3 && bestDistance * 2 < key.length ? best : undefined;
+  return bestDistance <= maxDistance && bestDistance * 2 < key.length ? best : undefined;
 }
 
 /** Levenshtein distance; the inputs are short config keys, so O(n·m) is fine. */

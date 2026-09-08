@@ -334,6 +334,31 @@ a previously green run red — see [Gate additions](#gate-additions) below.
 
 ### Added
 
+- **TOR-1374: reviewed critical functions.** `critical_functions` in
+  `kragg.json` (or `package.json#kragg`) names functions a human decided are
+  high-consequence, each with the reason it is critical, which is required:
+  `{"src/auth/login#verifyPassword": "authorization entrypoint"}`.
+  Centrality only measures how much
+  other code leans on a function, so an authorization or payment entrypoint
+  with one caller ranked last and every criticality-driven gate was silent
+  about it. A declaration is **additive**: it makes a function critical
+  alongside the graph's own selection, never demotes one, and both reasons are
+  shown when it does both. From there it flows unchanged into `critical-tests`,
+  `test-quality`, `critical-coverage`, `kragg coverage` and mutation
+  targeting. `CRITICALITY.md` and the terminal table gain a `Why` column —
+  `declared: authorization entrypoint` against `fan-in 7, betweenness 0.3000` —
+  and the gates quote the reason when they name a declared function. A
+  declaration that matches no analysed function is an ERROR: `kragg
+  criticality` exits 3 naming the stale entry (with the nearest match when a
+  rename is obvious) and writes nothing, and the three gates report
+  `error: true`, so a rename cannot silently retire the protection. **No wire
+  key is added**: a declared function reaches `.kragg/criticality.json` as an
+  ordinary six-key record with `is_critical: true`, and the reason is
+  re-derived from the policy wherever it is shown rather than stored — which is
+  also why a declaration takes effect on the next read without re-running
+  `kragg criticality --write`. Recorded as divergence 29 in
+  `docs/spec-conformance.md`; the default is an empty declaration list, so a
+  project that declares nothing sees byte-identical output.
 - TOR-1363: `kragg.schema.json`, shipped in the package, mirrors the keys,
   types and ranges the loader enforces so an editor can validate `kragg.json`
   (`"$schema": "./node_modules/kragg/kragg.schema.json"`); `$schema` is
