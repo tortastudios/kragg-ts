@@ -330,6 +330,20 @@ deduplicated and capped per gate (`max_violations_per_gate`, default 25) with
 future release adds cannot leak a credential value into a report an agent will
 paste somewhere.
 
+And one asymmetry between the two external checkers, which is the whole reason
+`adapters/tsc.ts` takes `ctx.paths` and `adapters/lint.ts` takes `ctx.targets`:
+**a linter is per-file and a type checker is not.** `--changed` hands the
+linter a shorter file list and gets the same answer faster. Handing `tsc` one
+would be wrong twice over — `tsc a.ts b.ts` ignores `tsconfig.json` entirely,
+and a program is a whole-program fact, so the error an edit to `a.ts` causes is
+usually in the unchanged `b.ts`. So `tsc` always compiles the whole project
+through its own config, and the selected files are only an **order**: file-less
+diagnostics first, then the selection, then everything else, with the budget
+above deciding what the cap keeps. It used to be a *filter*, which dropped
+exactly the caller's error and printed `[PASS] tsc` for a change that broke it.
+
+
+
 ### Everything spawns through one place
 
 `src/engine/runner.ts` is the only module that may import `node:child_process`.

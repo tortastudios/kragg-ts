@@ -92,7 +92,7 @@ character in a file, not reinstalling a tool.
 | Gate | What it checks |
 | --- | --- |
 | `lint` | oxlint, biome or eslint — whichever the project configured |
-| `tsc` | the project's own `tsc --noEmit` |
+| `tsc` | the project's own `tsc --noEmit` — always the whole project through its own `tsconfig.json`, with `--changed`/`--file` files reported first and nothing dropped |
 | `typing-strictness` | that `tsconfig.json` actually meets the strict floor, has no escape hatches (`@ts-ignore`, `as any`, double casts), **and covers every source file** |
 | `complexity` | cyclomatic complexity per function (radon's grade bands) |
 | `maintainability` | maintainability index per file |

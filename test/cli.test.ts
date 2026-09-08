@@ -20,7 +20,7 @@
  */
 
 import assert from "node:assert/strict";
-import { mkdtempSync, rmSync, writeFileSync } from "node:fs";
+import { chmodSync, mkdirSync, mkdtempSync, rmSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { fileURLToPath } from "node:url";
@@ -228,5 +228,137 @@ describe("check outside a git repository", () => {
   it("refuses --since for the same reason", async () => {
     const result = await run(["check", "--since", "main"]);
     assert.equal(result.code, EXIT_ENVIRONMENT);
+  });
+});
+
+/**
+ * The project's OWN compiler, wired into a throwaway project.
+ *
+ * A shim rather than a copy of `node_modules/typescript` (24 MB per test) and
+ * rather than a symlink (`resolveBin` rejects a `.bin` entry whose real path
+ * escapes the project, which is the invariant that keeps kragg off a global
+ * toolchain). The shim is a real file inside the project that loads the real
+ * compiler, so the diagnostics asserted below are TypeScript's own — file,
+ * line and column included — and not a recorded string. POSIX shebang, like
+ * the stand-in `tsc` in `tsc.test.ts`.
+ */
+const TSC_ENTRY = fileURLToPath(new URL("../node_modules/typescript/lib/tsc.js", import.meta.url));
+
+function writeProjectFile(root: string, name: string, contents: string): void {
+  const path = join(root, name);
+  mkdirSync(join(path, ".."), { recursive: true });
+  writeFileSync(path, contents);
+}
+
+const TOR1359_TSCONFIG = JSON.stringify({
+  compilerOptions: {
+    target: "es2023",
+    lib: ["es2023"],
+    module: "nodenext",
+    moduleResolution: "nodenext",
+    strict: true,
+    noUncheckedIndexedAccess: true,
+    exactOptionalPropertyTypes: true,
+    allowImportingTsExtensions: true,
+    rewriteRelativeImportExtensions: true,
+    verbatimModuleSyntax: true,
+    isolatedModules: true,
+    erasableSyntaxOnly: true,
+    skipLibCheck: false,
+    noEmit: true,
+  },
+  include: ["src/**/*.ts"],
+});
+
+/**
+ * TOR-1359's fixture: an exported return type changed in `src/a.ts`, and the
+ * UNCHANGED caller `src/b.ts` no longer type-checks.
+ *
+ * Committed first with `f(x: number): number`, so `--changed` sees exactly one
+ * changed file — `src/a.ts` — and `src/b.ts` is genuinely outside the
+ * selection rather than merely unmentioned.
+ */
+async function brokenCallerProject(): Promise<string> {
+  const root = mkdtempSync(join(tmpdir(), "kragg-caller-"));
+  roots.push(root);
+  writeProjectFile(root, "package.json", '{"name":"x","version":"0.0.0","type":"module","private":true}');
+  // The three external tools are off so the report is about the compiler and
+  // nothing else; every gate that judges the code itself still runs.
+  writeProjectFile(
+    root,
+    "kragg.json",
+    '{"source_paths":["src"],"test_paths":["test"],"lint_tool":"off",' +
+      '"test_runner":"off","secret_scanner":"off"}',
+  );
+  writeProjectFile(root, "tsconfig.json", TOR1359_TSCONFIG);
+  writeProjectFile(root, "src/a.ts", "export function f(x: number): number {\n  return x;\n}\n");
+  writeProjectFile(root, "src/b.ts", 'import { f } from "./a.ts";\n\nexport const v: number = f(1);\n');
+  writeProjectFile(root, "node_modules/.bin/tsc", `#!${process.execPath}\nimport(${JSON.stringify(TSC_ENTRY)});\n`);
+  chmodSync(join(root, "node_modules", ".bin", "tsc"), 0o755);
+  await commitBaseline(root);
+  // THE CHANGE: the exported return type moves from `number` to `string`.
+  // Only `src/a.ts` is touched; `src/b.ts` is what breaks.
+  writeProjectFile(root, "src/a.ts", "export function f(x: string): string {\n  return x;\n}\n");
+  return root;
+}
+
+/** One commit, so `--changed` has a HEAD to diff the edit against. */
+async function commitBaseline(root: string): Promise<void> {
+  const vcs = async (...args: readonly string[]): Promise<void> => {
+    await runCommand("git", ["git", ...args], root);
+  };
+  await vcs("init", "-q");
+  await vcs("add", "-A");
+  await vcs(
+    "-c",
+    "user.email=t@example.test",
+    "-c",
+    "user.name=t",
+    "-c",
+    "commit.gpgsign=false",
+    "commit",
+    "-q",
+    "-m",
+    "baseline",
+  );
+}
+
+describe("a compiler failure in an unchanged caller survives every scope", () => {
+  // Built once: the four scopes read the same tree and none of them writes it.
+  const ready = brokenCallerProject();
+
+  /** `[FAIL] tsc`, and the caller's own file:line:column under it. */
+  function assertCallerReported(result: Captured, scope: string): void {
+    assert.equal(result.code, EXIT_GATE_FAILURES, `${scope}: ${result.out}${result.err}`);
+    assert.match(result.out, /\[FAIL] tsc/, scope);
+    assert.match(result.out, /src\/b\.ts:3:\d+ TS2345/, scope);
+    assert.doesNotMatch(result.out, /\[PASS] tsc/, scope);
+  }
+
+  it("fails a full check", async () => {
+    assertCallerReported(await run(["check", "--no-journal"], await ready), "full");
+  });
+
+  it("fails --changed, where only src/a.ts changed", async () => {
+    // The regression: the whole project was compiled, then every diagnostic
+    // outside the changed set was dropped, so this printed `[PASS] tsc` for a
+    // change that broke its callers while `tsc -p tsconfig.json` was failing.
+    assertCallerReported(await run(["check", "--changed", "--no-journal"], await ready), "changed");
+  });
+
+  it("fails --file src/a.ts", async () => {
+    assertCallerReported(
+      await run(["check", "--file", "src/a.ts", "--no-journal"], await ready),
+      "file",
+    );
+  });
+
+  it("still reports the compiler verdict when --file names no TypeScript at all", async () => {
+    // Nothing matches the selection at all, and an empty match must never read
+    // as compiler success.
+    assertCallerReported(
+      await run(["check", "--file", "kragg.json", "--no-journal"], await ready),
+      "non-typescript file",
+    );
   });
 });

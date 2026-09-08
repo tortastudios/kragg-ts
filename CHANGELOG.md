@@ -18,7 +18,17 @@ a previously green run red — see [Gate additions](#gate-additions) below.
 
 ## [Unreleased]
 
-Nothing yet.
+### Fixed
+
+- **TOR-1359** — `tsc` in incremental mode (`--changed`, `--file`, and
+  therefore the Claude PostToolUse hook) no longer hides type errors outside
+  the selected files. The whole project was already compiled through its own
+  `tsconfig.json`, but every diagnostic whose file was not in the selection was
+  dropped — including the error in `b.ts` that an edit to `a.ts` introduced, so
+  the gate reported `[PASS] tsc` and exit 0 while `tsc -p tsconfig.json` was
+  failing. Nothing is dropped now: the whole-project verdict is the verdict.
+  Diagnostics with no file come first, then those in the selected files, then
+  the rest, and the report's existing dedupe and per-gate cap handle volume.
 
 ## [0.0.0] — unreleased
 
