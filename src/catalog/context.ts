@@ -11,10 +11,13 @@
  * So the handle is created ONCE, here, and passed to every gate that needs a
  * checker. Two properties matter and both are load-bearing:
  *
- *  1. SHARED. `forbidden-calls` and `nullable-default` receive the same
- *     handle, so the second one to run pays nothing. (`analysisProgram` also
- *     memoizes per tsconfig, but relying on that would make the sharing an
- *     accident of a cache rather than a property of the pipeline.)
+ *  1. SHARED, AND THIS IS THE ONLY THING SHARING IT. `forbidden-calls` and
+ *     `nullable-default` receive the same handle, so the second one to run
+ *     pays nothing. `analysisProgram` keeps no process-global cache of its
+ *     own — it used to, and a second run in one process was then served the
+ *     first run's pre-edit program — so the run context is the sole owner of
+ *     the run's program, and the sharing is a property of the pipeline rather
+ *     than an accident of a cache.
  *  2. STILL LAZY. Creating the handle only resolves the compiler; the program
  *     is built on the first `load()`. A run where no type-aware gate executes
  *     — every rule unconfigured, or `--changed` with nothing to check — must

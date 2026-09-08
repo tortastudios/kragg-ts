@@ -47,6 +47,40 @@ a previously green run red — see [Gate additions](#gate-additions) below.
 
 ### Fixed
 
+- **TOR-1366** — criticality freshness and compiler state are now invalidated
+  by everything the analysis actually reads. Three separate ways a run could
+  believe pre-edit state:
+  - The freshness walk kept its own skip list and applied `dist`, `build`,
+    `out` and `coverage` **by name at any depth**, so this repo's own
+    `src/coverage/` was invisible to it: editing, adding or deleting a file
+    under such a directory left `.kragg/criticality.json` reading `fresh`. It
+    now uses the same `analysis/walk.ts` the syntax tier does, which skips
+    those names only where they mean "generated" — as children of the repo
+    root.
+  - The fingerprint was a file count, a byte total and the newest mtime, so a
+    same-size edit made by a tool that preserves timestamps changed none of
+    them. It is now a **content hash** of every walked file (measured at ~6 ms
+    over this repo's 214 source and test files, up from ~1 ms, against the ~1 s
+    a graph rebuild costs), plus `kragg.json`, `package.json#kragg`,
+    `tsconfig.json` and the resolved compiler's version and path — each of
+    which can move the call graph with no source byte changing.
+  - `analysis/program.ts` memoized `ts.Program` handles in a module-level map
+    and `resolveTypeScript` cached compilers per root forever, so a long-lived
+    process using the library API that ran, edited files and ran again was
+    served the first run's program. The run context is now the only owner of
+    the run's program (still exactly one, still lazy), and compiler resolution
+    is keyed on the resolved entry path plus its size and mtime.
+
+  On a read-only checkout, `kragg criticality --write` reported the write
+  failure as a bare `EACCES: permission denied, open …`; it still exits 3, but
+  now names the artifacts and the fix. The milder case had no signal at all —
+  when the data landed but its freshness stamp could not be written, the
+  command printed `Wrote …`, exited 0 and left every later run silently
+  re-deriving; that is now a stderr line naming the consequence. The sidecar's
+  internal `version` is now `2`; a version-1 stamp reads as stale rather than
+  as evidence of anything. `.kragg/criticality.json` and every report field are
+  unchanged — Python's reader cannot observe any of this.
+
 - **TOR-1359** — `tsc` in incremental mode (`--changed`, `--file`, and
   therefore the Claude PostToolUse hook) no longer hides type errors outside
   the selected files. The whole project was already compiled through its own
