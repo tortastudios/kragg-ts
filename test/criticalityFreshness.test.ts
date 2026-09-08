@@ -677,7 +677,7 @@ describe("writeStamp when the stamp cannot be written", () => {
     const stamp: unknown = JSON.parse(readFileSync(stampPath(root), "utf8"));
     assert.ok(typeof stamp === "object" && stamp !== null);
     const record: Readonly<Record<string, unknown>> = { ...stamp };
-    assert.equal(record["version"], 1);
+    assert.equal(record["version"], 2); // STAMP_VERSION: content-hash stamps since TOR-1366
     assert.deepEqual(record["scan_paths"], ["src"]);
     assert.equal(record["files"], 1);
   });
