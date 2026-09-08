@@ -1,0 +1,35 @@
+{
+  "spec_version": 1,
+  "recorded_against": {
+    "spec": "tortastudios/crag spec/SPEC.md",
+    "crag_commit": "f76a7d0321ca6498d5c00653c493aa5ffdf2383d",
+    "crag_release": "0.9.0"
+  },
+  "kind": "report",
+  "argv": ["check", "--file", "src", "--format", "json"],
+  "setup": { "git": true },
+  "expected_exit": 3,
+  "journal": true,
+  "artifacts": [".kragg/criticality.json", ".kragg/criticality.stamp.json"],
+  "notes": "The whole 18-gate `check` pipeline in one report, and the only fixture with a git repository, so `git_sha` is pinned non-null. A TypeScript project with no TypeScript compiler is a BROKEN ENVIRONMENT, never an unconfigured gate: `tsc` is `error: true`, `passed: false`, its remediation rides in `raw_output`, the `Fix:` line is surfaced into `next_actions`, and the exit is 3 even though another gate merely failed — 3 outranks 1 (SPEC.md sections 3 and 4.3). This is the local recording of the same behaviour crag's own `ts-missing-tsc` fixture pins from the other side.",
+  "divergences": [
+    {
+      "id": "SPEC-10.6",
+      "summary": "`lint`, `detect-secrets` and `test-coverage` skip visibly because kragg-ts resolves tools from the project and this project has none. Python bundles ruff and detect-secrets and cannot reach this state.",
+      "spec": "crag spec/SPEC.md section 10, row 6",
+      "doc": "docs/spec-conformance.md#11-intentional-divergences"
+    },
+    {
+      "id": "SPEC-10.10",
+      "summary": "criticality-dependent gates DERIVE their data on demand here (`critical-tests`, `test-quality` run), which is why this run leaves `.kragg/criticality.json` behind. Python skips those gates visibly instead.",
+      "spec": "crag spec/SPEC.md section 10, row 10",
+      "doc": "docs/spec-conformance.md#11-intentional-divergences"
+    },
+    {
+      "id": "SPEC-10.8",
+      "summary": "the derived data is stamped in a separate `.kragg/criticality.stamp.json` sidecar so `criticality.json` stays byte-compatible with what Python reads.",
+      "spec": "crag spec/SPEC.md sections 6 and 10, row 8",
+      "doc": "docs/spec-conformance.md#5-kraggcriticalityjson-and-the-sidecar-stamp"
+    }
+  ]
+}

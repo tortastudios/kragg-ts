@@ -273,6 +273,13 @@ Deliberate, and documented at each site:
 | pipeline halting | A **skip never halts** the slow tier or `--fail-fast`; only a gate that ran and did not pass does. Python branches on `not result.passed`, which counts a visible skip as a failure. |
 | a gate that throws | Reported as that gate's `error: true` — the rest of the pipeline still runs and the consolidated report survives. Python lets the exception kill the process. |
 | config validation | Python degrades a mismatched value to its default and ignores unknown keys; kragg-ts rejects both with exit 2, naming the setting. Strictly narrower: every config Python accepts *and reads as written* loads identically here. |
+| criticality-dependent gates | Derived on demand when the data is missing or stale, so `critical-tests` and `test-quality` run; Python skips them visibly instead. |
+| SessionStart hook | Emits the `hookSpecificOutput` envelope, which is what injects `additionalContext`; Python prints plain-text context lines. |
+| hook output | Capped at 9000 characters with an in-band marker, because the harness spills longer output to a file the model never sees. Python does not cap. |
+
+Each row is pinned by a fixture or a unit test, and the full list — with the
+`spec/SPEC.md` row it corresponds to — is in
+[docs/spec-conformance.md](docs/spec-conformance.md).
 
 ## Supply chain
 
@@ -317,8 +324,15 @@ pnpm install --ignore-scripts
 pnpm run typecheck
 pnpm run build
 pnpm run test
+pnpm run conformance             # the cross-language contract fixtures
 node dist/cli.js check --all     # kragg checks itself
 ```
+
+`pnpm run conformance` is also part of `pnpm test`. The other half of the
+contract — this repository's `dist/cli.js` run against the Python sibling's own
+fixtures at a pinned commit — is in
+[docs/spec-conformance.md](docs/spec-conformance.md#running-the-two-suites) and
+in CI.
 
 kragg-ts passes its own `check`. That is the point: a guardrails framework
 whose own gates are red has no claim on anyone else's code.

@@ -92,7 +92,93 @@ jobs:
       - name: Test
         run: pnpm run test
 
-  # TODO(spec): add a conformance job once `tortastudios/crag` grows its
-  # `spec/` directory. It must clone that repo at a PINNED spec tag — never
-  # `main` — run `spec/fixtures/` through this implementation, and diff the
-  # JSON output. See docs/spec-conformance.md.
+  # The executable half of docs/spec-conformance.md. This replaces the
+  # `TODO(spec)` that stood here while `tortastudios/crag` had no `spec/`
+  # directory: it grew one in release 0.9.0 (SPEC.md, a stdlib-only runner,
+  # and fixtures), so the job can now be written rather than described.
+  #
+  # It is a separate job, not more steps on `check`, because the two answer
+  # different questions. `check` asks whether this repository is internally
+  # sound; this asks whether what it emits is still readable by the sibling.
+  # A red conformance job with a green check is a meaningful state — it says
+  # the wire format moved — and collapsing them would hide it.
+  conformance:
+    name: conformance (spec pin f76a7d03)
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+
+    env:
+      npm_config_ignore_scripts: "true"
+
+    steps:
+      # EVERY `uses:` HERE IS PINNED TO A FULL COMMIT SHA, for the reasons
+      # spelled out at the top of the `check` job. Do not replace one with a
+      # tag.
+      - name: Checkout
+        uses: actions/checkout@fbc6f3992d24b796d5a048ff273f7fcc4a7b6c09 # v5.1.0
+        with:
+          persist-credentials: false
+
+      - name: Enable corepack
+        run: corepack enable
+
+      - name: Setup Node
+        uses: actions/setup-node@a0853c24544627f65ddf259abe73b1d18a591444 # v5.0.0
+        with:
+          node-version-file: .node-version
+          cache: pnpm
+
+      - name: Install dependencies
+        run: pnpm install --frozen-lockfile --ignore-scripts
+
+      # The cross-language runner drives `node dist/cli.js` — the artifact a
+      # consumer installs, never `node src/cli.ts`. Conformance is a property
+      # of what ships.
+      - name: Build
+        run: pnpm run build
+
+      # -------------------------------------------------------------------
+      # THE PIN. `ref` is a full commit SHA and must stay one.
+      #
+      # A branch here would let an edit in the sibling repository turn an
+      # unrelated pull request in THIS repository red, which is how people
+      # learn to ignore a check. `f76a7d03…` is crag's `Release 0.9.0`, the
+      # first release to carry `spec/`. Bumping it is a deliberate act: read
+      # the SPEC.md and fixture diff between the old SHA and the new one the
+      # way you would read a schema migration, because that is what it is.
+      # SPEC.md section 12 says the same. `test/conformance.test.ts` asserts
+      # this SHA matches the one every local fixture was recorded against, so
+      # the two halves cannot drift apart silently.
+      #
+      # TOKEN: neither repository resolves publicly on GitHub today, so
+      # `github.token` cannot read the sibling and a maintainer must supply a
+      # READ-ONLY (contents:read, sibling only) `KRAGG_SPEC_TOKEN` secret. The
+      # fallback keeps this correct the day either repo goes public, at which
+      # point the secret should be deleted rather than left standing.
+      # -------------------------------------------------------------------
+      - name: Checkout the kragg spec (PINNED — bump deliberately)
+        uses: actions/checkout@fbc6f3992d24b796d5a048ff273f7fcc4a7b6c09 # v5.1.0
+        with:
+          repository: tortastudios/crag
+          ref: f76a7d0321ca6498d5c00653c493aa5ffdf2383d
+          path: kragg-spec
+          persist-credentials: false
+          token: ${{ secrets.KRAGG_SPEC_TOKEN || github.token }}
+
+      # The runner's own normalizer and validator, against payloads it ships.
+      # FIRST on purpose: if this fails the runner is broken, and any verdict
+      # it then reaches about kragg-ts means nothing.
+      - name: Spec runner self-test
+        run: python3 kragg-spec/spec/run_conformance.py --self-test
+
+      # `--tool` swallows the rest of the argv, so it comes last.
+      - name: Cross-language conformance
+        run: >
+          python3 kragg-spec/spec/run_conformance.py
+          --impl typescript
+          --tool node dist/cli.js
+
+      # The local fixtures: everything the cross-language suite does not
+      # reach, because only two of its fixtures apply to TypeScript.
+      - name: Local conformance fixtures
+        run: pnpm run conformance

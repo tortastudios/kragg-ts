@@ -1,0 +1,16 @@
+{
+  "spec_version": 1,
+  "recorded_against": {
+    "spec": "tortastudios/crag spec/SPEC.md",
+    "crag_commit": "f76a7d0321ca6498d5c00653c493aa5ffdf2383d",
+    "crag_release": "0.9.0"
+  },
+  "kind": "streams",
+  "argv": ["status", "--format", "json"],
+  "setup": { "git": false },
+  "expected_exit": 0,
+  "journal": false,
+  "read_journal": ".kragg/history.jsonl",
+  "notes": "The READER half of SPEC.md section 5. The committed `.kragg/history.jsonl` holds two complete entries and a third that stops mid-token, exactly as an interrupted run leaves it. A conforming reader skips the half-written final line rather than treating the file as corrupt, and both siblings must agree on that: crag's `read_runs` does the same. The two entries are hand-written rather than produced by a run, so the timestamps, shas and durations are fixed and the golden needs no normalization at all — which is also what makes this fixture a check on the reader instead of on the writer.",
+  "divergences": []
+}

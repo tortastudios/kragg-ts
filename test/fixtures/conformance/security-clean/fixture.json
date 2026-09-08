@@ -1,0 +1,22 @@
+{
+  "spec_version": 1,
+  "recorded_against": {
+    "spec": "tortastudios/crag spec/SPEC.md",
+    "crag_commit": "f76a7d0321ca6498d5c00653c493aa5ffdf2383d",
+    "crag_release": "0.9.0"
+  },
+  "kind": "report",
+  "argv": ["security", "--file", "src", "--format", "json"],
+  "setup": { "git": false },
+  "expected_exit": 0,
+  "journal": true,
+  "notes": "The green path, and the one fixture with no git repository: `git_sha` is null and stays null through normalization, because null-vs-present is contract (SPEC.md section 9). Two gates SKIP visibly for two different reasons — `detect-secrets` because the policy disabled it, `audit` because an incremental run cannot trust a whole-project SLOW gate — and a skipped gate is not a failure, so the exit is 0 (SPEC.md sections 3 and 4.2).",
+  "divergences": [
+    {
+      "id": "SPEC-10.6",
+      "summary": "kragg-ts bundles no tools; `secret_scanner: \"off\"` is a deliberate, visible skip rather than a silent pass. Python bundles detect-secrets and has no such key.",
+      "spec": "crag spec/SPEC.md section 10, row 6; section 8",
+      "doc": "docs/spec-conformance.md#11-intentional-divergences"
+    }
+  ]
+}
