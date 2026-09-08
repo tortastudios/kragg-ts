@@ -265,6 +265,8 @@ function slowGates(ctx: CatalogContext): readonly GateSpec[] {
           coverageReportPath: policy.coverageReportPath,
           maxViolations: policy.maxViolationsPerGate,
           testPaths: policy.testPaths,
+          sourcePaths: policy.sourcePaths,
+          api: ctx.api,
         });
         // Recorded for `critical-coverage`, which reads THIS run's coverage
         // from here and never from disk. See `RunEvidence` in `context.ts`.

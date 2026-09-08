@@ -196,6 +196,49 @@ a previously green run red — see [Gate additions](#gate-additions) below.
   run's lcov. The coverage artifact is published to `coverage_report_path`
   afterwards for `kragg coverage`. `kragg mutation` refuses to start Stryker
   while an earlier report it could not remove is still at the report path.
+- **TOR-1364: coverage completeness is reconciled against the project, and
+  unavailable evidence is an error.** Three ways a coverage gate could report
+  green without having looked are closed. (1) A critical function whose file
+  the test run never loaded had no entry in the coverage report and therefore
+  no uncovered lines: it passed `critical-coverage`. It is now a violation
+  with its own code, `critical-unmeasured`, whose message states the cause —
+  `the test run never loaded src/x.ts (no entry in the coverage report)`, a
+  name the source could not disambiguate, or a body the report is silent on
+  — and `kragg coverage` lists the same rows under the same words instead of
+  `no coverage entry`. (2) The `test-coverage` percentage counted only the
+  files present in the report, so a project whose tests imported three of
+  forty modules could report 100%; every TypeScript file under
+  `source_paths` the report does not mention now counts with all of its
+  statement lines uncovered (the count is read from the source with the
+  project's compiler, and the gate's output names the files: `3 of 5 source
+  files never loaded by the test run, counted as uncovered (6 statement lines
+  read from the source): …`), files outside `source_paths` no longer move
+  the number, and a report that leaves no line to count under the source
+  paths is an error rather than 100%. (3) `critical-coverage` handed a report
+  naming no file under the source paths treated every critical function as
+  unmeasured; it is now `error: true` (exit 3) naming what was expected.
+  Attribution is exact where it used to decline: two classes with a
+  same-named method (`Reader.close`/`Writer.close`) each get their own
+  extent from the source, keyed the way `criticality.json` spells the name,
+  so neither is blamed for the other's lines and neither slips through as
+  unmeasured; overload signatures are no longer mistaken for a name bound
+  twice; a class that is itself a critical node (`new Foo()` on a class with
+  no constructor) is measured by its own lines and V8's field-initializer
+  record, never by its methods' lines. All of this is **line** coverage; no
+  message implies a branch verdict.
+- **TOR-1364: `kragg coverage` reads the artifact the project's own runner
+  publishes.** It read `coverage/coverage-final.json` or `.kragg/…` and then
+  `coverage/lcov.info`, ignoring `coverage_report_path` entirely — so with a
+  custom path it printed `no coverage data` on a project that had plenty, and
+  after a switch from vitest to `node --test` it preferred the stale istanbul
+  file over this run's tracefile. It now detects the runner the way the gate
+  does and reads exactly one file: `coverage_report_path` for vitest, the
+  `lcov.info` beside it for node and bun. A missing file still prints
+  `cmd_coverage`'s line and exits 0, followed by the path that was expected;
+  a file that is present but unusable — truncated, not JSON, naming no file
+  under the source paths — is exit 3 with the file named, never
+  `no coverage data`; a project with no runner is exit 3, since nothing
+  publishes coverage for it.
 - **TOR-1361: `.kragg/criticality.json` keeps the complete eligible
   population.** `analyze` truncated its result to the twenty riskiest
   functions, and since both `kragg criticality --write` and the check

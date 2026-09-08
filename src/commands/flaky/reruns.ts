@@ -235,6 +235,7 @@ export async function runReruns(options: RerunOptions): Promise<RerunOutcome> {
         coverageFailUnder: 0,
         maxViolations: 0,
         testPaths: policy.testPaths,
+        sourcePaths: policy.sourcePaths,
       }),
     );
     if (!sample.ok) {

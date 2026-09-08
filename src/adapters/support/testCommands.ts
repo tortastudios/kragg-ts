@@ -75,8 +75,6 @@ export function artifacts(
   coverageReportPath: string | undefined,
   runDir: string,
 ): Artifacts {
-  const configured = coverageReportPath ?? DEFAULT_COVERAGE_REPORT;
-  const publishedIstanbulFile = isAbsolute(configured) ? configured : resolve(root, configured);
   const coverageDir = join(runDir, "coverage");
   return {
     root,
@@ -85,6 +83,25 @@ export function artifacts(
     coverageDir,
     istanbulFile: join(coverageDir, "coverage-final.json"),
     lcovFile: join(coverageDir, "lcov.info"),
+    ...publishedPaths(root, coverageReportPath),
+  };
+}
+
+/** Where a run's coverage is published, for the on-demand readers. */
+export type PublishedPaths = Pick<Artifacts, "publishedIstanbulFile" | "publishedLcovFile">;
+
+/**
+ * The two published locations `coverage_report_path` decides: the istanbul
+ * report at the configured path, and the lcov tracefile beside it. `kragg
+ * coverage` reads from here, whichever of the two its runner writes.
+ */
+export function publishedPaths(
+  root: string,
+  coverageReportPath: string | undefined,
+): PublishedPaths {
+  const configured = coverageReportPath ?? DEFAULT_COVERAGE_REPORT;
+  const publishedIstanbulFile = isAbsolute(configured) ? configured : resolve(root, configured);
+  return {
     publishedIstanbulFile,
     publishedLcovFile: join(dirname(publishedIstanbulFile), "lcov.info"),
   };

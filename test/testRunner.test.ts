@@ -405,6 +405,11 @@ test("a vitest config, then a vitest dependency, then bun evidence", () => {
     ).runner,
     "vitest",
   );
+  const bunTypes = project({ "package.json": '{"devDependencies":{"@types/bun":"1.2.0"}}' });
+  assert.deepEqual(detectTestRunner(bunTypes, "auto"), {
+    runner: "bun",
+    source: "package.json dependency: @types/bun",
+  });
   assert.equal(
     detectTestRunner(project({ "package.json": "{}", "bunfig.toml": "[test]\n" }), "auto").runner,
     "bun",
@@ -510,6 +515,7 @@ test("a project with no runner skips visibly with install commands", async () =>
     coverageFailUnder: 80,
     maxViolations: 25,
     testPaths: ["test"],
+    sourcePaths: ["src"],
   });
   assert.equal(outcome.ok, false);
   assert.equal(outcome.kind, "not-configured");
@@ -532,6 +538,7 @@ test("a missing vitest is an environment error, not a passing gate", async () =>
     coverageFailUnder: 80,
     maxViolations: 25,
     testPaths: ["test"],
+    sourcePaths: ["src"],
   });
   assert.equal(outcome.ok, false);
   assert.equal(outcome.kind, "missing-tool");
@@ -545,6 +552,7 @@ test("`test_runner: off` is a deliberate skip that says so", async () => {
     coverageFailUnder: 80,
     maxViolations: 25,
     testPaths: ["test"],
+    sourcePaths: ["src"],
   });
   assert.equal(outcome.ok, false);
   assert.match(outcome.message, /switched off/u);
@@ -623,9 +631,12 @@ const GREEN = vitestReport([{ title: "adds", status: "passed" }]);
 const RED = vitestReport([{ title: "subtracts", status: "failed" }]);
 
 /** An istanbul report with one fully covered statement. */
+// Keyed relatively, as c8 and CI path rewrites produce: the totals count only
+// files under the project's `source_paths`, and a key under a foreign root
+// would resolve to none of them.
 const FULL_COVERAGE = JSON.stringify({
-  "/repo/src/a.ts": {
-    path: "/repo/src/a.ts",
+  "src/a.ts": {
+    path: "src/a.ts",
     statementMap: { "0": { start: { line: 1, column: 0 }, end: { line: 1, column: 9 } } },
     fnMap: {},
     branchMap: {},
@@ -666,6 +677,7 @@ function run(root: string, timeoutMs?: number): Promise<TestRunOutcome> {
     coverageFailUnder: 80,
     maxViolations: 25,
     testPaths: ["test"],
+    sourcePaths: ["src"],
     ...(timeoutMs === undefined ? {} : { timeoutMs }),
   });
 }
@@ -801,6 +813,7 @@ test("switching runners: node's lcov is this run's evidence; vitest's stale ista
       coverageFailUnder: 1,
       maxViolations: 25,
       testPaths: ["test"],
+      sourcePaths: ["src"],
     });
   } finally {
     if (testContext !== undefined) {

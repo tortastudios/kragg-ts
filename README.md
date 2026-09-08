@@ -120,7 +120,7 @@ character in a file, not reinstalling a tool.
 | Gate | What it checks |
 | --- | --- |
 | `test-coverage` | the project's test suite, plus the coverage floor |
-| `critical-coverage` | public critical functions must have no uncovered lines |
+| `critical-coverage` | public critical functions must be measured and have no uncovered lines |
 | `audit` | dependency vulnerabilities via the project's package manager |
 
 kragg **bundles none of these tools**. Every external tool is resolved from the
@@ -135,17 +135,32 @@ mostly-deterministic signals:
 
 - **what's run** — `kragg coverage` surfaces uncovered lines in critical
   functions ranked by fan-in, instead of a gameable global percentage. The
-  `critical-coverage` gate fails on any uncovered line in a critical function.
-  Works under vitest (istanbul JSON), `node --test` and `bun test` (lcov).
+  `critical-coverage` gate fails on any uncovered line in a critical function,
+  and on a critical function it could not measure: a file no test ever
+  imported has no entry in any runner's report, and that is reported as
+  `critical-unmeasured` with the cause (`the test run never loaded src/x.ts`)
+  rather than passed. Works under vitest (istanbul JSON), `node --test` and
+  `bun test` (lcov). Attribution comes from the source, keyed the way
+  `criticality.json` spells a name, so `Reader.close` and `Writer.close` each
+  answer for their own lines. This is **line** coverage: `if (broken) fix();`
+  on one line counts as covered once the `if` ran; no branch verdict is
+  implied anywhere.
   Both gates believe only **this invocation's** evidence: the runner writes
   into a private `.kragg/runs/` directory that did not exist before the run,
   so a runner that crashes, times out or leaves a partial report is an error
   (exit 3) — never a re-read of an older report, and never the other runner's
   format after a switch — and `critical-coverage` consumes the coverage
   `test-coverage` just measured rather than any file on disk. Two `kragg
-  check`s in one project cannot read each other's artifacts. Once read, the
-  coverage artifact is published to `coverage_report_path` (istanbul) or the
-  `lcov.info` beside it, which is what `kragg coverage` reads on demand.
+  check`s in one project cannot read each other's artifacts. The
+  `test-coverage` percentage is the **project's**: only files under
+  `source_paths` count, and every source file the run never loaded counts
+  with all of its statement lines uncovered (kragg reads the count off the
+  source and names the files in the gate's output), so a suite that imports
+  three of forty modules cannot report 100%. Once read, the coverage
+  artifact is published to `coverage_report_path` (istanbul, vitest) or the
+  `lcov.info` beside it (node, bun); `kragg coverage` reads exactly the one
+  the project's runner writes, on demand, and treats a file that is present
+  but unusable as an error rather than as "no data".
 - **what's defended** — `kragg mutation` runs Stryker over critical files and
   reports surviving mutants as `file:line`. Accept equivalent mutants with
   `--update-baseline`; that baseline is the one `.kragg/` file deliberately
@@ -327,6 +342,8 @@ Deliberate, and documented at each site:
 | SessionStart hook | Emits the `hookSpecificOutput` envelope, which is what injects `additionalContext`; Python prints plain-text context lines. |
 | hook output | Capped at 9000 characters with an in-band marker, because the harness spills longer output to a file the model never sees. Python does not cap. |
 | test evidence | Python reads `.kragg/coverage.json` from a fixed path. kragg-ts gives every invocation its own `.kragg/runs/` directory, refuses anything incomplete, and hands `critical-coverage` the coverage in memory. Same gates, same wire format; only the provenance rule differs. |
+| unmeasured critical functions | Python's `critical-coverage` passes a critical function the report never mentions (`measured=False`), reasoning that a missing entry is a measurement-key mismatch. kragg-ts hands the gate the document its own run wrote, so a missing file was never loaded: the function fails under the additive code `critical-unmeasured`, with the cause in the message. |
+| coverage denominator | Python's `pytest --cov=src` instruments every file under `src`, loaded or not. The JavaScript runners report only what the run loaded, so kragg-ts reconciles the number against `source_paths` itself: unloaded files count as uncovered by their statement lines, and files outside the source paths do not count. |
 
 Each row is pinned by a fixture or a unit test, and the full list — with the
 `spec/SPEC.md` row it corresponds to — is in
