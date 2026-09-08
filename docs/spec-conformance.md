@@ -286,7 +286,7 @@ Same key vocabulary, snake_case, on both sides; only the carrier differs —
 merging. kragg-ts adds tool-selection keys (`lint_tool`, `test_runner`,
 `secret_scanner`, `audit_severity`) that have no Python analogue, where `"off"`
 is a deliberate, visible disable: the gate SKIPs with a reason saying so — and
-`baseline`, the root-relative path of the legacy-debt baseline (row 30 of
+`baseline`, the root-relative path of the legacy-debt baseline (row 31 of
 section 11), `null` by default. Malformed *values* fail closed to the stricter
 default; a file that cannot be parsed at all is a usage error (exit 2).
 
