@@ -44,6 +44,12 @@ import {
   type DirectedGraph,
 } from "../src/analysis/betweenness.ts";
 import { analysisProgram } from "../src/analysis/program.ts";
+import { runCriticality } from "../src/commands/criticality.ts";
+import { selectTargets } from "../src/commands/mutation/targets.ts";
+import { EXIT_OK } from "../src/engine/report.ts";
+import { criticalCoverageGaps } from "../src/gates/criticalCoverage.ts";
+import { criticalFunctions } from "../src/gates/testDepth/criticalFunctions.ts";
+import { DEFAULT_POLICY } from "../src/policy/policy.ts";
 import {
   BETWEENNESS_THRESHOLD,
   FAN_IN_THRESHOLD,
@@ -248,6 +254,41 @@ export default (): number => target();
 `,
 };
 
+/* --- The wide fixture ---------------------------------------------------- */
+
+/** Exported hubs in {@link WIDE}, each called by every caller below. */
+const WIDE_HUBS = 40;
+/** Callers in {@link WIDE}. Three is the fan-in that makes a hub critical. */
+const WIDE_CALLERS = 3;
+
+/**
+ * A project with far more than twenty functions, all of them public.
+ *
+ * The whole point of this fixture is the SIZE: with {@link WIDE_HUBS} critical
+ * functions and a display limit of twenty, any cap that leaks out of rendering
+ * and into the persisted data is visible as a count. Every hub is exported and
+ * plainly named, so `criticalFunctions` keeps all of them and the export/
+ * private filter is not what is being measured.
+ */
+const WIDE: Readonly<Record<string, string>> = wideFixture();
+
+function wideFixture(): Readonly<Record<string, string>> {
+  const hubNames = Array.from({ length: WIDE_HUBS }, (_unused, index) => `hub${String(index)}`);
+  const hubs = hubNames
+    .map((name) => `export function ${name}(value: number): number {\n  return value + 1;\n}\n`)
+    .join("\n");
+  const body = hubNames.map((name) => `${name}(1)`).join(" + ");
+  const callers = Array.from(
+    { length: WIDE_CALLERS },
+    (_unused, index) =>
+      `export function caller${String(index)}(): number {\n  return ${body};\n}\n`,
+  ).join("\n");
+  return {
+    "src/hubs.ts": hubs,
+    "src/callers.ts": `import { ${hubNames.join(", ")} } from "./hubs.ts";\n\n${callers}`,
+  };
+}
+
 describe("buildCallGraph — what a real type checker resolves", () => {
   const graph = graphFor(project(FIXTURE));
 
@@ -411,7 +452,7 @@ describe("analyze", () => {
     assert.ok(result.ok || result.message.includes("no tsconfig.json"));
   });
 
-  it("orders descending by betweenness then fan-in and caps at topN", () => {
+  it("orders descending by betweenness then fan-in, over the whole graph", () => {
     const result = analyze({ analysis: analysisProgram({ root: project(FIXTURE), api: ts }) });
     assert.ok(result.ok, result.ok ? "" : result.message);
     const profiles = result.profiles;
@@ -428,26 +469,30 @@ describe("analyze", () => {
     }
   });
 
-  it("honours topN", () => {
-    const result = analyze({
-      analysis: analysisProgram({ root: project(FIXTURE), api: ts }),
-      topN: 3,
-    });
+  it("ranks EVERY node — there is no analysis-side cap to enforce through", () => {
+    // The bug this pins: `analyze` used to return `profiles.slice(0, 20)`, and
+    // since the cache persists exactly what it returns, the criticality gates
+    // enforced on whatever survived a DISPLAY limit. WIDE has 43 functions.
+    const result = analyze({ analysis: analysisProgram({ root: project(WIDE), api: ts }) });
     assert.ok(result.ok, result.ok ? "" : result.message);
-    assert.equal(result.profiles.length, 3);
+    assert.equal(result.profiles.length, nodeCount(result.graph));
+    assert.equal(result.profiles.length, WIDE_HUBS + WIDE_CALLERS);
+    assert.ok(result.profiles.length > 20);
+    assert.equal(
+      result.profiles.filter((entry) => entry.isCritical).length,
+      WIDE_HUBS,
+    );
   });
 
   it("applies both criticality thresholds, and they are configurable", () => {
     const root = project(FIXTURE);
     const strict = analyze({
       analysis: analysisProgram({ root, api: ts }),
-      topN: 500,
       fanInThreshold: 5,
       betweennessThreshold: 1,
     });
     const loose = analyze({
       analysis: analysisProgram({ root, api: ts }),
-      topN: 500,
       fanInThreshold: 1,
       betweennessThreshold: 1,
     });
@@ -459,13 +504,12 @@ describe("analyze", () => {
     assert.ok(criticalIn(loose.profiles).length > criticalIn(strict.profiles).length);
   });
 
-  it("returns the WHOLE graph, not just the profiles it capped to", () => {
+  it("returns the graph alongside the profiles, so no caller rebuilds it", () => {
     const result = analyze({
       analysis: analysisProgram({ root: project(FIXTURE), api: ts }),
-      topN: 3,
     });
     assert.ok(result.ok, result.ok ? "" : result.message);
-    assert.equal(result.profiles.length, 3);
+    assert.equal(result.profiles.length, nodeCount(result.graph));
     assert.ok(nodeCount(result.graph) > 3);
   });
 
@@ -645,5 +689,122 @@ describe("formatTable", () => {
 
   it("says so when there is nothing to show", () => {
     assert.deepEqual(formatTable([]), ["No functions found."]);
+  });
+
+  it("shows the twenty riskiest and no more, however many it is handed", () => {
+    const many = Array.from({ length: 60 }, (_unused, index) =>
+      profile({ name: `src/a#fn${String(index)}`, fanIn: 60 - index }),
+    );
+    // Header, rule, then TOP_N rows.
+    assert.equal(formatTable(many).length, 22);
+    assert.ok(formatTable(many).at(-1)?.startsWith("src/a#fn19 "));
+  });
+});
+
+/* --- Display truncation vs. enforcement data ----------------------------- */
+
+/**
+ * The regression this whole file exists to keep out: a DISPLAY limit that
+ * silently became an ENFORCEMENT limit.
+ *
+ * `analyze` used to return `profiles.slice(0, 20)`, and both the sidecar and
+ * the cache persist exactly what it returns — so on any project with more than
+ * twenty functions the criticality gates enforced on whatever happened to fit
+ * in a table. On kragg-ts itself that was 4 of its 130 critical functions.
+ *
+ * The assertions below run the real command on a project with
+ * {@link WIDE_HUBS} critical functions and follow the data into each consumer:
+ * coverage, the test-depth family, and mutation targeting.
+ */
+describe("the top-N limit is presentation, not enforcement", () => {
+  const root = project(WIDE);
+  const printed: string[] = [];
+  const exit = runCriticality({ root, write: true, log: (line) => printed.push(line) });
+  const total = WIDE_HUBS + WIDE_CALLERS;
+
+  it("persists the COMPLETE population to the sidecar the gates read", () => {
+    assert.equal(exit, EXIT_OK);
+    const entries = readJson(root);
+    assert.equal(entries.length, total);
+    assert.equal(
+      entries.filter((entry) => entry["is_critical"] === true).length,
+      WIDE_HUBS,
+    );
+  });
+
+  it("keeps the sidecar's wire shape: same keys, same ranking, more rows", () => {
+    const entries = readJson(root);
+    for (const entry of entries) {
+      assert.deepEqual(Object.keys(entry), [
+        "name",
+        "fan_in",
+        "fan_out",
+        "betweenness",
+        "is_critical",
+        "risk",
+      ]);
+    }
+    // Still the descending (betweenness, fan_in) order `analyze` produced.
+    for (let index = 1; index < entries.length; index += 1) {
+      const previous = entries[index - 1];
+      const current = entries[index];
+      assert.ok(previous !== undefined && current !== undefined);
+      const drop = Number(previous["betweenness"]) - Number(current["betweenness"]);
+      assert.ok(
+        drop > 0 || (drop === 0 && Number(previous["fan_in"]) >= Number(current["fan_in"])),
+        `out of order at ${String(index)}`,
+      );
+    }
+  });
+
+  it("still renders only the twenty riskiest to a human", () => {
+    const markdown = readFileSync(join(root, "CRITICALITY.md"), "utf8");
+    const rows = markdown.split("\n").filter((line) => line.startsWith("| `"));
+    assert.equal(rows.length, 20);
+    assert.ok(rows.length < total);
+  });
+
+  it("hands every eligible critical function to the test-depth family", () => {
+    // `critical-tests`, `test-quality` and `critical-coverage` all resolve
+    // their population through this one function.
+    const criticals = criticalFunctions(root, ["src"], { api: ts });
+    assert.equal(criticals.length, WIDE_HUBS);
+    assert.ok(criticals.every((entry) => entry.file === "src/hubs.ts"));
+  });
+
+  it("preserves the export/private filter while doing it", () => {
+    // Nothing here is private, so the filter must drop nothing — and the
+    // count above must not be the filter's doing.
+    const withPrivate = criticalFunctions(root, ["src"], { api: ts, includePrivate: true });
+    assert.equal(withPrivate.length, WIDE_HUBS);
+    // A module the policy does not call source still resolves to nothing.
+    assert.deepEqual(criticalFunctions(root, ["nowhere"], { api: ts }), []);
+  });
+
+  it("hands every one of them to critical-coverage", () => {
+    const lines = readFileSync(join(root, "src", "hubs.ts"), "utf8").split("\n");
+    const records: string[] = [];
+    lines.forEach((line, index) => {
+      records.push(`DA:${String(index + 1)},0`);
+      const declared = /^export function (?<name>\w+)/u.exec(line)?.groups?.["name"];
+      if (declared !== undefined) {
+        records.push(`FN:${String(index + 1)},${declared}`, `FNDA:0,${declared}`);
+      }
+    });
+    const lcov = ["TN:", "SF:src/hubs.ts", ...records, "end_of_record", ""].join("\n");
+    const gaps = criticalCoverageGaps({ root, sourcePaths: ["src"], report: null, lcov, api: ts });
+    assert.equal(gaps.length, WIDE_HUBS);
+    assert.ok(gaps.every((gap) => gap.measured && gap.missingLines.length > 0));
+  });
+
+  it("hands the files defining them to mutation targeting", async () => {
+    const selection = await selectTargets({ root, policy: DEFAULT_POLICY });
+    assert.ok(selection.ok, selection.ok ? "" : selection.message);
+    assert.equal(selection.source, "criticality");
+    assert.deepEqual(selection.files, ["src/hubs.ts"]);
+  });
+
+  it("prints the table it always printed", () => {
+    assert.ok(printed.some((line) => line.startsWith("Wrote ")));
   });
 });

@@ -6,6 +6,12 @@
  * `.kragg/criticality.json` for the gates that key off it
  * (`critical-tests`, `critical-coverage`) and for `brief`/`coverage` ranking.
  *
+ * THE TWO OUTPUTS ARE DELIBERATELY DIFFERENT SIZES. The table and the Markdown
+ * stop at the twenty riskiest functions, because that is a reading limit; the
+ * JSON carries every ranked function, because it is the enforcement input and
+ * a gate that sees twenty enforces on twenty. `criticality/report.ts` holds
+ * both halves of that decision.
+ *
  * Those gates SKIP VISIBLY when the JSON is absent or STALE rather than
  * passing silently, so this command is the documented remedy printed in their
  * skip reason — keep the two in sync.

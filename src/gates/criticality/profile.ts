@@ -20,8 +20,6 @@ import { buildCallGraph, type SourceFileList } from "./graph.ts";
 export const FAN_IN_THRESHOLD = 3;
 /** Betweenness at or above this makes a function critical. */
 export const BETWEENNESS_THRESHOLD = 0.1;
-/** How many of the riskiest functions a report shows. */
-export const TOP_N = 20;
 
 /**
  * Call-graph metrics for one function or method.
@@ -74,7 +72,6 @@ export interface CriticalityOptions {
   readonly analysis: AnalysisProgram;
   /** Narrow the analysis to specific files. Defaults to the whole program. */
   readonly files?: SourceFileList | undefined;
-  readonly topN?: number | undefined;
   readonly fanInThreshold?: number | undefined;
   readonly betweennessThreshold?: number | undefined;
 }
@@ -90,7 +87,16 @@ export interface CriticalityOptions {
 export type CriticalityAnalysis =
   | {
       readonly ok: true;
-      /** The riskiest functions, longest-first, capped at `topN`. */
+      /**
+       * EVERY function in the graph, riskiest first — never a truncated slice.
+       *
+       * This list is what enforcement runs on: the cache writes it to
+       * `.kragg/criticality.json`, and `critical-tests`, `critical-coverage`,
+       * the test-depth gates and mutation targeting all read it back from
+       * there. A cap applied here would silently shrink the enforced
+       * population, which is why there is no `topN` option: `report.ts`
+       * truncates when it RENDERS, and nowhere else. See `TOP_N` there.
+       */
       readonly profiles: readonly FunctionProfile[];
       /** The full graph, so a caller need not rebuild it. */
       readonly graph: DirectedGraph;
@@ -102,7 +108,12 @@ export type CriticalityAnalysis =
     };
 
 /**
- * Analyze call-graph centrality and return the riskiest functions.
+ * Analyze call-graph centrality and rank every function in the graph.
+ *
+ * The result is COMPLETE. Truncation is a presentation decision and lives in
+ * `report.ts`; returning a top-N slice from here truncated enforcement too,
+ * because the cache persists exactly what this returns and every criticality
+ * gate reads that file.
  *
  * Ordering mirrors Python exactly: a STABLE ascending sort by
  * `(betweenness, fanIn)` which is then reversed, so the result is descending
@@ -145,5 +156,5 @@ export function analyze(options: CriticalityOptions): CriticalityAnalysis {
 
   profiles.sort((a, b) => a.betweenness - b.betweenness || a.fanIn - b.fanIn);
   profiles.reverse();
-  return { ok: true, profiles: profiles.slice(0, options.topN ?? TOP_N), graph };
+  return { ok: true, profiles, graph };
 }

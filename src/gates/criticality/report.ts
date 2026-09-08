@@ -5,6 +5,16 @@
  * payload all live here because all three are the same decision — how the
  * numbers are shown to somebody — and because the JSON is a CROSS-LANGUAGE
  * CONTRACT that must be translated in exactly one place.
+ *
+ * ── TRUNCATION IS A HUMAN-FACING CONCERN, AND ONLY THAT ────────────────────
+ * `TOP_N` bounds what a PERSON reads: the `CRITICALITY.md` tables and the
+ * terminal table. It deliberately does NOT bound `writeJson`, which persists
+ * the complete ranked population, because that file is the enforcement input —
+ * `critical-tests`, `critical-coverage`, the test-depth gates, mutation
+ * targeting and `kragg map` all read it back. Capping it once meant this
+ * repo's own gates enforced on 4 of its 130 critical functions while the
+ * report looked complete. Keep the cap here, at the render, or the same
+ * failure returns in a new shape.
  */
 
 import { mkdirSync, readFileSync, writeFileSync } from "node:fs";
@@ -16,10 +26,21 @@ import { riskLabel, type FunctionProfile } from "./profile.ts";
 export { criticalityPath } from "./freshness.ts";
 
 /**
+ * How many of the riskiest functions a RENDERED report shows.
+ *
+ * A reading limit, not an analysis limit: `analyze` ranks the whole graph and
+ * `writeJson` persists all of it. Only `formatReport` and `formatTable` — the
+ * two things a human looks at — stop here.
+ */
+export const TOP_N = 20;
+
+/**
  * Format call-graph metrics as Markdown, mirroring Python's `format_report`.
  *
  * Critical functions come first because the report exists to point an agent at
- * them; the non-critical tail is context for where the boundary sits.
+ * them; the non-critical tail is context for where the boundary sits. Only the
+ * first {@link TOP_N} ranked functions are rendered; the full population stays
+ * in `.kragg/criticality.json` for the gates.
  */
 export function formatReport(profiles: readonly FunctionProfile[]): string {
   const lines: string[] = [
@@ -31,8 +52,9 @@ export function formatReport(profiles: readonly FunctionProfile[]): string {
     "When editing them, full types, docstrings, and tests are mandatory.",
     "",
   ];
-  const critical = profiles.filter((profile) => profile.isCritical);
-  const nonCritical = profiles.filter((profile) => !profile.isCritical);
+  const shown = profiles.slice(0, TOP_N);
+  const critical = shown.filter((profile) => profile.isCritical);
+  const nonCritical = shown.filter((profile) => !profile.isCritical);
 
   if (critical.length > 0) {
     lines.push(...formatSection("Critical", critical));
@@ -40,7 +62,7 @@ export function formatReport(profiles: readonly FunctionProfile[]): string {
   if (nonCritical.length > 0) {
     lines.push(...formatSection("Non-critical", nonCritical));
   }
-  if (profiles.length === 0) {
+  if (shown.length === 0) {
     lines.push("No functions found.");
   }
   return `${lines.join("\n")}\n`;
@@ -126,6 +148,14 @@ function round4(value: number): number {
 /**
  * Write machine-readable criticality data for agents and hooks.
  *
+ * WRITES EVERY PROFILE IT IS GIVEN. This file is not a report; it is the
+ * population the criticality gates enforce over, so it carries the complete
+ * ranked graph and lets each consumer apply its own `is_critical` filter.
+ * Truncating it to `TOP_N` — which this did — capped enforcement at whatever
+ * survived the display limit. Python still truncates here (`top_n=20` in
+ * `gates/criticality.py`); the record SHAPE is identical, only the number of
+ * entries differs, and `docs/spec-conformance.md` records the divergence.
+ *
  * `indent: 1` and the trailing newline match Python's
  * `json.dumps(payload, indent=1) + "\n"` byte for byte, so a repo that
  * switches implementations sees no diff beyond the node names themselves.
@@ -179,10 +209,12 @@ export function readJson(root: string): readonly CriticalityRecord[] {
  * Render the compact text table Python's `print_table` prints.
  *
  * Column widths are copied from the Python f-string so the two tools' terminal
- * output lines up when they are compared side by side.
+ * output lines up when they are compared side by side. Bounded by
+ * {@link TOP_N}, like the Markdown report and for the same reason.
  */
 export function formatTable(profiles: readonly FunctionProfile[]): string[] {
-  if (profiles.length === 0) {
+  const shown = profiles.slice(0, TOP_N);
+  if (shown.length === 0) {
     return ["No functions found."];
   }
   const lines: string[] = [
@@ -190,7 +222,7 @@ export function formatTable(profiles: readonly FunctionProfile[]): string[] {
       `${"Centrality".padStart(12)} ${"Risk".padStart(8)}`,
     "-".repeat(96),
   ];
-  for (const profile of profiles) {
+  for (const profile of shown) {
     lines.push(
       `${profile.name.padEnd(55)} ${String(profile.fanIn).padStart(8)} ` +
         `${String(profile.fanOut).padStart(8)} ` +

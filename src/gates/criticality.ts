@@ -68,7 +68,9 @@
  *  - `criticality/graph.ts` — pass 2, resolving each call against the checker;
  *  - `criticality/profile.ts` — the metrics, the thresholds and `analyze`;
  *  - `criticality/report.ts` — Markdown, the terminal table and the JSON
- *    cross-language contract;
+ *    cross-language contract. It also owns `TOP_N`, and owning it there is the
+ *    point: the two RENDERINGS stop at twenty, while the JSON the gates
+ *    enforce over carries the whole ranked population;
  *  - `criticality/freshness.ts` — whether the JSON on disk still describes
  *    THIS tree. The data is a cache of a derived fact, and a cache nobody
  *    validates is a gate reporting confidently on functions that no longer

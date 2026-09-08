@@ -186,6 +186,7 @@ naively will flag every one of them. They are enumerated with their evidence in
 | `detect-secrets` / `lint` / `audit` bundle nothing | Python bundles ruff and driving a bundled tool is not portable to npm. Tools are resolved from the project's own `node_modules/.bin`, and absence is a visible skip. |
 | `secret_name_suffixes` includes `ServiceKey` | Python's default list lacks `_service_key`. Listed in KNOWN_LIMITATIONS as a Python gap found during the port. |
 | criticality freshness | kragg-ts refuses stale data via the sidecar stamp; Python consumes a stale `criticality.json` as if current. The *file* is identical; the trust decision is not. |
+| `criticality.json` holds the **whole** ranked graph | Python's `analyze_criticality(top_n=20)` truncates the analysis itself, so its sidecar — the input every criticality gate enforces on — carries at most twenty records. kragg-ts truncates only the `CRITICALITY.md` tables and the terminal table, and persists every ranked function. Record SHAPE, key order and ranking are unchanged; only the number of records differs, and the `criticality` fixture is `applies_to: ["python"]`, so no TypeScript golden covers it. |
 | module naming in the syntax tier | kragg-ts names modules relative to the repo root, Python relative to the package root, because a TypeScript relative specifier is a filesystem path and a Python one is not. |
 
 Four defects found in the Python implementation during the port are recorded in

@@ -234,6 +234,7 @@ Deliberate, and documented at each site:
 | `detect-secrets` | Bundles no scanner. gitleaks, else secretlint, else a visible skip. |
 | `audit` | knip, which covers both vulture (dead code) and deptry (dependency hygiene). |
 | criticality | Fingerprinted by a sidecar stamp, so stale call-graph data is re-derived rather than trusted. `criticality.json` itself stays byte-compatible with Python's reader. |
+| criticality (top-20) | Python's `top_n=20` truncates the analysis, so its `criticality.json` — the input the criticality gates enforce on — never names more than twenty functions. Here twenty is a *display* limit on `CRITICALITY.md` and the terminal table only; the sidecar carries every ranked function, so the gates enforce on the whole eligible population. Same record shape, same ranking, more rows. |
 | `secret_name_suffixes` | Includes `ServiceKey`, which Python's default list lacks. |
 
 ## Supply chain
