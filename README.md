@@ -147,8 +147,12 @@ mostly-deterministic signals:
   documentation tree and flags critical functions with only example-based
   tests (property-based tests, via fast-check, kill more mutants).
 - **what's trustworthy** — `kragg flaky` mines the run journal for gates that
-  flipped on an unchanged commit; `--rerun N` re-runs the suite and ranks tests
-  by failure ratio.
+  flipped on an unchanged commit; `--rerun N` re-runs the suite N times under
+  the same `test_runner` and `test_paths` as `check`'s test gate and tallies
+  every test. A test whose outcome varies is flaky (exit 1); one that fails
+  every time is a stable failure, reported as such (exit 1). A run that did not
+  complete the intended suite — no runner, a crash, a timeout, zero tests
+  discovered — is exit 3 naming what happened, never "no flaky tests".
 
 Mutation and active flaky runs are deliberately **outside** `kragg check`: they
 are on-demand and CI surfaces, not inner-loop gates.

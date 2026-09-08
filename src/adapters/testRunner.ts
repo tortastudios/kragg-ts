@@ -117,18 +117,33 @@ export const TEST_GATE = "test-coverage";
 /** `code` for the coverage threshold, distinct from any test failure. */
 export const COVERAGE_BELOW_THRESHOLD = "coverage-below-threshold";
 
+/**
+ * Everything one invocation of the suite needs.
+ *
+ * `choice` and `testPaths` are REQUIRED, and that is the point: they are the
+ * two settings that decide WHICH runner runs WHICH files, and an optional
+ * field is a field a caller can forget. `kragg flaky --rerun` forgot both —
+ * it re-ran the suite under whatever runner inference happened to pick, over
+ * a selection `node --test` cannot expand — and then reported the resulting
+ * non-suite as evidence that nothing was flaky. Every caller now has to say
+ * what it is running, in the same words the policy uses.
+ */
 export interface TestRunnerOptions {
   readonly env: ProjectEnvironment;
-  /** `test_runner` policy setting. Defaults to `"auto"`. */
-  readonly choice?: TestRunnerChoice | undefined;
+  /** `test_runner` policy setting; `"auto"` to infer. */
+  readonly choice: TestRunnerChoice;
   /** `coverage_fail_under`. Zero or less disables coverage entirely. */
   readonly coverageFailUnder: number;
   /** `coverage_report_path`, relative to the project root. */
   readonly coverageReportPath?: string | undefined;
   /** `max_violations_per_gate`. */
   readonly maxViolations: number;
-  /** Paths passed to `node --test`; ignored by the other runners. */
-  readonly testPatterns?: readonly string[] | undefined;
+  /**
+   * `test_paths` policy setting, as directories. Expanded to globs for
+   * `node --test` by `support/testCommands.ts`; the other runners discover
+   * their own files and ignore it.
+   */
+  readonly testPaths: readonly string[];
   readonly timeoutMs?: number | undefined;
 }
 
@@ -183,7 +198,7 @@ export type TestRunOutcome = TestRunFindings | Unavailable;
 /** Detect, run, parse. See the module docs for every judgement call. */
 export async function runTests(options: TestRunnerOptions): Promise<TestRunOutcome> {
   const { env } = options;
-  const detection = detectTestRunner(env.root, options.choice ?? "auto");
+  const detection = detectTestRunner(env.root, options.choice);
   if (detection.runner === undefined) {
     return notConfigured(skipReason(detection, env));
   }
@@ -215,7 +230,7 @@ async function runInto(
   if (withCoverage) {
     mkdirIgnoringErrors(layout.coverageDir);
   }
-  const command = buildCommand(bin, runner, layout, withCoverage, options.testPatterns ?? []);
+  const command = buildCommand(bin, runner, layout, withCoverage, options.testPaths);
   const result = await runCommand(TEST_GATE, command, layout.root, runOptions(options.timeoutMs));
 
   const environmentFailure = runnerMissing(options.env, runner, result.stdout, result.stderr);
