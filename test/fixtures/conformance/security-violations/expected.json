@@ -1,0 +1,101 @@
+{
+ "schema_version": 1,
+ "kragg_version": "<kragg-version>",
+ "command": "security",
+ "mode": "full",
+ "targets": [
+  "src"
+ ],
+ "git_sha": null,
+ "started_at": "<started-at>",
+ "duration_ms": 0,
+ "passed": false,
+ "exit_code": 1,
+ "summary": {
+  "gates_total": 4,
+  "gates_passed": 0,
+  "gates_failed": 2,
+  "gates_skipped": 2,
+  "violations_total": 3,
+  "violations_shown": 2
+ },
+ "gates": [
+  {
+   "name": "forbidden-calls",
+   "passed": false,
+   "skipped": false,
+   "skip_reason": null,
+   "error": false,
+   "duration_ms": 0,
+   "violation_count": 2,
+   "violations": [
+    {
+     "file": "src/index.ts",
+     "line": 20,
+     "column": 10,
+     "code": "forbidden-call",
+     "message": "forbidden call `src/unsafe.runShell` (banned: `src/unsafe`) (+1 more at src/index.ts:24:10)",
+     "fix_hint": "call the approved runner instead"
+    }
+   ],
+   "truncated": false,
+   "raw_output": null,
+   "advisories": [],
+   "advisory_count": 0
+  },
+  {
+   "name": "secret-default",
+   "passed": false,
+   "skipped": false,
+   "skip_reason": null,
+   "error": false,
+   "duration_ms": 0,
+   "violation_count": 1,
+   "violations": [
+    {
+     "file": "src/index.ts",
+     "line": 27,
+     "column": 39,
+     "code": "secret-default",
+     "message": "secret `apiKey` silently defaults to empty",
+     "fix_hint": "read it with no fallback so startup fails loudly (`process.env.X ?? throwIfMissing(\"X\")`), or validate it non-empty at the boundary"
+    }
+   ],
+   "truncated": false,
+   "raw_output": null,
+   "advisories": [],
+   "advisory_count": 0
+  },
+  {
+   "name": "detect-secrets",
+   "passed": false,
+   "skipped": true,
+   "skip_reason": "disabled by policy (secret_scanner = \"off\")",
+   "error": false,
+   "duration_ms": 0,
+   "violation_count": 0,
+   "violations": [],
+   "truncated": false,
+   "raw_output": null,
+   "advisories": [],
+   "advisory_count": 0
+  },
+  {
+   "name": "audit",
+   "passed": false,
+   "skipped": true,
+   "skip_reason": "static gates failed",
+   "error": false,
+   "duration_ms": 0,
+   "violation_count": 0,
+   "violations": [],
+   "truncated": false,
+   "raw_output": null,
+   "advisories": [],
+   "advisory_count": 0
+  }
+ ],
+ "next_actions": [
+  "fix the violations at the file:line locations above, then re-run `kragg security`"
+ ]
+}

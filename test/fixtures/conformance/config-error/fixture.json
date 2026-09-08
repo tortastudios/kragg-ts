@@ -1,0 +1,22 @@
+{
+  "spec_version": 1,
+  "recorded_against": {
+    "spec": "tortastudios/crag spec/SPEC.md",
+    "crag_commit": "f76a7d0321ca6498d5c00653c493aa5ffdf2383d",
+    "crag_release": "0.9.0"
+  },
+  "kind": "streams",
+  "argv": ["check", "--format", "json"],
+  "setup": { "git": false },
+  "expected_exit": 2,
+  "journal": false,
+  "notes": "A config file the implementation cannot parse is the USER'S INPUT being wrong, not the machine being broken: exit 2, no report on stdout, the reason on stderr naming the file (SPEC.md section 3). Exit 3 here would send the reader off to reinstall a toolchain over a missing brace.",
+  "divergences": [
+    {
+      "id": "SPEC-11.1",
+      "summary": "RECORDED DRIFT, not divergence: kragg-ts maps PolicyError to exit 2 as the contract requires, while Python 0.9.0 lets tomllib.TOMLDecodeError escape `load_policy` and dies with a traceback and exit 1. crag's own `config-error` fixture carries a `known_failure.python` marker for it. Nothing here should be changed to match Python.",
+      "spec": "crag spec/SPEC.md section 11, item 1",
+      "doc": "docs/spec-conformance.md#12-recorded-drift-in-the-python-sibling"
+    }
+  ]
+}

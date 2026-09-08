@@ -1,0 +1,15 @@
+{
+  "spec_version": 1,
+  "recorded_against": {
+    "spec": "tortastudios/crag spec/SPEC.md",
+    "crag_commit": "f76a7d0321ca6498d5c00653c493aa5ffdf2383d",
+    "crag_release": "0.9.0"
+  },
+  "kind": "report",
+  "argv": ["security", "--format", "json"],
+  "setup": { "git": false },
+  "expected_exit": 1,
+  "journal": true,
+  "notes": "Exit 1: gates ran and found violations. This fixture pins the count semantics of SPEC.md section 2.5 — `forbidden-calls` reports two findings, the display list collapses them into one entry that names the second location, and `truncated` stays false because dedupe, not the cap, is what shrank the list. A consumer reading `violations.length` as the count would be wrong here, which is the point. It also pins the SLOW-tier rule (SPEC.md section 4.1): `audit` skips with `static gates failed`, not with `incremental mode`, because this is a full-mode run whose FAST gates went red.",
+  "divergences": []
+}

@@ -1,0 +1,10 @@
+{
+ "cases": {
+  "invalid-json": "",
+  "not-an-object": "",
+  "unknown-keys-ignored": "",
+  "stop-hook-active": "",
+  "session-start": "{\"hookSpecificOutput\":{\"hookEventName\":\"SessionStart\",\"additionalContext\":\"last run: FAIL (check, full mode, 2026-08-07T12:05:00+00:00, 1.5s)\\nfailing gates: secret-default (2 violations)\\npass streak: 0 of last 2 runs\\nslowest gate: tsc (0.9s)\"}}",
+  "post-tool-use-block": "{\"decision\":\"block\",\"reason\":\"kragg gates failed:\\n[SKIP] lint — lint gate disabled (lint_tool = off)\\n[ERROR] tsc (0.0s)\\n  tsc is not installed in this project (looked in <project>/node_modules/.bin).\\n  kragg will not fall back to a global tsc: a different version would report results that do not reproduce in CI.\\n  Fix: install typescript as a dev dependency (or run `install dependencies` if already declared)\\n[PASS] typing-strictness (0.0s)\\n[PASS] complexity (0.0s)\\n[PASS] maintainability (0.0s)\\n[PASS] halstead (0.0s)\\n[PASS] type-complexity (0.0s)\\n[SKIP] boundaries — no layers configured\\n[PASS] structure (0.0s)\\n[SKIP] forbidden-calls — no forbidden calls configured\\n[PASS] nullable-default (0.0s)\\n[SKIP] critical-tests — not a git repository (nothing to diff a change set against)\\n[PASS] test-quality (0.0s)\\n[FAIL] secret-default (0.0s) — 1 violations\\n  src/index.ts:7:39 secret-default secret `apiKey` silently defaults to empty -> read it with no fallback so startup fails loudly (`process.env.X ?? throwIfMissing(\\\"X\\\")`), or validate it non-empty at the boundary\\n[SKIP] detect-secrets — disabled by policy (secret_scanner = \\\"off\\\")\\n[SKIP] test-coverage — incremental mode\\n[SKIP] critical-coverage — incremental mode\\n[SKIP] audit — incremental mode\\n8 passed, 2 failed, 8 skipped\\nnext: tsc: Fix: install typescript as a dev dependency (or run `install dependencies` if already declared)\"}"
+ }
+}

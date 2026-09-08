@@ -1,0 +1,9 @@
+{
+  "source_paths": ["src"],
+  "test_paths": ["test"],
+  "secret_scanner": "off",
+  "max_violations_per_gate": 1,
+  "forbidden_calls": {
+    "src/unsafe": "call the approved runner instead"
+  }
+}

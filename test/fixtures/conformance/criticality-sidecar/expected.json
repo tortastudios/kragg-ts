@@ -1,0 +1,60 @@
+{
+ "artifacts": {
+  ".kragg/criticality.json": [
+   {
+    "name": "src#normalize",
+    "fan_in": 3,
+    "fan_out": 1,
+    "betweenness": 0.25,
+    "is_critical": true,
+    "risk": "HIGH"
+   },
+   {
+    "name": "src#validate",
+    "fan_in": 1,
+    "fan_out": 0,
+    "betweenness": 0,
+    "is_critical": false,
+    "risk": "low"
+   },
+   {
+    "name": "src#parse",
+    "fan_in": 0,
+    "fan_out": 1,
+    "betweenness": 0,
+    "is_critical": false,
+    "risk": "low"
+   },
+   {
+    "name": "src#render",
+    "fan_in": 0,
+    "fan_out": 1,
+    "betweenness": 0,
+    "is_critical": false,
+    "risk": "low"
+   },
+   {
+    "name": "src#report",
+    "fan_in": 0,
+    "fan_out": 1,
+    "betweenness": 0,
+    "is_critical": false,
+    "risk": "low"
+   }
+  ],
+  ".kragg/criticality.stamp.json": {
+   "version": 1,
+   "scan_paths": [
+    "src",
+    "test"
+   ],
+   "files": 2,
+   "bytes": 1340,
+   "newest_mtime_ms": 0
+  }
+ },
+ "paths": [
+  ".kragg/criticality.json",
+  ".kragg/criticality.stamp.json"
+ ]
+}

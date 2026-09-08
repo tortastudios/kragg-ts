@@ -18,7 +18,30 @@ a previously green run red — see [Gate additions](#gate-additions) below.
 
 ## [Unreleased]
 
-Nothing yet.
+### Added
+
+- TOR-1380: executable conformance checks against the Python sibling. The
+  sibling grew a normative `spec/` in its 0.9.0 release, so
+  `.github/workflows/ci.yml`'s `TODO(spec)` is now a real `conformance` job: it
+  checks `tortastudios/crag` out at the **pinned full commit SHA**
+  `f76a7d0321ca6498d5c00653c493aa5ffdf2383d`, runs `spec/run_conformance.py`
+  against `dist/cli.js`, and then runs this repo's own fixtures. Seven
+  versioned fixtures live in `test/fixtures/conformance/`, driven by
+  `test/conformance.test.ts` (`pnpm run conformance`), covering the report
+  fields and their nulls, exit codes 0/1/2/3, skipped and errored gates, the
+  journal as a reader and a writer, `.kragg/criticality.json` and its sidecar,
+  and the `hook claude` protocol. Each fixture records the spec revision it was
+  taken against and, where the two implementations deliberately differ, an
+  explicit divergence record instead of a normalization.
+  `docs/spec-conformance.md` is rewritten around what now exists: where the
+  spec lives, how to run both suites, every normalization rule and its
+  justification, the divergence table, and the recorded drift on both sides.
+
+### Fixed
+
+- TOR-1380: `docs/spec-conformance.md` no longer claims the spec "is still not
+  created" or describes the conformance suite in the conditional. It has
+  existed since crag `f76a7d03` (2026-08-07).
 
 ## [0.0.0] — unreleased
 

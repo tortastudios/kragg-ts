@@ -1,0 +1,29 @@
+{
+  "spec_version": 1,
+  "recorded_against": {
+    "spec": "tortastudios/crag spec/SPEC.md",
+    "crag_commit": "f76a7d0321ca6498d5c00653c493aa5ffdf2383d",
+    "crag_release": "0.9.0"
+  },
+  "kind": "artifact",
+  "argv": ["criticality", "--write"],
+  "setup": { "git": false },
+  "expected_exit": 0,
+  "journal": false,
+  "artifacts": [".kragg/criticality.json", ".kragg/criticality.stamp.json"],
+  "notes": "The shared artifact and the sidecar beside it. `.kragg/criticality.json` is a LIST of six-key records and nothing else — Python's `read_json` filters it to `every dict in it` and hands each back as a profile, so a metadata object here would surface downstream as a nameless function. The numbers ARE the contract (SPEC.md section 6): the fixture's call graph funnels three entry points through `normalize`, which is why it carries the fan-in and the only non-zero betweenness. Record order is normalized away before diffing because tie order is implementation-defined.",
+  "divergences": [
+    {
+      "id": "SPEC-10.9",
+      "summary": "node names are repo-root-relative `module#name` in kragg-ts (`src#normalize`) and package-relative dotted paths in Python (`pkg.mod.func`), because a TypeScript relative specifier is a filesystem path and a Python one is not. Names are never diffed across implementations.",
+      "spec": "crag spec/SPEC.md sections 6 and 10, row 9",
+      "doc": "docs/spec-conformance.md#11-intentional-divergences"
+    },
+    {
+      "id": "SPEC-10.8",
+      "summary": "the freshness fingerprint is a SEPARATE file, `.kragg/criticality.stamp.json`, which Python never opens. Its presence must change nothing the Python reader can observe — hence a second golden for it, kept out of the shared list.",
+      "spec": "crag spec/SPEC.md sections 6 and 10, row 8",
+      "doc": "docs/spec-conformance.md#5-kraggcriticalityjson-and-the-sidecar-stamp"
+    }
+  ]
+}

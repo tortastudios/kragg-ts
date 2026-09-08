@@ -1,0 +1,62 @@
+{
+  "spec_version": 1,
+  "recorded_against": {
+    "spec": "tortastudios/crag spec/SPEC.md",
+    "crag_commit": "f76a7d0321ca6498d5c00653c493aa5ffdf2383d",
+    "crag_release": "0.9.0"
+  },
+  "kind": "hook",
+  "setup": {
+    "git": false
+  },
+  "expected_exit": 0,
+  "journal": false,
+  "cases": [
+    {
+      "name": "invalid-json",
+      "stdin": "not json at all",
+      "why": "A payload that is not JSON degrades to a no-op. Hooks fail open: any internal failure still exits 0, because a broken guardrail must not wedge an editing session (SPEC.md section 7)."
+    },
+    {
+      "name": "not-an-object",
+      "stdin": "[]",
+      "why": "Valid JSON that is not an object is narrowed to an empty payload rather than indexed."
+    },
+    {
+      "name": "unknown-keys-ignored",
+      "stdin": "{\"hook_event_name\":\"PostToolUse\",\"tool_name\":\"Edit\",\"tool_input\":{\"file_path\":\"README.md\"},\"transcript_path\":\"/nope\",\"future_field\":{\"nested\":1}}",
+      "why": "Unknown keys are ignored, and an edit to a non-source file is a no-op \u2014 the narrowing half of the stdin protocol."
+    },
+    {
+      "name": "stop-hook-active",
+      "stdin": "{\"hook_event_name\":\"Stop\",\"stop_hook_active\":true}",
+      "why": "The infinite-loop guard: a Stop that follows a Stop this hook already blocked is a no-op, or a repo with one unfixable violation would block every stop forever."
+    },
+    {
+      "name": "session-start",
+      "stdin": "{\"hook_event_name\":\"SessionStart\",\"source\":\"startup\"}",
+      "why": "The `hookSpecificOutput` envelope, which is what Claude Code reads `additionalContext` out of. Its content is summarized from the committed journal, so it is fixed."
+    },
+    {
+      "name": "post-tool-use-block",
+      "stdin": "{\"hook_event_name\":\"PostToolUse\",\"tool_name\":\"Edit\",\"tool_input\":{\"file_path\":\"src/index.ts\"}}",
+      "why": "The blocking shape: `{\"decision\":\"block\",\"reason\":...}` on exit 0, which is the only shape whose text reaches the model. The reason carries the rendered report, so the fixture's gates must fail \u2014 `apiKey = \"\"` in src/index.ts is the honest failure it blocks on. `live_durations` is set because the reason embeds the durations of gates that just ran; the SessionStart case leaves it off, because its numbers come out of the committed journal and are fixed.",
+      "live_durations": true
+    }
+  ],
+  "notes": "Every case exits 0. That is not laxity: Claude Code parses hook stdout at exit 0 and NOWHERE else, and treats other non-zero codes as advisory notices the model never sees, so a hook that returned 1 on failure would look installed and do nothing.",
+  "divergences": [
+    {
+      "id": "SPEC-10.11",
+      "summary": "SessionStart output: kragg-ts emits the `hookSpecificOutput` JSON envelope; Python prints plain-text context lines. Both are consumed by Claude Code, but only the envelope injects `additionalContext`. Candidate for convergence; not a bug on either side.",
+      "spec": "crag spec/SPEC.md section 10, row 11",
+      "doc": "docs/spec-conformance.md#11-intentional-divergences"
+    },
+    {
+      "id": "SPEC-11.3",
+      "summary": "RECORDED DRIFT, not divergence: kragg-ts caps hook stdout at 9000 characters with an in-band marker because the harness spills longer output to a file the model never sees. Python does not truncate, so a very large failure report silently loses its blocking message. Do not remove the cap to match Python.",
+      "spec": "crag spec/SPEC.md sections 7 and 11, item 3",
+      "doc": "docs/spec-conformance.md#12-recorded-drift-in-the-python-sibling"
+    }
+  ]
+}

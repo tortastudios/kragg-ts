@@ -2,8 +2,8 @@
 
 `kragg` exists in two implementations:
 
-- **Python** — `tortastudios/crag`, package `kragg`. The reference
-  implementation and, today, the source of truth.
+- **Python** — `tortastudios/crag`, package `kragg`. Historically the de facto
+  authority (`src/kragg/report.py`).
 - **TypeScript** — this repo, `tortastudios/kragg-ts`, package `kragg` on npm.
 
 They are siblings, not a port and a fork. An agent or a CI job must be able to
@@ -11,27 +11,67 @@ consume either one's output without knowing which produced it.
 
 ## Where the spec lives
 
-> **Status: still not created.** `crag/spec/` does not exist as of 2026-08-06.
-> `crag/src/kragg/report.py` remains the de facto authority, and this repo's
-> `src/engine/reportPayload.ts` was ported from it directly.
+`tortastudios/crag`, directory `spec/`, since its **0.9.0** release:
 
-Everything below is therefore a description of what the two implementations
-*do*, verified against both trees, not a normative document either one was
-written against. That gap is the whole reason this file exists.
+| file | what it is |
+| --- | --- |
+| `spec/SPEC.md` | the normative, language-neutral contract, binding on both repos |
+| `spec/run_conformance.py` | a stdlib-only runner: fixtures in, normalized JSON diff out |
+| `spec/fixtures/` | one directory per fixture; `applies_to` says which implementations it runs against |
+
+**The pin is `f76a7d0321ca6498d5c00653c493aa5ffdf2383d`** (crag `Release 0.9.0`).
+A full commit SHA, never a branch and never a tag. An upstream edit that turns
+an unrelated pull request here red is how people learn to ignore a check;
+bumping the pin is a deliberate act, and the SPEC.md and fixture diff between
+two SHAs is read the way a schema migration is read. The same SHA appears in
+three places, and `test/conformance.test.ts` fails if they disagree:
+
+1. `.github/workflows/ci.yml`, as the `ref:` the sibling is checked out at;
+2. every `fixture.json` under `test/fixtures/conformance/`, as
+   `recorded_against.crag_commit`;
+3. this document.
+
+## Running the two suites
+
+**Cross-language** — this implementation against the sibling's fixtures. Only
+two of them declare `applies_to: typescript` (`config-error` and
+`ts-missing-tsc`); the rest report `SKIP`. The runner diffs goldens exactly, so
+this is where an accidental wire-format change surfaces:
+
+```sh
+pnpm run build
+cd /path/to/crag && python3 spec/run_conformance.py \
+  --impl typescript --tool node /path/to/kragg-ts/dist/cli.js
+```
+
+`--tool` consumes the rest of the argv, so it goes last. `--self-test`
+exercises the runner's own normalizer and validator and is worth running first:
+if it fails, nothing the runner says about kragg-ts means anything.
+
+**Local fixtures** — everything the cross-language suite does not reach:
+
+```sh
+pnpm run conformance          # or: node --test test/conformance.test.ts
+```
+
+They also run as part of `pnpm test`. `KRAGG_CONFORMANCE_UPDATE=1` re-records
+the goldens; that is a contract decision, reviewed as a diff, not a way to get
+a red suite green.
+
+CI runs both in one job (`conformance` in `.github/workflows/ci.yml`), against
+`dist/cli.js` — the artifact a consumer installs, never `src/cli.ts`.
 
 ## The shared surface, as implemented
 
-Five things are shared. Gate *names* and the set of gates offered are not:
-`ruff-lint` has no TypeScript analogue and does not need one, and `lint` here
-drives whichever of oxlint/biome/eslint the project installed. What is shared
-is the shape of the report that carries them.
+Six things are shared, plus the config key vocabulary. Gate *names* and the set
+of gates offered are **not**: `ruff` has no TypeScript analogue, `lint` here
+drives whichever of oxlint/biome/eslint the project installed, and either side
+may add a gate without consulting the other. What is shared is the shape of the
+report that carries them.
 
 ### 1. The report JSON, `schema_version: 1`
 
-kragg-ts emits a **superset**: every key Python emits, in the same nesting,
-with `null` rather than an absent key for anything missing — consumers index
-unconditionally — plus the two additive keys marked `*` below. Keys are
-snake_case on the wire in both languages; TypeScript keeps camelCase
+Keys are snake_case on the wire in both languages. TypeScript keeps camelCase
 internally and translates in exactly one place,
 [`src/engine/reportPayload.ts`](../src/engine/reportPayload.ts). Python's
 `ReportPayload`/`GatePayload`/`SummaryPayload`/`ViolationPayload` TypedDicts in
@@ -49,70 +89,93 @@ GatePayload     name, passed, skipped, skip_reason, error, duration_ms,
 ViolationPayload  file, line, column, code, message, fix_hint
 ```
 
-`*` **TypeScript only.** An advisory is something a gate reports without
-failing on it — `skipLibCheck`, non-null assertions, `audit` findings below the
-severity floor. Advisories use the `ViolationPayload` shape but ride in their
-own list, because every consumer today treats an entry in `violations` as
-something to go and fix. Nothing in `passed`, `exit_code` or `violation_count`
-reads them, and none reaches the journal.
+**Null, never absent.** Every key above is always present; a value with nothing
+to say is `null`. Consumers index unconditionally.
 
-Adding them was safe because `GatePayload` is **write-only on the Python
-side**: `report.py` never reads a gate object back, and `journal.py` — the only
-place either sibling does — indexes five named keys (`name`, `passed`,
-`skipped`, `duration_ms`, `violation_count`). That was verified by running
-Python's real `append_run` / `read_runs` / `render_status_lines` against a live
-kragg-ts `--format json` payload: extra keys ignored, no declared key missing,
-journal entries byte-shape-identical.
+Six values must *derive* from `gates[]`, and both suites re-derive them rather
+than trusting the recorded bytes: the four gate counts, `violations_total`,
+`violations_shown`, `duration_ms` (the sum of the gate durations), `passed`
+(`all(g.passed or g.skipped)`), and `exit_code` (section 3).
 
-**Do not assume the next additive key is equally safe.** Run the same check.
+`violation_count` is the true total of raw findings. `violations` is a
+*display* list: findings sharing a `(code, message)` may be collapsed into one
+entry that names the extra locations, and the list is capped at
+`max_violations_per_gate` (default 25) with `truncated: true` when the cap
+dropped entries. So `truncated: false` does **not** imply
+`violations.length === violation_count` — the `security-violations` fixture
+pins exactly that case. A consumer reading `violations.length` as the count is
+reading the wrong field, in either implementation.
 
-`violation_count` is the true total; `violations` may be capped
-(`max_violations_per_gate`, default 25) with `truncated: true` saying so. A
-consumer that reads `violations.length` as the count is reading the wrong
-field, in either implementation.
+### 2. Additive keys, and the rule that makes them legal
 
-### 2. Exit codes
+`*` marks the two **TypeScript-only** keys. An advisory is something a gate
+reports without failing on it — `skipLibCheck`, non-null assertions, `audit`
+findings below the severity floor. Advisories use the `ViolationPayload` shape
+but ride in their own list, because every consumer today treats an entry in
+`violations` as something to go and fix. Nothing in `passed`, `exit_code` or
+`violation_count` reads them, and none reaches the journal.
+
+They are legal at `schema_version` 1 because they are **additive and provably
+unread**. The proof, which any future additive key must repeat:
+
+1. Find every place the other implementation *reads* the structure — not where
+   it writes one. For gate objects that is `src/kragg/journal.py`, which
+   indexes five named keys (`name`, `passed`, `skipped`, `duration_ms`,
+   `violation_count`) and ignores everything else. `report.py` only ever
+   writes.
+2. Run the other implementation's readers against a real payload from yours.
+3. Confirm no key it declares went missing and anything it persists is
+   byte-shape-identical.
+
+That was done for `advisories`/`advisory_count`. **Do not assume the next one
+is equally safe.** Renaming, repurposing or retyping an existing key is never
+additive; neither is adding an entry to a structure a consumer *iterates*
+rather than indexes, which is why the criticality freshness stamp is a sidecar
+file (section 5) and not a record in `criticality.json`.
+
+The cross-language runner reports an unknown gate key as a *note*, because it
+cannot prove "unread" — a human must. `test/conformanceContract.ts` is
+deliberately stricter and **fails** on a third additive key, so a new wire key
+cannot reach `main` without someone redoing the proof above.
+
+### 3. Exit codes
 
 | Code | Meaning |
 | --- | --- |
-| 0 | all gates passed (a skipped gate is not a failure) |
+| 0 | all gates passed — a skipped gate is not a failure |
 | 1 | gates ran and found violations |
 | 2 | usage error, or unusable config |
 | 3 | environment broken — a gate could not run |
 
-Exit 3 outranks exit 1: when the environment is broken, the other findings are
-unreliable. Python names the same four constants in `report.py`
-(`EXIT_OK`/`EXIT_GATE_FAILURES`/`EXIT_USAGE`/`EXIT_ENVIRONMENT`); TypeScript
-re-exports them from `src/index.ts`.
+Exit 3 outranks exit 1: when the environment is broken the other findings are
+unreliable, so `exit_code = 3 if any(error) else (0 if passed else 1)`. Config
+errors are 2, not 3 — a file the implementation cannot parse is the user's
+input being wrong, not the machine being broken, and exit 3 would send the
+reader off to reinstall a toolchain over a missing brace. When a report is
+emitted the process status equals `report.exit_code`. Python names the four
+constants in `report.py` (`EXIT_OK`/`EXIT_GATE_FAILURES`/`EXIT_USAGE`/
+`EXIT_ENVIRONMENT`); TypeScript re-exports them from `src/index.ts`.
 
-### 3. Pipeline semantics
+### 4. Pipeline semantics
 
 All FAST gates run even after one fails, so one invocation reveals every
-failure. SLOW gates skip once any FAST gate has failed, unless forced
-(`--all`). `--fail-fast` halts the pipeline and reports every remaining gate as
-skipped with reason `fail-fast` rather than omitting it. See
+failure. SLOW gates skip once any FAST gate has failed — reason `static gates
+failed` — unless forced with `--all`. `--fail-fast` halts the pipeline and
+reports every remaining gate as skipped with reason `fail-fast` rather than
+omitting it: the report always lists the whole pipeline. See
 [`src/engine/gate.ts`](../src/engine/gate.ts), ported from `check.py`.
 
-The three-state outcome is part of the contract, not a rendering detail: a gate
-that ran and found nothing (`passed`), a gate that deliberately did not run
-(`skipped: true` with a `skip_reason`), and a gate that *could not* run
-(`error: true`) are three different facts and must stay three.
+The three-state outcome is contract, not rendering: a gate that ran clean
+(`passed`), a gate that deliberately did not run (`skipped` with a
+`skip_reason`), and a gate that *could not* run (`error: true`) are three
+different facts and must stay three. A gate whose policy input is empty — no
+layers for `boundaries`, no `forbidden_calls`, no `secret_name_suffixes` —
+skips **visibly**, with a reason naming what is unconfigured.
 
-### 4. `.kragg/history.jsonl`
+Modes: `full`, `file` (`--file`), `changed` (`--changed`/`--since`). The latter
+two are incremental and SLOW gates skip with reason `incremental mode`.
 
-Append-only JSON Lines, one entry per run, rotated at 1000 lines down to the
-most recent 500. Both sides write the identical entry:
-
-```
-schema_version, ts, command, mode, git_sha, git_dirty, passed,
-exit_code, duration_ms, gates[]
-gates[]: name, passed, skipped, duration_ms, violation_count
-```
-
-A half-written final line from an interrupted run is skipped by the reader on
-both sides, not treated as corruption of the file.
-
-### 5. `.kragg/criticality.json`, and the sidecar stamp
+### 5. `.kragg/criticality.json` and the sidecar stamp
 
 The file is a **list** of profile records, written by Python's `write_json` as
 `{name, fan_in, fan_out, betweenness, is_critical, risk}` and read back by
@@ -125,11 +188,10 @@ return [entry for entry in data if isinstance(entry, dict)]
 ```
 
 **This is why kragg-ts's freshness fingerprint is not in that file.** The top
-level is a list, so there is nowhere to put a metadata object that Python
-would not hand straight back to its callers as a profile record — the filter
-above keeps any dict it finds, and a record with no `name` would flow into
-gates that expect one. Repeating a whole-tree fact across all N records instead
-would still change what Python reads.
+level is a list, so there is nowhere to put a metadata object that Python would
+not hand straight back to its callers as a profile record — a record with no
+`name` would flow into gates that expect one. Repeating a whole-tree fact
+across all N records instead would still change what Python reads.
 
 So kragg-ts writes a **separate file**, `.kragg/criticality.stamp.json`
 (`version`, `scan_paths`, `files`, `bytes`, `newest_mtime_ms`), and
@@ -139,11 +201,34 @@ it does open is unchanged. See
 [`src/gates/criticality/freshness.ts`](../src/gates/criticality/freshness.ts)
 for the full argument and the two known gaps in the fingerprint.
 
-A conformance suite should assert exactly this: that a kragg-ts run leaves
-`criticality.json` readable by `read_json` with the same records, and that the
-presence or absence of the sidecar changes nothing Python can see.
+The numbers are the contract. `betweenness` is normalized betweenness
+centrality to 4 decimal places (kragg-ts reproduces networkx's algorithm; a
+Python `0.0` and a TypeScript `0` are the same number). Records are sorted by
+descending `(betweenness, fan_in)` and truncated to the top 20; **order among
+ties is implementation-defined**, so both suites sort canonically before
+diffing. The `criticality-sidecar` fixture pins both files; every other fixture
+validates whichever of them a run happens to leave behind.
 
-### 6. The `hook claude` stdin protocol
+### 6. `.kragg/history.jsonl` (the journal)
+
+Append-only JSON Lines, one entry per run, written by every `check`/`security`
+run unless `--no-journal`, rotated at 1000 lines down to the most recent 500.
+Both sides write the identical entry:
+
+```
+schema_version, ts, command, mode, git_sha, git_dirty, passed,
+exit_code, duration_ms, gates[]
+gates[]: name, passed, skipped, duration_ms, violation_count
+```
+
+Those five gate keys are the **entire read surface of a gate object** in either
+sibling, which is what makes additive gate keys safe (section 2). A
+half-written final line from an interrupted run is skipped by the reader on
+both sides, not treated as corruption; the `journal-reader` fixture ships a
+journal that ends mid-token and asserts `status --format json` returns the two
+complete entries. Journal writes never fail a check.
+
+### 7. The `hook claude` stdin protocol
 
 Both CLIs expose `kragg hook claude` (Python: `cli.py`'s `hook` subparser with
 `choices=("claude",)`; TypeScript: `src/commands/hook.ts`). It reads one Claude
@@ -158,9 +243,11 @@ Emitted, on **exit 0 only** — Claude Code parses hook stdout JSON at exit 0 an
 nowhere else:
 
 - `{"decision":"block","reason":...}` for PostToolUse and Stop, which is the
-  shape whose `reason` reaches the model;
+  shape whose `reason` reaches the model. A Stop carrying `stop_hook_active` is
+  a no-op, or a repo with one unfixable violation would block every stop
+  forever;
 - `{"hookSpecificOutput":{"hookEventName":"SessionStart","additionalContext":...}}`
-  for SessionStart.
+  for SessionStart — see divergence 11 below.
 
 Output is truncated at 9000 characters with an in-band marker, because the
 harness spills over-long hook output to a file where the model never sees it.
@@ -169,85 +256,168 @@ kragg, since a broken guardrail must not become a broken editing session. See
 [`src/hooks/protocol.ts`](../src/hooks/protocol.ts) and
 [`src/hooks/claude.ts`](../src/hooks/claude.ts).
 
-## Intentional divergences a conformance suite must encode
+### 8. Configuration
 
-These are not bugs to converge; a suite that diffs the two implementations
-naively will flag every one of them. They are enumerated with their evidence in
-[README.md](../README.md#differences-from-the-python-sibling) and
-[KNOWN_LIMITATIONS.md](../KNOWN_LIMITATIONS.md).
+Same key vocabulary, snake_case, on both sides; only the carrier differs —
+`kragg.toml` / `pyproject.toml [tool.kragg]` in Python, `kragg.json` /
+`package.json` `"kragg"` here. The standalone file wins outright; there is no
+merging. kragg-ts adds tool-selection keys (`lint_tool`, `test_runner`,
+`secret_scanner`, `audit_severity`) that have no Python analogue, where `"off"`
+is a deliberate, visible disable: the gate SKIPs with a reason saying so.
+Malformed *values* fail closed to the stricter default; a file that cannot be
+parsed at all is a usage error (exit 2).
 
-| Divergence | Why it is intentional |
+## 9. Fixtures in this repository
+
+`test/fixtures/conformance/<name>/` holds `fixture.json` (the manifest: the
+spec revision and crag commit it was recorded against, the argv, the expected
+exit, the setup, and any divergence records), `project/` (a self-contained
+source tree), and `expected.json` (the golden). `test/conformance.test.ts`
+copies each project to a temp directory **outside this checkout** — a fixture
+run from inside it would find kragg-ts's own `node_modules/.bin/tsc` and
+`git_sha`, and stop testing what it claims to — drives the CLI through
+`runCommand`, and diffs.
+
+| fixture | what it pins |
 | --- | --- |
-| `complexity`: a `switch` scores **+1 total, not +1 per `case`** | Measured: per-case failed 5% of blocks, worst offenders flat dispatch tables. A deliberate departure from McCabe, radon and Python. |
-| `nullable-default` is a **redesign** | `.get(k, default)` has no JS analogue; the gate targets `\|\|` mis-coalescing instead, and is calibrated *below* the Python original's hit rate. |
-| `forbidden-calls` resolves through `ts.TypeChecker` | Closes cases Python leaves unresolved (subclass overrides, unannotated receivers, re-export chains). Same gate name, strictly larger recall. |
-| `structure` counts real `export` declarations | Python uses the leading-underscore convention, which JavaScript does not have. `export *` is enumerated. |
-| `halstead` thresholds are the same numbers but not the same gate | Radon's worst effort across the entire Python implementation is 446 against a 50,000 limit; ported literally onto TypeScript's wider operator/operand partition it fires on ~0.3–0.6% of blocks. |
-| `detect-secrets` / `lint` / `audit` bundle nothing | Python bundles ruff and driving a bundled tool is not portable to npm. Tools are resolved from the project's own `node_modules/.bin`, and absence is a visible skip. |
-| `secret_name_suffixes` includes `ServiceKey` | Python's default list lacks `_service_key`. Listed in KNOWN_LIMITATIONS as a Python gap found during the port. |
-| criticality freshness | kragg-ts refuses stale data via the sidecar stamp; Python consumes a stale `criticality.json` as if current. The *file* is identical; the trust decision is not. |
-| module naming in the syntax tier | kragg-ts names modules relative to the repo root, Python relative to the package root, because a TypeScript relative specifier is a filesystem path and a Python one is not. |
+| `security-clean` | exit 0; `git_sha: null` survives normalization; two skip reasons; a skipped gate is not a failure |
+| `security-violations` | exit 1; dedupe vs. `truncated` vs. `violation_count` (section 1); `static gates failed` on the SLOW tier |
+| `check-missing-tsc` | exit 3; the whole 18-gate pipeline; a gate that cannot run is `error`, with remediation in `raw_output` and a `Fix:` line in `next_actions`; non-null `git_sha` |
+| `config-error` | exit 2; no report; the reason on stderr |
+| `criticality-sidecar` | the shared list, the six record keys, the numbers, and the sidecar beside it |
+| `journal-reader` | the reader half of section 6: a half-written final line is skipped, not fatal |
+| `hook-protocol` | six stdin payloads: invalid JSON, a non-object, unknown keys, a non-source edit, the stop-loop guard, the SessionStart envelope, and the blocking shape — all exit 0 |
+
+Every run's `.kragg/history.jsonl`, `.kragg/criticality.json` and
+`.kragg/criticality.stamp.json` are validated wherever they appear, not only in
+the fixtures that are about them.
+
+**One limitation, stated.** `hook-protocol` does not spawn a process. The hook
+needs a payload on stdin and `src/engine/runner.ts` — the repository's single
+sanctioned subprocess wrapper — has no stdin channel, because gates never take
+input. Widening it for a test would be the wrong trade, so the hook cases call
+`cmdHook` with the same `runCheck`/`ensureCriticality` the CLI wires and the
+`readStdin` seam that module already exposes. What that misses is the process
+boundary; crag's own `hook` fixture covers the spawned form from the Python
+side.
+
+## 10. What is normalized, and why
+
+Both suites diff **normalized** payloads, and the rule list is SPEC.md
+section 9's, unchanged. Everything not listed here is compared exactly —
+including gate order, violation order, skip-reason text, messages, counts,
+`targets`, `next_actions` wording, and the null-vs-absent distinction
+everywhere.
+
+| field | rule | why it varies between conforming runs |
+| --- | --- | --- |
+| `kragg_version` | → `"<kragg-version>"` | changes every release; the contract is "a string", not its value |
+| `started_at` | → `"<started-at>"` | wall clock |
+| `duration_ms`, report and per gate | → `0` | wall clock. Normalized only **after** the validator has checked that the report total equals the sum of the gates, so this cannot hide a broken total |
+| `git_sha` | → `"<git-sha>"` when it matches `[0-9a-f]{7,40}` | the fixture repository is created at run time. `null` stays `null`: null-vs-present is contract, and `security-clean` pins the null |
+| absolute paths in any string | fixture root → `<project>`, this repo → `<kragg-repo>`, macOS `/private` aliases included | the temp directory differs per run and per machine. The messages embedding them — remediations, tsc output — are otherwise contractual and stay exact |
+| criticality record order | sorted by `(-betweenness, -fan_in, name)` | tie order is implementation-defined (section 5) |
+| `newest_mtime_ms` in the stamp | → `0` | the mtime of the copied fixture tree |
+| `(N.Ns)` inside hook stdout | → `(0.0s)`, and **only** for a case whose manifest sets `live_durations` | wall clock rendered into a block reason by gates that just ran. The SessionStart case does not set it: its numbers are read back out of the committed journal, are fixed, and stay pinned. The cross-language runner normalizes both, because every payload it records comes from a live run |
+
+Nothing else. Adding a rule here is a contract decision: an over-normalized
+diff hides real breaks, an under-normalized one cries wolf and gets switched
+off. In particular, **a semantic mismatch is never normalized away** — it is
+recorded in section 11 if it is intentional, or in section 12 if it is a bug.
+
+## 11. Intentional divergences
+
+A conformance runner must not flag these; a suite that diffs the two
+implementations naively will flag every one. Rows 1–9 are this repository's
+original table, re-verified against both trees while the spec was written; rows
+10–12 were added by that verification and are also SPEC.md section 10's rows
+10–12. Fixtures that exercise a row carry a `divergences` entry naming its id.
+
+| # | Divergence | Why it is intentional |
+| --- | --- | --- |
+| 1 | `complexity`: a `switch` scores **+1 total, not +1 per `case`** | Measured: per-case failed 5% of blocks, worst offenders flat dispatch tables. A deliberate departure from McCabe, radon and Python. |
+| 2 | `nullable-default` is a **redesign** | `.get(k, default)` has no JS analogue; the gate targets `\|\|` mis-coalescing instead, calibrated *below* the Python original's hit rate. |
+| 3 | `forbidden-calls` resolves through `ts.TypeChecker` | Closes cases Python leaves unresolved (subclass overrides, unannotated receivers, re-export chains). Same gate name, strictly larger recall. |
+| 4 | `structure` counts real `export` declarations | Python uses the leading-underscore convention, which JavaScript does not have. `export *` is enumerated. |
+| 5 | `halstead` thresholds are the same numbers but not the same gate | Ported literally onto TypeScript's wider operator/operand partition they fire on ~0.3–0.6% of blocks. |
+| 6 | TS bundles no tools: `lint`, `detect-secrets`, `audit` and `test-coverage` resolve from the project | npm cannot ship another ecosystem's tools. Absence is a **visible skip**, never a silent pass. Pinned by `security-clean` and `check-missing-tsc`. |
+| 7 | `secret_name_suffixes` includes `ServiceKey` | Python's default list lacks `_service_key`. A Python gap found during the port; see KNOWN_LIMITATIONS.md. |
+| 8 | criticality freshness: TS refuses stale data via the sidecar stamp; Python consumes a stale file as current | The *file* is identical; the trust decision is not. Pinned by `criticality-sidecar`. |
+| 9 | module naming: TS repo-root-relative `module#name`, Python package-relative dotted | A TypeScript relative specifier is a filesystem path; a Python one is not. Pinned by `criticality-sidecar`. |
+| 10 | criticality-dependent gates with missing or stale data: **TS derives it on demand** and the gates run; **Python skips them visibly** | Both refuse to trust stale data. TS can afford to recompute because the check pipeline already holds a `ts.Program` (`src/catalog/criticalityCache.ts`). Pinned by `check-missing-tsc`, which leaves derived data behind. |
+| 11 | SessionStart hook output: TS emits the `hookSpecificOutput` envelope; Python prints plain-text context lines | Both are consumed by Claude Code, but only the envelope injects `additionalContext`. Predates the spec; a candidate for convergence. Pinned by `hook-protocol`. |
+| 12 | `next_actions` fix wording: Python says "auto-fix N **ruff** violations", TS says "auto-fix N violations" | Tool vocabulary is implementation-specific. |
 
 Four defects found in the Python implementation during the port are recorded in
 [KNOWN_LIMITATIONS.md](../KNOWN_LIMITATIONS.md#found-in-the-python-implementation-during-this-port).
 They are gaps to fix upstream, not divergences to encode.
 
-## What a conformance suite should look like
+## 12. Recorded drift in the Python sibling
 
-Fixture project in, expected report JSON out, run against **both**
-implementations:
+SPEC.md section 11 lists five places an implementation violates the spec. These
+are bugs to fix upstream, **not** contract, and nothing here is changed to
+match them. Two are pinned from this side, because kragg-ts implements the
+contract and Python has not converged:
 
-1. `spec/fixtures/<name>/project/` — a small, self-contained source tree plus a
-   `kragg.json`. It must not depend on an installed external tool, or the
-   fixture is testing the tool. Gates that would drive one are expected to
-   report a *skip*, and the skip is part of the expected output.
-2. `spec/fixtures/<name>/expected.json` — the full report payload, with the
-   fields that legitimately vary (`kragg_version`, `started_at`,
-   `duration_ms`, `git_sha`, per-gate `duration_ms`) normalized away by the
-   runner rather than absent from the file.
-3. A runner that executes `kragg check --format json` in the fixture project
-   with each implementation and diffs against `expected.json`, asserting the
-   **exit code** separately — a run that produces the right JSON with the wrong
-   exit code has failed.
-4. `spec/SPEC.md` — the normative, language-neutral prose: the schema, the exit
-   codes, the pipeline semantics, the journal, the criticality file, and the
-   hook protocol. Today that prose exists only as this file and as doc comments
-   in both repos.
-5. A tag per schema version, so a conformance run pins a spec revision. Pin by
-   tag or commit SHA, never a moving branch: an upstream edit turning an
-   unrelated PR red is how people learn to ignore a check.
+1. **Malformed config exits 1 with a traceback, not 2.** `load_policy` lets
+   `tomllib.TOMLDecodeError` escape. kragg-ts maps `PolicyError` → exit 2;
+   crag's own `config-error` fixture carries a `known_failure.python` marker,
+   and this repo's `config-error` fixture pins the correct behaviour.
+2. **`detect-secrets` scans nothing outside a git repository** and never sees
+   untracked files, because it enumerates targets via `git ls-files` — so the
+   gate can pass having checked nothing.
+3. **Hook output is not truncated.** A very large failure report silently loses
+   its blocking message's content in the harness. kragg-ts caps at 9000
+   characters with an in-band marker; `hook-protocol` records that as drift, so
+   nobody removes the cap to "match Python".
+4. **`criticality.json` tie order is not deterministic** — it falls back to
+   `set` iteration order, which varies with `PYTHONHASHSEED`. Both runners sort
+   canonically; the instability at the top-20 cut is not absorbable and needs a
+   total sort key upstream.
+5. **This document used to be wrong**, and SPEC.md section 11 item 5 said so:
+   it omitted row 10 above and described SessionStart as a shared emitted
+   shape. Both are fixed here.
 
-Divergence fixtures belong in the same suite, in their own directory, asserting
-that each row of the table above *stays* divergent. An intentional difference
-nobody tests becomes an accidental one on the next refactor.
+## 13. Found in kragg-ts while building this suite
 
-Until `spec/` exists that job cannot be written. `.github/workflows/ci.yml`
-runs install, an assertion that `allowBuilds` is still empty, typecheck, build
-and test — and carries a `TODO(spec)` where the conformance job goes, with the
-pinned-tag requirement written into it so it cannot be added carelessly.
+**A FAST gate that skips at RUN time trips the SLOW tier as if it had failed.**
+SPEC.md section 4.1 says SLOW gates skip once any FAST gate has *failed*,
+reason `static gates failed`. `runGates` in
+[`src/engine/gate.ts`](../src/engine/gate.ts) sets `fastFailed` from
+`!result.passed`, and a skipped gate is `passed: false` by contract
+(section 4). A gate whose skip is *declared* — `spec.skipReason`, the
+unconfigured-policy case — is short-circuited before it runs and is unaffected;
+a gate that decides to skip *inside* its run is not. `detect-secrets` is
+exactly that gate: it skips when no scanner is installed. So on this
+repository:
 
-## Changing the contract
+```
+$ node dist/cli.js check --no-journal
+...
+[SKIP] detect-secrets — no secret scanner available; kragg does not bundle one
+[SKIP] test-coverage — static gates failed
+[SKIP] critical-coverage — static gates failed
+[SKIP] audit — static gates failed
+14 passed, 0 failed, 4 skipped        # exit 0
+```
 
-Any change to the report schema, the exit codes, the pipeline semantics, the
-journal, the criticality file or the hook protocol is a change to **both**
-repos and needs a `schema_version` bump. Do not make one implementation
-"temporarily" divergent — that is how the two stop being siblings.
+Three SLOW gates were skipped for a failure that the same report says did not
+happen. The exit code is right (0 — a skip is not a failure), the counts are
+right, and nothing is reported as passing that did not run, so this is not a
+fail-open; it is a report that contradicts itself and silently narrows a
+`--all`-less run. It is **not fixed here**: this issue records conformance, it
+does not change pipeline semantics, and the fix belongs with the tier logic and
+its own tests. No fixture pins the current behaviour either — a golden that
+blessed it would make it harder to fix, not easier.
 
-**One carve-out, and it is narrow.** A purely *additive* key that no consumer
-in either repo reads may be introduced on one side without a bump —
-`advisories` and `advisory_count` were, and `.kragg/criticality.stamp.json`
-exists as a sidecar for the same reason. The bar is not "additive"; it is
-**additive and provably unread**:
+## 14. Changing the contract
 
-1. Find every place the other implementation *reads* the structure, not just
-   where it writes one. For gate objects that is `journal.py`, not `report.py`.
-2. Run the other implementation's readers against a real payload from yours.
-3. Confirm no key it declares went missing, and that anything it persists is
-   byte-shape-identical.
-
-Renaming, repurposing, or changing the type of an existing key is never
-additive, however compatible it looks. Neither is adding a key that a consumer
-would reasonably iterate over rather than index — which is exactly why the
-criticality fingerprint could not go inside `criticality.json`: its top level
-is a **list**, and Python's `read_json` returns every dict in it as a profile
-record. A metadata object there would have surfaced as a nameless function.
+Any change to the six surfaces — the report schema, the exit codes, the
+pipeline semantics, the journal, the criticality file, the hook protocol — is a
+change to **both** repos and needs a `schema_version` bump, a new spec
+revision, and regenerated goldens on both sides (`run_conformance.py --update`
+there, `KRAGG_CONFORMANCE_UPDATE=1` here), each reviewed as a diff. Do not make
+one implementation "temporarily" divergent — that is how the two stop being
+siblings. The single carve-out is the additive-key rule in section 2, and the
+bar is not "additive" but **additive and provably unread**, with the three-step
+proof performed rather than assumed.

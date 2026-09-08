@@ -235,6 +235,13 @@ Deliberate, and documented at each site:
 | `audit` | knip, which covers both vulture (dead code) and deptry (dependency hygiene). |
 | criticality | Fingerprinted by a sidecar stamp, so stale call-graph data is re-derived rather than trusted. `criticality.json` itself stays byte-compatible with Python's reader. |
 | `secret_name_suffixes` | Includes `ServiceKey`, which Python's default list lacks. |
+| criticality-dependent gates | Derived on demand when the data is missing or stale, so `critical-tests` and `test-quality` run; Python skips them visibly instead. |
+| SessionStart hook | Emits the `hookSpecificOutput` envelope, which is what injects `additionalContext`; Python prints plain-text context lines. |
+| hook output | Capped at 9000 characters with an in-band marker, because the harness spills longer output to a file the model never sees. Python does not cap. |
+
+Each row is pinned by a fixture or a unit test, and the full list — with the
+`spec/SPEC.md` row it corresponds to — is in
+[docs/spec-conformance.md](docs/spec-conformance.md).
 
 ## Supply chain
 
@@ -279,8 +286,15 @@ pnpm install --ignore-scripts
 pnpm run typecheck
 pnpm run build
 pnpm run test
+pnpm run conformance             # the cross-language contract fixtures
 node dist/cli.js check --all     # kragg checks itself
 ```
+
+`pnpm run conformance` is also part of `pnpm test`. The other half of the
+contract — this repository's `dist/cli.js` run against the Python sibling's own
+fixtures at a pinned commit — is in
+[docs/spec-conformance.md](docs/spec-conformance.md#running-the-two-suites) and
+in CI.
 
 kragg-ts passes its own `check`. That is the point: a guardrails framework
 whose own gates are red has no claim on anyone else's code.
