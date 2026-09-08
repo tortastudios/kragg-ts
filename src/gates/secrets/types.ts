@@ -92,7 +92,16 @@ export type SecretsOutcome =
   | {
       readonly ok: false;
       readonly skipped: false;
-      readonly command: readonly string[];
+      /**
+       * The argv that failed, when one was run.
+       *
+       * ABSENT when nothing was ever spawned — a scanner the policy REQUIRES
+       * that is not installed, or a scan scope that does not exist on disk.
+       * Both are errors (the gate could not run) with no command to report,
+       * and inventing one would put an argv in the report that was never
+       * executed.
+       */
+      readonly command?: readonly string[] | undefined;
       readonly message: string;
     };
 
@@ -110,9 +119,21 @@ export function skipped(reason: string): SecretsOutcome {
   return { ok: false, skipped: true, reason };
 }
 
-/** Build the "the scanner itself broke" arm — exit code 3, not a finding. */
-export function broken(command: readonly string[], message: string): SecretsOutcome {
-  return { ok: false, skipped: false, command: [...command], message };
+/**
+ * Build the "the gate could not run" arm — exit code 3, not a finding.
+ *
+ * `command` is `undefined` when nothing was spawned; see the arm's own note.
+ */
+export function broken(
+  command: readonly string[] | undefined,
+  message: string,
+): SecretsOutcome {
+  return {
+    ok: false,
+    skipped: false,
+    ...(command === undefined ? {} : { command: [...command] }),
+    message,
+  };
 }
 
 /**

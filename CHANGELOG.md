@@ -44,6 +44,36 @@ a previously green run red — see [Gate additions](#gate-additions) below.
   of propagating out of the pipeline and destroying the consolidated report.
   The remaining gates still run, the report and the journal entry still list
   every gate, and the exception is not swallowed.
+- **TOR-1367**: `secret_scanner` naming a scanner (`"gitleaks"` or
+  `"secretlint"`) is now a REQUIRED tool. A named scanner that is not
+  installed, or is too old to use safely, is `error: true` and exit 3 with its
+  install command, where it used to be a skip and exit 0 — a project that
+  pinned a scanner got a green run over a repository nothing had scanned.
+  `"auto"` is unchanged: it is optional autodetection and still skips visibly,
+  naming both tools, when neither is installed. `"off"` still skips.
+- **TOR-1367**: a gitleaks that is installed and CRASHES on `gitleaks version`
+  is now an error carrying the probe's own stderr, under every setting
+  including `"auto"`. Previously it counted as "unusable", `"auto"` fell
+  through to secretlint, and the crash vanished from the report entirely — the
+  run came back green from the second scanner and nobody learned the first one
+  was broken. A gitleaks that is merely ABSENT still falls through, as before.
+- **TOR-1367**: secretlint is pointed at the path it was given. A literal file
+  target — from `--file`, `--changed`, or the Claude PostToolUse hook — used to
+  have the recursive directory glob appended (`src/a.ts` became
+  `src/a.ts/**/*`), which matches nothing: secretlint exited 0 having read no
+  file and the gate reported a clean scan of the file the caller named.
+  Directories still become globs, explicit globs are still passed through, and
+  a scan scope that does not exist on disk is now an error instead of a glob
+  that matches nothing.
+- **TOR-1367**: `kragg doctor` distinguishes optional autodetection from a
+  required tool. A `lint_tool`, `test_runner` or `secret_scanner` that names a
+  tool the project does not have is reported as
+  `MISSING -> required by <setting>` with its install command and fails the
+  doctor run (exit 1), instead of the advisory `none installed` — or, for a
+  pinned `gitleaks` with secretlint installed, the outright wrong
+  `secret scanner: ok (secretlint)` and exit 0 while `kragg check` was about to
+  exit 3. `"auto"` lines now say `none installed — optional`, `"off"` lines say
+  `disabled`, and the scanner line resolves gitleaks the way the gate does.
 
 ### Added
 

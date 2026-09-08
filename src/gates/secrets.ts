@@ -30,19 +30,29 @@
  * A skip is loud, it appears in the report, and nobody mistakes it for a
  * checked repo. Silence would be the fail-open.
  *
- * ── RESOLUTION ─────────────────────────────────────────────────────────────
- * The `secret_scanner` policy setting takes four values (`SecretScannerChoice`):
+ * ── RESOLUTION: OPTIONAL AUTODETECTION vs. A REQUIRED TOOL ─────────────────
+ * The `secret_scanner` policy setting takes four values (`SecretScannerChoice`),
+ * and the split that matters is between the one that DETECTS and the two that
+ * REQUIRE — the same rule `adapters/lint.ts` applies to `lint_tool`:
  *
- *  - `"auto"` (default) — gitleaks if usable, else secretlint if installed in
- *    the project, else skip naming BOTH options and both install commands.
- *  - `"gitleaks"` / `"secretlint"` — that one, or a visible skip carrying that
- *    tool's install command. NEVER a silent fall-back to the other: an
- *    explicit choice that cannot be honoured is a fact the operator has to
- *    learn, and a project that pinned `gitleaks` for its rule coverage would
- *    otherwise be quietly scanned by something else.
+ *  - `"auto"` (default) — OPTIONAL AUTODETECTION. gitleaks if usable, else
+ *    secretlint if installed in the project, else a visible SKIP naming BOTH
+ *    options and both install commands. The project never asked for a
+ *    scanner, so "none installed" is not a failure; it is a fact, printed.
+ *  - `"gitleaks"` / `"secretlint"` — a REQUIRED tool. The project named this
+ *    scanner, so a run that cannot use it is an ERROR (exit 3) carrying that
+ *    tool's install command, never a skip: a skip exits 0, and a project that
+ *    pinned a scanner and got exit 0 believes it was scanned. There is also
+ *    NEVER a silent fall-back to the other tool — the preference order for an
+ *    explicit choice has one element, which makes that structural rather than
+ *    a rule someone has to remember.
  *  - `"off"` — skip with reason `"disabled by policy"`. Turning the gate off
  *    is legitimate, and the report must distinguish "you switched this off"
  *    from "we could not find a scanner"; they call for opposite responses.
+ *
+ * A scanner that is INSTALLED and then misbehaves is a third thing again, and
+ * it is an ERROR under every setting including `"auto"`: see
+ * `secrets/gitleaks.ts`'s `versionProblem`.
  *
  * ── THE PATH EXCEPTION, AND WHY IT IS ONLY FOR gitleaks ────────────────────
  * `environment/project.ts` enforces a hard rule: tools are resolved from the
@@ -86,6 +96,7 @@ import { missingTool, remediation, type ProjectEnvironment } from "../environmen
 import { defaultLookup, type SecretScannerLookup } from "./secrets/lookup.ts";
 import * as gitleaks from "./secrets/gitleaks.ts";
 import * as secretlint from "./secrets/secretlint.ts";
+import { unreadableTargets } from "./secrets/targets.ts";
 import {
   broken,
   scanned,
@@ -112,8 +123,7 @@ export {
 /** The npm packages a project needs for the secretlint path to work. */
 export const SECRETLINT_PACKAGES = "secretlint @secretlint/secretlint-rule-preset-recommend";
 
-/** Where to get gitleaks; it is not installable through a package manager. */
-export const GITLEAKS_RELEASES = "https://github.com/gitleaks/gitleaks/releases";
+export { GITLEAKS_RELEASES } from "./secrets/gitleaks.ts";
 
 /**
  * Scanned by default: the whole project.
@@ -158,17 +168,17 @@ export interface SecretScanOptions {
  * behind a second opinion.
  *
  * An explicit choice has a one-element preference order, which is what makes
- * "no silent fallback" structural rather than a rule someone has to remember.
+ * "no silent fallback" structural rather than a rule someone has to remember —
+ * and when that one element is unusable the run ENDS IN AN ERROR rather than a
+ * skip, because the policy required it. See the module header.
  */
 export async function runSecretScan(options: SecretScanOptions): Promise<SecretsOutcome> {
   if (options.scanner === "off") {
     return skipped("disabled by policy (secret_scanner = \"off\")");
   }
-  const targets = options.targets ?? DEFAULT_TARGETS;
-  if (targets.length === 0) {
-    // An empty target list is a configuration fact, not a clean repo. Same
-    // rule as `_unconfigured`: say so, do not pass.
-    return skipped("no scan targets configured");
+  const unscannable = scopeProblem(options);
+  if (unscannable !== null) {
+    return unscannable;
   }
   const lookup = options.lookup ?? defaultLookup(options.env);
   const run = options.run ?? runCommand;
@@ -181,7 +191,33 @@ export async function runSecretScan(options: SecretScanOptions): Promise<Secrets
     }
     reasons.push(outcome.reason);
   }
-  return skipped(exhaustedReason(options.scanner, reasons));
+  return exhausted(options.scanner, reasons);
+}
+
+/**
+ * Something wrong with the SCOPE, before any scanner is chosen — or `null`.
+ *
+ * Two different wrongs, and they are not the same outcome:
+ *
+ *  - nothing to scan at all is a configuration fact, not a clean repo, and it
+ *    SKIPS. Same rule as `_unconfigured`: say so, do not pass;
+ *  - a scope that does not exist on disk is an ERROR. The scan would have gone
+ *    ahead and matched nothing, which reads exactly like a clean repository.
+ *
+ * Only a CALLER-SUPPLIED scope is checked against the filesystem: the default
+ * is the project root, which exists by construction, while `--file`,
+ * `--changed` and the Claude hook can each name a path that does not.
+ */
+function scopeProblem(options: SecretScanOptions): SecretsOutcome | null {
+  const targets = options.targets;
+  if (targets === undefined) {
+    return null;
+  }
+  if (targets.length === 0) {
+    return skipped("no scan targets configured");
+  }
+  const unreadable = unreadableTargets(options.env.root, targets);
+  return unreadable === null ? null : broken(undefined, unreadable);
 }
 
 /**
@@ -194,12 +230,35 @@ function scannerOrder(choice: SecretScanner | "auto"): readonly SecretScanner[] 
   return choice === "auto" ? ["gitleaks", "secretlint"] : [choice];
 }
 
-/** Why nothing in the preference order ran. */
-function exhaustedReason(
+/**
+ * Nothing in the preference order ran — a skip or an error, by the setting.
+ *
+ * THE WHOLE REQUIRED/OPTIONAL SPLIT IS THIS FUNCTION. `"auto"` asked the
+ * environment a question and got "nothing here", which is a visible skip and
+ * exit 0. A named scanner is an instruction, and an instruction that could not
+ * be carried out leaves the repository UNSCANNED — reported as `error: true`
+ * and exit 3, so no pipeline reads it as a clean run.
+ */
+function exhausted(
   choice: SecretScanner | "auto",
   reasons: readonly string[],
-): string {
-  return choice === "auto" ? autoSkipReason(reasons) : (reasons[0] ?? "no scanner");
+): SecretsOutcome {
+  if (choice === "auto") {
+    return skipped(autoSkipReason(reasons));
+  }
+  return broken(undefined, requiredReason(choice, reasons[0] ?? "no scanner"));
+}
+
+/** The message for a REQUIRED scanner that could not be used. */
+function requiredReason(choice: SecretScanner, reason: string): string {
+  return (
+    `secret_scanner = "${choice}" requires ${choice}, which this run could not ` +
+    "use, so the repository was NOT scanned for secrets.\n" +
+    `${reason}\n` +
+    "kragg will not substitute the other scanner for a named one. Set " +
+    "`secret_scanner` to \"auto\" to use whichever scanner is available, or to " +
+    "\"off\" to disable the gate deliberately."
+  );
 }
 
 /**
@@ -225,7 +284,7 @@ function runScanner(
 ): Promise<SecretsOutcome> {
   const bin = candidate === "gitleaks" ? lookup.findGitleaks() : lookup.findSecretlint();
   if (bin === null) {
-    return Promise.resolve(skipped(notInstalledReason(candidate, options.env)));
+    return Promise.resolve(skipped(secretScannerMissing(options.env, candidate)));
   }
   const context: SecretScanContext = {
     root: options.env.root,
@@ -238,32 +297,24 @@ function runScanner(
     : runSecretlint(options.env, context, run);
 }
 
-/** "Not installed", with the one command that fixes it. */
-function notInstalledReason(candidate: SecretScanner, env: ProjectEnvironment): string {
+/**
+ * "Not installed", with the one command that fixes it.
+ *
+ * Exported so `kragg doctor` reports a missing scanner in exactly the words
+ * the gate would use. Two diagnostics that disagree about how to install the
+ * same tool are worse than one.
+ */
+export function secretScannerMissing(
+  env: ProjectEnvironment,
+  candidate: SecretScanner,
+): string {
   if (candidate === "secretlint") {
     return (
       "secretlint is not installed in this project. " +
       remediation(env.packageManager, SECRETLINT_PACKAGES)
     );
   }
-  return `gitleaks was not found on PATH. ${gitleaksInstall()}`;
-}
-
-/**
- * The gitleaks install line.
- *
- * gitleaks is a Go binary, so there is no package-manager command to generate
- * from `remediation()`; homebrew is the one-liner on macOS and the release
- * page is the honest answer everywhere else.
- */
-function gitleaksInstall(): string {
-  if (process.platform === "darwin") {
-    return "Fix: brew install gitleaks";
-  }
-  if (process.platform === "linux") {
-    return `Fix: brew install gitleaks, or download a binary from ${GITLEAKS_RELEASES}`;
-  }
-  return `Fix: download a binary from ${GITLEAKS_RELEASES}`;
+  return `gitleaks was not found on PATH. ${gitleaks.installHint()}`;
 }
 
 /**
@@ -278,16 +329,21 @@ function gitleaksInstall(): string {
  *
  * `dir` takes a single path, so multiple targets mean multiple invocations.
  * The reported command is the first scan's; the version probe is an
- * implementation detail and is not reported.
+ * implementation detail and is not reported — EXCEPT when the probe itself is
+ * what failed, where it is the only command that ran and naming it is the
+ * whole diagnosis.
  */
 async function runGitleaks(
   context: SecretScanContext,
   run: RunCommand,
 ): Promise<SecretsOutcome> {
-  const probe = await run("gitleaks", gitleaks.versionCommand(context.bin), context.root);
-  const unusable = versionProblem(probe);
-  if (unusable !== null) {
-    return skipped(unusable);
+  const probeCommand = gitleaks.versionCommand(context.bin);
+  const probe = await run("gitleaks", probeCommand, context.root);
+  const problem = gitleaks.versionProblem(probe, context.bin);
+  if (problem !== null) {
+    return problem.kind === "broken"
+      ? broken(probeCommand, problem.reason)
+      : skipped(problem.reason);
   }
 
   const violations: Violation[] = [];
@@ -307,38 +363,6 @@ async function runGitleaks(
     violations.push(...outcome.violations);
   }
   return scanned("gitleaks", reported, violations);
-}
-
-/**
- * Why this gitleaks cannot be used, or `null` if it can.
- *
- * Every branch returns a SKIP reason rather than an error, so `"auto"` can
- * move on to secretlint: a gitleaks that is absent, broken or too old is a
- * missing scanner, not a failed scan.
- */
-function versionProblem(probe: CompletedCommand): string | null {
-  if (probe.returncode !== 0) {
-    const missing = missingTool(probe);
-    return missing === null
-      ? `gitleaks could not be run (\`gitleaks version\` exited ${probe.returncode}). ${gitleaksInstall()}`
-      : `gitleaks was not found on PATH (${missing}). ${gitleaksInstall()}`;
-  }
-  const version = gitleaks.parseVersion(probe.stdout);
-  if (version === null) {
-    return (
-      "could not determine the gitleaks version, so kragg cannot confirm it " +
-      `supports \`--report-path -\`; without that the scan would write ` +
-      `credentials to a file. ${gitleaksInstall()}`
-    );
-  }
-  if (!gitleaks.versionSupported(version)) {
-    return (
-      `gitleaks ${version.join(".")} is too old; kragg needs ` +
-      `${gitleaks.MINIMUM_VERSION.join(".")} or newer (for \`dir\` and for ` +
-      `\`--report-path -\`, which keeps the report off disk). ${gitleaksInstall()}`
-    );
-  }
-  return null;
 }
 
 /**

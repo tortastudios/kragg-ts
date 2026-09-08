@@ -278,8 +278,60 @@ describe("runDoctor", () => {
 
   it("summarizes interchangeable tools as a group, not as three failures", async () => {
     const result = capture(() => runDoctor(project()));
-    assert.match(result.out, /linter: none installed/);
-    assert.match(result.out, /secret scanner: none installed/);
+    assert.match(result.out, /linter: none installed — optional/);
+    // gitleaks is a standalone binary on PATH, so a developer machine may
+    // legitimately have one; either way the line is optional, never a failure.
+    assert.match(result.out, /secret scanner: (none installed — optional|ok \(gitleaks)/);
+    assert.equal(result.value, EXIT_GATE_FAILURES, "…on the layout, not on the groups");
+  });
+
+  it("reports a tool the policy NAMED but the project lacks as required", async () => {
+    // The distinction the gates already make: `"auto"` is optional
+    // autodetection, a named tool is required and its gate exits 3 without it.
+    // doctor must not report the second as an advisory "none installed".
+    const root = project({
+      "package.json": '{"name":"a","packageManager":"pnpm@9.0.0"}',
+      "kragg.json":
+        '{"lint_tool":"eslint","test_runner":"vitest","secret_scanner":"secretlint"}',
+    });
+    const result = capture(() => runDoctor(root));
+    assert.equal(result.value, EXIT_GATE_FAILURES);
+    assert.match(result.out, /linter: MISSING -> required by lint_tool = "eslint"/);
+    assert.match(result.out, /test runner: MISSING -> required by test_runner = "vitest"/);
+    assert.match(
+      result.out,
+      /secret scanner: MISSING -> required by secret_scanner = "secretlint"/,
+    );
+    // Every one of them still carries the command that fixes it.
+    assert.match(result.out, /pnpm add -D eslint/);
+    assert.match(result.out, /pnpm add -D vitest/);
+    assert.match(result.out, /pnpm add -D secretlint @secretlint/);
+    assert.doesNotMatch(result.out, /none installed/);
+  });
+
+  it("counts a deliberate opt-out as fine, not as a missing tool", async () => {
+    const root = project({
+      "package.json": '{"name":"a","packageManager":"pnpm@9.0.0"}',
+      "tsconfig.json": "{}",
+      "kragg.json": '{"lint_tool":"off","test_runner":"off","secret_scanner":"off"}',
+    });
+    mkdirSync(join(root, "src"));
+    mkdirSync(join(root, "test"));
+    const result = capture(() => runDoctor(root));
+    assert.match(result.out, /linter: disabled \(lint_tool = "off"\)/);
+    assert.match(result.out, /test runner: disabled \(test_runner = "off"\)/);
+    assert.match(result.out, /secret scanner: disabled \(secret_scanner = "off"\)/);
+    // Only `tsc` is genuinely missing here; the three opt-outs add nothing.
+    assert.match(result.out, /tsc: MISSING/);
+  });
+
+  it("does not require a test runner that is a runtime rather than a package", async () => {
+    const root = project({
+      "package.json": '{"name":"a","packageManager":"pnpm@9.0.0"}',
+      "kragg.json": '{"test_runner":"node"}',
+    });
+    const result = capture(() => runDoctor(root));
+    assert.match(result.out, /test runner: ok \(node — a runtime/);
   });
 
   it("passes a project that has its layout and its compiler", async () => {

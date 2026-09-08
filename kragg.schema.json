@@ -97,7 +97,7 @@
     },
     "secret_scanner": {
       "enum": ["auto", "gitleaks", "secretlint", "off"],
-      "description": "Which secret scanner the detect-secrets gate drives. Default: \"auto\"."
+      "description": "Which secret scanner the detect-secrets gate drives. \"auto\" detects one and skips visibly if there is none; naming one makes it required, so an unavailable or broken scanner is an error (exit 3). Default: \"auto\"."
     },
     "secret_baseline": {
       "type": ["string", "null"],

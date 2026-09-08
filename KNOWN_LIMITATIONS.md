@@ -69,9 +69,11 @@ properties, parameter defaults, object-literal properties, and
 
 ### `detect-secrets` bundles nothing
 
-kragg-ts ships no secret scanner. It uses **gitleaks** if it is on `PATH`,
-else **secretlint** if the project has it, else it **skips visibly** with both
-install commands.
+kragg-ts ships no secret scanner. Under the default `secret_scanner: "auto"`
+it uses **gitleaks** if it is on `PATH`, else **secretlint** if the project has
+it, else it **skips visibly** with both install commands. Naming one in the
+policy instead makes it **required**: unavailable, too old, or installed and
+crashing is `error: true` and exit 3, never a skip and never the other tool.
 
 This is deliberate. A scanner is only as good as its rule set, and a
 hand-rolled one reporting "clean" produces the same green as a genuinely clean

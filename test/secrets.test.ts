@@ -372,10 +372,13 @@ describe("scanner resolution", () => {
       "the install command must be copy-pasteable, preset included",
     );
   });
-  it("does not silently substitute the other scanner for an explicit choice", async () => {
+  it("errors, rather than substituting the other scanner, for an explicit choice", async () => {
+    // A NAMED scanner is required: not installed is exit 3, never the skip
+    // that exits 0 and lets the project believe it was scanned.
     const wantGitleaks = lookup({ gitleaks: null, secretlint: SECRETLINT_BIN });
-    const reason = skipReason(await scanWith("gitleaks", wantGitleaks));
+    const reason = errorMessage(await scanWith("gitleaks", wantGitleaks));
     assert.ok(reason.includes("gitleaks"), reason);
+    assert.ok(reason.includes("NOT scanned"), reason);
     assert.equal(reason.includes("secretlint"), false, `fell back silently: ${reason}`);
     assert.deepEqual(
       wantGitleaks.asked,
@@ -384,8 +387,9 @@ describe("scanner resolution", () => {
     );
 
     const wantSecretlint = lookup({ gitleaks: GITLEAKS_BIN, secretlint: null });
-    const other = skipReason(await scanWith("secretlint", wantSecretlint));
+    const other = errorMessage(await scanWith("secretlint", wantSecretlint));
     assert.ok(other.includes("secretlint"), other);
+    assert.ok(other.includes("pnpm add -D"), `no install command: ${other}`);
     assert.deepEqual(wantSecretlint.asked, ["secretlint"]);
   });
   it("distinguishes disabled-by-policy from no-scanner-found", async () => {
