@@ -87,11 +87,6 @@ import { mkdirSync } from "node:fs";
 import type { LineCoverageReport } from "../coverage/model.ts";
 import type { CompletedCommand, Violation } from "../engine/models.ts";
 import { runCommand } from "../engine/runner.ts";
-import {
-  missingTool as missingToolName,
-  missingToolMessage,
-  remediation,
-} from "../environment/project.ts";
 import type { ProjectEnvironment } from "../environment/project.ts";
 import type { TypeScriptApi } from "../analysis/sourceFile.ts";
 import { sourceInventory } from "../coverage/inventory.ts";
@@ -107,7 +102,7 @@ import { parseVitestJson } from "./support/vitestReport.ts";
 import { readTextFile } from "./support/manifest.ts";
 import { EMPTY_SUMMARY } from "./support/testReport.ts";
 import type { TestReport, TestSummary } from "./support/testReport.ts";
-import { capped, crashed, missingTool, notConfigured } from "./support/outcome.ts";
+import { capped, crashed, notConfigured } from "./support/outcome.ts";
 import type { Unavailable } from "./support/outcome.ts";
 import { runOptions } from "./support/run.ts";
 import {
@@ -125,6 +120,8 @@ import {
   coverageLine,
   crashMessage,
   killedMessage,
+  runnerMissing,
+  skipReason,
 } from "./support/testEvidence.ts";
 
 /** Gate name, matching the Python gate this replaces. */
@@ -257,7 +254,7 @@ async function runInto(
   const command = buildCommand(bin, runner, layout, withCoverage, options.testPaths);
   const result = await runCommand(TEST_GATE, command, layout.root, runOptions(options.timeoutMs));
 
-  const environmentFailure = runnerMissing(options.env, runner, result.stdout, result.stderr);
+  const environmentFailure = runnerMissing(TEST_GATE, options.env, runner, result.stdout, result.stderr);
   if (environmentFailure !== undefined) {
     return environmentFailure;
   }
@@ -294,48 +291,6 @@ function parseResults(
     return parseNodeTap(result.stdout, layout.root) ?? parseNodeTap(result.stderr, layout.root);
   }
   return parseBunTest(`${result.stdout}\n${result.stderr}`, result.returncode);
-}
-
-/**
- * Was the RUNNER ITSELF missing?
- *
- * The `_is_tool_module` twin. `missingToolName` reports whatever name the
- * output said could not be found; only when that name IS the runner does this
- * become an environment failure. A test file that cannot import
- * `./helpers.ts` produces the same class of message and is a test failure —
- * reported through the normal parse path, against the file that failed.
- */
-function runnerMissing(
-  env: ProjectEnvironment,
-  runner: TestRunnerName,
-  stdout: string,
-  stderr: string,
-): Unavailable | undefined {
-  const missing = missingToolName({
-    name: TEST_GATE,
-    command: [],
-    cwd: env.root,
-    returncode: 127,
-    stdout,
-    stderr,
-  });
-  if (missing === null) {
-    return undefined;
-  }
-  const binName = runner === "vitest" ? "vitest" : runner;
-  if (missing !== binName && !missing.endsWith(`/${binName}`)) {
-    return undefined;
-  }
-  if (runner === "vitest") {
-    return missingTool(missingToolMessage(env, "vitest", "vitest"));
-  }
-  return missingTool(
-    `${binName} could not be started, so no tests ran.\n` +
-      (runner === "bun"
-        ? "Install bun (https://bun.com) or set `test_runner` to a runner this project has."
-        : "kragg runs `node --test` on its own interpreter; this should not happen.") +
-      `\n${remediation(env.packageManager, binName)}`,
-  );
 }
 
 /** What a coverage read yields: the line model plus the document to share. */
@@ -471,26 +426,6 @@ function describe(
     parts.push(`note: ${published}`);
   }
   return parts.join("\n");
-}
-
-/** Why no runner ran, with the commands that would make one available. */
-function skipReason(detection: RunnerDetection, env: ProjectEnvironment): string {
-  if (detection.source.startsWith("policy:")) {
-    return `${detection.source} — the test gate is switched off in kragg.json`;
-  }
-  if (detection.unsupported !== undefined) {
-    return (
-      `this project's test script runs ${detection.unsupported}, which kragg does not ` +
-      "drive yet. Nothing was checked — set `test_runner` explicitly if one of " +
-      "vitest / node / bun can run this suite."
-    );
-  }
-  return (
-    "no test runner detected (looked at package.json#scripts.test, vitest.config.*, " +
-    "a vitest dependency, and bunfig.toml). No tests were run, so nothing was verified.\n" +
-    `${remediation(env.packageManager, "vitest @vitest/coverage-v8")}\n` +
-    "or use Node's built-in runner: set `\"test\": \"node --test\"` in package.json."
-  );
 }
 
 /** Best-effort mkdir. A failure surfaces later as a missing artifact. */

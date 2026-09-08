@@ -30,8 +30,16 @@
 import { statSync } from "node:fs";
 
 import type { CompletedCommand, Violation } from "../../engine/models.ts";
+import {
+  missingTool as missingToolName,
+  missingToolMessage,
+  remediation,
+} from "../../environment/project.ts";
+import type { ProjectEnvironment } from "../../environment/project.ts";
 import type { ProjectTotals } from "./coverage.ts";
-import type { TestRunnerName } from "./detect.ts";
+import type { RunnerDetection, TestRunnerName } from "./detect.ts";
+import { missingTool } from "./outcome.ts";
+import type { Unavailable } from "./outcome.ts";
 import type { Artifacts } from "./testCommands.ts";
 
 /** `code` for the coverage threshold, distinct from any test failure. */
@@ -153,4 +161,67 @@ function tail(text: string, maxLines = 20): string {
   return lines.length <= maxLines
     ? text
     : [`… ${lines.length - maxLines} earlier lines`, ...lines.slice(-maxLines)].join("\n");
+}
+
+/**
+ * Was the RUNNER ITSELF missing?
+ *
+ * The `_is_tool_module` twin. `missingToolName` reports whatever name the
+ * output said could not be found; only when that name IS the runner does this
+ * become an environment failure. A test file that cannot import
+ * `./helpers.ts` produces the same class of message and is a test failure —
+ * reported through the normal parse path, against the file that failed.
+ */
+export function runnerMissing(
+  gate: string,
+  env: ProjectEnvironment,
+  runner: TestRunnerName,
+  stdout: string,
+  stderr: string,
+): Unavailable | undefined {
+  const missing = missingToolName({
+    name: gate,
+    command: [],
+    cwd: env.root,
+    returncode: 127,
+    stdout,
+    stderr,
+  });
+  if (missing === null) {
+    return undefined;
+  }
+  const binName = runner === "vitest" ? "vitest" : runner;
+  if (missing !== binName && !missing.endsWith(`/${binName}`)) {
+    return undefined;
+  }
+  if (runner === "vitest") {
+    return missingTool(missingToolMessage(env, "vitest", "vitest"));
+  }
+  return missingTool(
+    `${binName} could not be started, so no tests ran.\n` +
+      (runner === "bun"
+        ? "Install bun (https://bun.com) or set `test_runner` to a runner this project has."
+        : "kragg runs `node --test` on its own interpreter; this should not happen.") +
+      `\n${remediation(env.packageManager, binName)}`,
+  );
+}
+
+/** Why no runner ran, with the commands that would make one available. */
+export function skipReason(detection: RunnerDetection, env: ProjectEnvironment): string {
+  if (detection.source.startsWith("policy:")) {
+    return `${detection.source} — the test gate is switched off in kragg.json`;
+  }
+  if (detection.unsupported !== undefined) {
+    return (
+      `this project's test script runs ${detection.unsupported}, which kragg does not ` +
+      "drive yet. Nothing was checked — set `test_runner` explicitly if one of " +
+      "vitest / node / bun can run this suite."
+    );
+  }
+  return (
+    "no test runner detected (looked at package.json#scripts.test, vitest.config.*, " +
+    "a vitest dependency, and bunfig.toml). No tests were run, so nothing was verified.\n" +
+    `${remediation(env.packageManager, "vitest @vitest/coverage-v8")}\n` +
+    "or use Node's built-in runner: set `\"test\": \"node --test\"` in package.json."
+  );
 }
