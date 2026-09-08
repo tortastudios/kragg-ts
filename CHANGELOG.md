@@ -138,6 +138,48 @@ a previously green run red — see [Gate additions](#gate-additions) below.
   with exit 3 naming what happened. A test that fails in every run is now
   reported as a stable failure (exit 1) rather than dropped, and the output
   names the per-run totals and each test's pass/fail tally.
+- **TOR-1365 — incremental input selection is unified, and a configuration
+  change no longer bypasses checking.** `kragg check --changed` after editing
+  only `kragg.json`, `tsconfig.json`, `package.json`, a lockfile or a linter
+  config resolved an empty TypeScript selection, printed "no changed
+  TypeScript files" and exited **0 without running a single gate** — over the
+  files that decide what every gate concludes about every file. A change set
+  containing a configuration or dependency input (`kragg.json`,
+  `tsconfig*.json`, `package.json`, the lockfiles, `pnpm-workspace.yaml`, the
+  linter configs `.oxlintrc.*` / `oxlint.config.*` / `biome.json(c)` /
+  `eslint.config.*` / `.eslintrc*`, the test-runner configs `vitest.config.*` /
+  `vitest.workspace.*` / `bunfig.toml`, and the configured `secret_baseline`)
+  now runs a **full** check, reporting `mode: "full"` and `targets` of the
+  source paths — what was actually checked — with the reason on stderr so the
+  promotion is never a surprise. A change set whose only source change is a
+  **deletion** is promoted for the same reason: a deleted file is still never
+  handed to a per-file tool, it just stops being mistaken for "nothing
+  changed". Also fixed, in the same resolution:
+  - **Non-ASCII paths are no longer silently dropped.** Every git plumbing call
+    is `-z`, so `src/café.ts` survives instead of arriving as
+    `"src/caf\303\251.ts"`, matching nothing on disk and leaving the selection
+    without a word.
+  - **A git failure is exit 3 with git's own message**, never an empty
+    selection: an unknown `--since` ref now says `git merge-base: fatal: …`
+    rather than "not a git repository", and a repository with no commit yet is
+    an error rather than a run that silently checked only untracked files. A
+    genuinely empty change set is unchanged — exit 0 and the documented clean
+    run.
+  - **`--file` on a path that does not exist is a usage error (exit 2) naming
+    it**, on `check` and `security` alike. It used to run the pipeline: the
+    linter errored about *itself* finding no files while five path-aware gates
+    matched nothing and printed `[PASS]`.
+  - **`--file` on a directory now narrows every gate, not just the linter.**
+    `targets` stays exactly as typed (it is on the wire, and the
+    cross-language contract pins it as "as given"); the internal narrowing is
+    the expansion, so `typing-strictness`, `type-complexity`,
+    `nullable-default`, `secret-default` and `forbidden-calls` stop reporting
+    `[PASS]` over zero files.
+  - **One resolver.** `check` and `security` share
+    `src/commands/scope.ts` instead of each deriving `--file` semantics; which
+    scope every gate honours — and which whole-program gates deliberately
+    ignore it — is now a table in `README.md` and `docs/architecture.md`. No
+    whole-program verdict was narrowed. No wire key was added or renamed.
 
 - **TOR-1359** — `tsc` in incremental mode (`--changed`, `--file`, and
   therefore the Claude PostToolUse hook) no longer hides type errors outside

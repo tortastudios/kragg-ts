@@ -40,6 +40,7 @@ import {
   parsedSources,
   resolveTypeScript,
 } from "../src/analysis/sourceFile.ts";
+import { walkFiles } from "../src/analysis/walk.ts";
 
 const temporaryRoots: string[] = [];
 
@@ -157,6 +158,53 @@ describe("moduleImports", () => {
       ['import { x } from "./real.ts";', 'export { other as x } from "./barrel.ts";'].join("\n"),
     );
     assert.equal(imports.get("x"), "src/real#x");
+  });
+});
+
+/**
+ * The walk itself, without a parser in the way.
+ *
+ * `parsedSources` is the usual caller, but `commands/scope.ts` walks directly
+ * to expand a `--file` directory into the files the path-aware gates compare
+ * against — and it walks with the wider `SOURCE_EXTENSIONS`, so the extension
+ * list being a parameter has to keep working.
+ */
+describe("walkFiles", () => {
+  it("yields matching files under a base, sorted, skipping vendored trees", () => {
+    const root = project({
+      "src/b.ts": "export const b = 1;\n",
+      "src/a.ts": "export const a = 1;\n",
+      "src/nested/c.tsx": "export const c = 1;\n",
+      "src/types.d.ts": "export declare const d: number;\n",
+      "src/node_modules/vendor.ts": "export const v = 1;\n",
+      "src/.hidden/skip.ts": "export const s = 1;\n",
+    });
+    assert.deepEqual(
+      [...walkFiles(join(root, "src"), [".ts", ".tsx"], false, root)],
+      [join(root, "src/a.ts"), join(root, "src/b.ts"), join(root, "src/nested/c.tsx")],
+    );
+  });
+
+  it("honours the extension list and the declaration switch it is given", () => {
+    const root = project({
+      "src/a.ts": "export const a = 1;\n",
+      "src/a.mjs": "export const b = 1;\n",
+      "src/types.d.ts": "export declare const d: number;\n",
+    });
+    assert.deepEqual(
+      [...walkFiles(join(root, "src"), [".mjs"], false, root)],
+      [join(root, "src/a.mjs")],
+    );
+    assert.deepEqual(
+      [...walkFiles(join(root, "src"), [".ts"], true, root)],
+      [join(root, "src/a.ts"), join(root, "src/types.d.ts")],
+    );
+  });
+
+  it("yields nothing for a base that is not a directory", () => {
+    const root = project({ "src/a.ts": "export const a = 1;\n" });
+    assert.deepEqual([...walkFiles(join(root, "src/a.ts"), [".ts"], false, root)], []);
+    assert.deepEqual([...walkFiles(join(root, "nope"), [".ts"], false, root)], []);
   });
 });
 

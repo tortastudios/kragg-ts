@@ -128,6 +128,59 @@ project's own `node_modules/.bin` — never a global install, never kragg's own
 tree — so a gate always runs the version the project declared. A missing tool
 is a visible skip with the exact install command, not a silent pass.
 
+## Scope: what a run actually looks at
+
+There are three scopes, resolved once per invocation (`src/commands/scope.ts`)
+and shared by `check` and `security` so the two cannot disagree:
+
+| Mode | From | Per-file tools get | Path-aware gates get |
+| --- | --- | --- | --- |
+| `full` | the default | `source_paths` | the whole project |
+| `changed` | `--changed` / `--since` | the changed source files that still exist | the same files |
+| `file` | `--file` | the paths as typed (a directory included) | those paths expanded to the source files under them |
+
+**A configuration edit is a change, and it changes everything.** `--changed`
+after editing only `kragg.json`, `tsconfig*.json`, `package.json`, a lockfile,
+`pnpm-workspace.yaml`, a linter config (`.oxlintrc.*`, `oxlint.config.*`,
+`biome.json(c)`, `eslint.config.*`, `.eslintrc*`), a test-runner config
+(`vitest.config.*`, `vitest.workspace.*`, `bunfig.toml`) or the configured
+`secret_baseline` runs a **full** check — those files decide what every gate
+concludes about every file, and the incremental run used to exit 0 without
+running one. The report says `mode: "full"`, and the reason is printed on
+stderr so the promotion is never a surprise.
+
+**A deletion is a change too.** A deleted file is never handed to a per-file
+tool — there is no file — but a change set whose only source change is a
+removal also runs a full check, because deleting the module half the tree
+imports is the change most likely to break the build. A rename needs no
+promotion: its new path is in the selection and `tsc` compiles the whole
+project anyway.
+
+**An empty selection is not a failed one.** A clean tree, or a commit that
+touched only a `README.md`, is exit 0 and the ordinary report with no gates.
+Git being *unable to answer* — not a repository, an unknown `--since` ref, no
+commit to diff against — is exit 3 carrying git's own message, never an empty
+file list. A `--file` that names a path which is not there is exit 2 naming it.
+
+### Which scope each gate honours
+
+Narrowing a gate that reasons about the whole program would make it lie, so
+several deliberately ignore the selection. That is documented, not accidental:
+
+| Gate | Scope it honours | Why |
+| --- | --- | --- |
+| `lint` | the targets, verbatim | per-file, and the linter takes directories |
+| `tsc` | **whole project, always** | the selection only orders diagnostics; the error a change causes is usually in a file that did not change |
+| `typing-strictness` | the file list, for the source scan | the `tsconfig.json` audit always runs — a loosened floor must not ride in on an unrelated commit |
+| `complexity`, `maintainability`, `halstead`, `structure` | **whole project** | per-file budgets, but cheap enough to keep whole so a run cannot report a budget it never measured |
+| `type-complexity` | the file list | per-file annotation budgets |
+| `boundaries` | **whole project** | a layering violation is a property of the import graph, not of one file |
+| `forbidden-calls`, `nullable-default`, `secret-default` | the file list | per-file, type-aware |
+| `detect-secrets` | the file list, else the whole project | credentials hide in `.env` files and fixtures, not only in `src/` |
+| `critical-tests` | **whole project**, plus its own `--since` diff | it compares critical functions against test changes across the tree |
+| `test-quality` | **whole project** | it answers "does a test reference this critical function", which no selection bounds |
+| `test-coverage`, `critical-coverage`, `audit` | **whole project**, and they skip in incremental mode | a suite or an advisory scan means nothing partially run |
+
 ## Test depth
 
 Green checkmarks are easy to fake, so kragg looks past them with layered,
@@ -334,6 +387,11 @@ Deliberate, and documented at each site:
 | criticality (top-20) | Python's `top_n=20` truncates the analysis, so its `criticality.json` — the input the criticality gates enforce on — never names more than twenty functions. Here twenty is a *display* limit on `CRITICALITY.md` and the terminal table only; the sidecar carries every ranked function, so the gates enforce on the whole eligible population. Same record shape, same ranking, more rows. |
 | `criticality --path` | Scopes the printed table only. Combined with `--write` it is a usage error, where Python persists the scoped result — a partial `criticality.json` reads downstream as "everything else is uncritical". |
 | `check --file` with `--changed`/`--since` | A usage error. Python silently prefers git's file set and discards the explicit list. |
+| `check --file <missing>` | A usage error naming the path. Python runs the pipeline over a selection that matches nothing, which reads as a clean pass. |
+| `--changed` after a config-only edit | Runs a **full** check and reports `mode: "full"`. Python resolves an empty Python-file selection and exits 0 without running a gate, even though the edit changed what every gate would conclude. |
+| `--changed` when the only source change is a deletion | Runs a **full** check for the same reason. Python drops deletions from the selection and exits 0 with nothing checked. |
+| `--changed` in a repository with no commit | Exit 3 with git's message. Both implementations ask `git diff HEAD`; Python (and kragg-ts before this) took the failure as an empty diff and silently checked only untracked files. |
+| non-ASCII changed paths | Every git plumbing call is `-z`, so a path like `src/café.ts` survives. Python's `core.quotePath` output escapes it, the escaped name matches nothing on disk, and the file leaves the selection silently. |
 | `secret_name_suffixes` | Includes `ServiceKey`, which Python's default list lacks. |
 | pipeline halting | A **skip never halts** the slow tier or `--fail-fast`; only a gate that ran and did not pass does. Python branches on `not result.passed`, which counts a visible skip as a failure. |
 | a gate that throws | Reported as that gate's `error: true` — the rest of the pipeline still runs and the consolidated report survives. Python lets the exception kill the process. |

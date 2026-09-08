@@ -7,17 +7,13 @@
  * giving each its own runner is how the two start rendering, journaling and
  * exiting differently for no reason anyone intended.
  *
- * TARGET RESOLUTION has three modes, and the distinction between two of them
- * is not cosmetic:
- *
- *  - `full`    — no scoping. Gates walk `source_paths`.
- *  - `changed` — `--changed`/`--since`. Git decides the file set.
- *  - `file`    — explicit `--file`. The caller decides.
- *
- * `changed` mode outside a git repository returns NULL, never an empty list.
- * Collapsing those would make `--changed` silently check nothing and report a
- * confident pass, which is the exact shape of failure kragg exists to catch.
- * `changes.ts` preserves the distinction; this is where it is acted on.
+ * TARGET RESOLUTION lives in `scope.ts` — one resolver for `check` and
+ * `security` both, so the two cannot disagree about what a `--file` argument
+ * means. What is left here is what to DO with each answer: an unresolvable
+ * selection is an exit code, an empty one is a clean run, and anything else
+ * assembles the pipeline. See that module for the three modes, for why a
+ * changed configuration file promotes an incremental run to a full one, and
+ * for why git failing to answer is exit 3 and not an empty file list.
  */
 
 import { buildCheckGates } from "../catalog.ts";
@@ -29,13 +25,13 @@ import {
   renderText,
   reportExitCode,
   utcNow,
-  EXIT_ENVIRONMENT,
   EXIT_OK,
 } from "../engine/report.ts";
 import { toPayload } from "../engine/reportPayload.ts";
 import { resolveProjectEnvironment } from "../environment/project.ts";
-import { changedFiles, gitDirty, gitSha } from "../git/changes.ts";
+import { gitDirty, gitSha } from "../git/changes.ts";
 import { loadPolicy, type KraggPolicy } from "../policy/policy.ts";
+import { resolveScope } from "./scope.ts";
 
 /** How a run should be reported, shared by `check` and `security`. */
 export interface ReportFlags {
@@ -61,10 +57,19 @@ export interface CheckFlags extends ReportFlags {
 /** Run the full check pipeline and return the process exit code. */
 export async function runCheck(flags: CheckFlags): Promise<number> {
   const policy = loadPolicy(flags.root);
-  const scope = await resolveScope(flags, policy);
-  if (scope === null) {
-    process.stderr.write("not a git repository (required for --changed/--since)\n");
-    return EXIT_ENVIRONMENT;
+  const resolved = await resolveScope(
+    { root: flags.root, targets: flags.targets, changed: flags.changed, since: flags.since },
+    policy,
+  );
+  if (!resolved.ok) {
+    process.stderr.write(`kragg: ${resolved.message}\n`);
+    return resolved.exit;
+  }
+  const { scope } = resolved;
+  if (scope.note !== undefined) {
+    // stderr, not stdout: `--format json` promises one parseable document on
+    // stdout, and an explanation is not part of the wire format.
+    process.stderr.write(`kragg: ${scope.note}\n`);
   }
   if (scope.mode !== "full" && scope.targets.length === 0) {
     return await emptySelection(flags, policy, scope.mode);
@@ -96,6 +101,13 @@ export async function runCheck(flags: CheckFlags): Promise<number> {
  * NOT JOURNALED, in either format. A run that assembled no gates is not a run
  * `kragg status` should show a verdict for, and making that depend on
  * `--format` would give the two formats different side effects.
+ *
+ * AN EMPTY SELECTION IS NOT A FAILED ONE, and only `changed` reaches this:
+ * the change set held no source file that still exists, AND nothing in it
+ * invalidates the whole project — a changed config file or a deletion is
+ * promoted to a full run by `scope.ts` before this is reached, and git failing
+ * to answer is exit 3 before that. `file` cannot get here at all, because a
+ * `--file` naming nothing is exit 2.
  */
 async function emptySelection(
   flags: CheckFlags,
@@ -117,37 +129,6 @@ async function emptySelection(
   });
   process.stdout.write(`${renderJson(report)}\n`);
   return reportExitCode(report);
-}
-
-/** What one invocation is scoped to. */
-interface Scope {
-  /** Passed to the per-file external tools (the linter, the scanner). */
-  readonly targets: readonly string[];
-  /** Narrowing for path-aware gates; `undefined` for a whole-project run. */
-  readonly paths: readonly string[] | undefined;
-  readonly mode: "full" | "changed" | "file";
-}
-
-/** Resolve the scope, or `null` when git was needed and could not answer. */
-async function resolveScope(
-  flags: CheckFlags,
-  policy: KraggPolicy,
-): Promise<Scope | null> {
-  if (flags.changed || flags.since !== null) {
-    const allowed = [...policy.sourcePaths, ...policy.testPaths];
-    const files = await changedFiles(flags.root, flags.since, allowed);
-    if (files === null) {
-      return null;
-    }
-    return { targets: files, paths: files, mode: "changed" };
-  }
-  if (flags.targets.length > 0) {
-    return { targets: flags.targets, paths: flags.targets, mode: "file" };
-  }
-  // DIVERGES from Python, which passes only `source_paths[0]` to its external
-  // tools and therefore lints exactly one directory in a project that declares
-  // several. Passing all of them checks what the project said it has.
-  return { targets: policy.sourcePaths, paths: undefined, mode: "full" };
 }
 
 /** Everything `runPipeline` needs that is not already in the flags. */

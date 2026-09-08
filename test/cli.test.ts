@@ -470,6 +470,189 @@ describe("a check with nothing in its scope", () => {
   });
 });
 
+/**
+ * TOR-1365, end to end: what an incremental run may conclude, and from what.
+ *
+ * The fixture keeps the external tools off so the report is about the gates
+ * that judge the code, and gives `nullable-default` something real to find in
+ * a nested directory — the finding that a `--file` on that directory used to
+ * miss while reporting `[PASS]`.
+ */
+describe("incremental selection and configuration invalidation", () => {
+  const TSCONFIG = JSON.stringify({
+    compilerOptions: {
+      target: "es2023",
+      module: "nodenext",
+      moduleResolution: "nodenext",
+      strict: true,
+      noUncheckedIndexedAccess: true,
+      exactOptionalPropertyTypes: true,
+      allowImportingTsExtensions: true,
+      verbatimModuleSyntax: true,
+      erasableSyntaxOnly: true,
+      noEmit: true,
+    },
+    include: ["src/**/*.ts"],
+  });
+
+  /** `||` mis-coalescing a legitimate `0` — one `nullable-default` violation. */
+  const MIS_COALESCED = "export function port(given: number | null): number {\n" +
+    "  return given || 8080;\n}\n";
+
+  async function selectionProject(): Promise<string | null> {
+    const root = project({
+      "package.json": '{"name":"x","version":"0.0.0","type":"module","private":true}',
+      "kragg.json":
+        '{"source_paths":["src"],"test_paths":["test"],"lint_tool":"off",' +
+        '"test_runner":"off","secret_scanner":"off"}',
+      "tsconfig.json": TSCONFIG,
+      "README.md": "# fixture\n",
+    });
+    writeProjectFile(root, "src/a.ts", "export const a = 1;\n");
+    writeProjectFile(root, "src/nested/b.ts", MIS_COALESCED);
+    for (const args of [
+      ["init", "--initial-branch=main"],
+      ["add", "-A"],
+      [
+        "-c",
+        "user.name=kragg-test",
+        "-c",
+        "user.email=kragg-test@example.invalid",
+        "-c",
+        "commit.gpgsign=false",
+        "commit",
+        "-q",
+        "-m",
+        "baseline",
+      ],
+    ]) {
+      const result = await runCommand("git", ["git", ...args], root);
+      if (result.returncode !== 0) {
+        return null;
+      }
+    }
+    return root;
+  }
+
+  /** Run `check --changed --format json` and hand back the payload. */
+  async function changedRun(root: string): Promise<{ payload: ReportPayload; err: string }> {
+    const result = await run(["check", "--changed", "--format", "json", "--no-journal"], root);
+    return { payload: JSON.parse(result.out), err: result.err };
+  }
+
+  it("runs a FULL check after a config-only edit, instead of exiting 0 having run nothing", async (t) => {
+    const root = await selectionProject();
+    if (root === null) {
+      t.skip("git is not available");
+      return;
+    }
+    // THE REPORTED BUG. Editing only `kragg.json` left `--changed` with an
+    // empty TypeScript selection, so it printed "no changed TypeScript files"
+    // and exited 0 before a single gate ran — over a file that decides what
+    // every gate concludes about every other file.
+    writeFileSync(join(root, "kragg.json"),
+      '{"source_paths":["src"],"test_paths":["test"],"lint_tool":"off",' +
+        '"test_runner":"off","secret_scanner":"off","max_file_lines":400}');
+    const { payload, err } = await changedRun(root);
+    assert.equal(payload.mode, "full");
+    assert.deepEqual(payload.targets, ["src"]);
+    assert.ok(payload.summary.gates_total > 0, "gates must actually have run");
+    assert.match(err, /kragg\.json changed/);
+  });
+
+  it("runs a FULL check when the only change is a deletion", async (t) => {
+    const root = await selectionProject();
+    if (root === null) {
+      t.skip("git is not available");
+      return;
+    }
+    rmSync(join(root, "src", "a.ts"));
+    const { payload, err } = await changedRun(root);
+    assert.equal(payload.mode, "full");
+    assert.ok(payload.summary.gates_total > 0);
+    assert.match(err, /src\/a\.ts was removed/);
+  });
+
+  it("still reports an empty selection as a clean run when only a doc changed", async (t) => {
+    const root = await selectionProject();
+    if (root === null) {
+      t.skip("git is not available");
+      return;
+    }
+    // Empty is not failed discovery, and it is not a reason to check the world.
+    writeFileSync(join(root, "README.md"), "# edited\n");
+    const { payload, err } = await changedRun(root);
+    assert.equal(payload.mode, "changed");
+    assert.deepEqual(payload.gates, []);
+    assert.equal(err, "");
+  });
+
+  it("selects a changed non-ASCII path instead of silently dropping it", async (t) => {
+    const root = await selectionProject();
+    if (root === null) {
+      t.skip("git is not available");
+      return;
+    }
+    // `core.quotePath` rendered this as `"src/caf\303\251.ts"`, which matched
+    // nothing on disk: the file left the selection and the run passed green.
+    writeProjectFile(root, "src/café.ts", MIS_COALESCED);
+    const { payload } = await changedRun(root);
+    assert.equal(payload.mode, "changed");
+    assert.deepEqual(payload.targets, ["src/café.ts"]);
+    const gate = payload.gates.find((each) => each.name === "nullable-default");
+    assert.equal(gate?.passed, false, "the gate must have looked inside the file");
+    assert.equal(gate?.violation_count, 1);
+  });
+
+  it("narrows every path-aware gate to a --file directory, not just the linter", async (t) => {
+    const root = await selectionProject();
+    if (root === null) {
+      t.skip("git is not available");
+      return;
+    }
+    // `--file src/nested` used to leave `paths` as the directory string, which
+    // no gate that compares FILE paths could ever match: `nullable-default`
+    // scanned nothing and printed `[PASS]` over a real finding underneath it.
+    const result = await run(
+      ["check", "--file", "src/nested", "--format", "json", "--no-journal"],
+      root,
+    );
+    const payload: ReportPayload = JSON.parse(result.out);
+    assert.deepEqual(payload.targets, ["src/nested"], "targets stay as given: they are on the wire");
+    const gate = payload.gates.find((each) => each.name === "nullable-default");
+    assert.equal(gate?.passed, false);
+    assert.equal(gate?.violation_count, 1);
+  });
+
+  it("rejects a --file that names nothing, on both pipelines", async (t) => {
+    const root = await selectionProject();
+    if (root === null) {
+      t.skip("git is not available");
+      return;
+    }
+    for (const command of ["check", "security"]) {
+      const result = await run([command, "--file", "src/typo.ts", "--no-journal"], root);
+      assert.equal(result.code, EXIT_USAGE, command);
+      assert.match(result.err, /--file src\/typo\.ts: no such file or directory/, command);
+      assert.equal(result.out, "", command);
+    }
+  });
+
+  it("reports git's own message for a --since ref that does not exist", async (t) => {
+    const root = await selectionProject();
+    if (root === null) {
+      t.skip("git is not available");
+      return;
+    }
+    // An unresolvable ref is not an empty change set. It used to be reported
+    // as "not a git repository", which sends the reader to the wrong place.
+    const result = await run(["check", "--since", "no-such-ref", "--no-journal"], root);
+    assert.equal(result.code, EXIT_ENVIRONMENT);
+    assert.match(result.err, /merge-base/);
+    assert.equal(result.out, "");
+  });
+});
+
 describe("an accepted argument must be an argument that acts", () => {
   // Three shapes of one bug, each of which used to be a silent fallback: a
   // value outside its domain, a positional nobody reads, and a flag that
