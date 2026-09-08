@@ -16,10 +16,12 @@ import { describe, it } from "node:test";
 
 import { matchesAny, matchesGlob } from "../src/util/globs.ts";
 import {
-  lineSuppressed,
+  lineSuppression,
   SUPPRESS_BLOCK_COMMENT,
   SUPPRESS_LINE_COMMENT,
   suppressed,
+  suppression,
+  unhonouredMessage,
 } from "../src/util/suppress.ts";
 
 describe("matchesGlob: wildcards", () => {
@@ -196,34 +198,48 @@ describe("matchesAny", () => {
 });
 
 describe("suppression markers", () => {
-  const line = `const x = eval(src); ${SUPPRESS_LINE_COMMENT}`;
-  const block = `const x = eval(src); ${SUPPRESS_BLOCK_COMMENT}`;
+  const line = `const x = eval(src); ${SUPPRESS_LINE_COMMENT} -- input is a compile-time constant`;
+  const block = `const x = eval(src); ${SUPPRESS_BLOCK_COMMENT} -- input is a compile-time constant */`;
 
-  it("accepts both the line and block comment forms", () => {
-    assert.equal(lineSuppressed(line), true);
-    assert.equal(lineSuppressed(block), true);
+  it("accepts both the line and block comment forms, quoting the reason", () => {
+    assert.deepEqual(lineSuppression(line), {
+      kind: "honoured",
+      reason: "input is a compile-time constant",
+    });
+    assert.deepEqual(lineSuppression(block), {
+      kind: "honoured",
+      reason: "input is a compile-time constant",
+    });
   });
 
-  it("allows a trailing reason after the marker", () => {
-    assert.equal(
-      lineSuppressed(`${SUPPRESS_LINE_COMMENT} reviewed: constant input`),
-      true,
-    );
+  it("strips the punctuation people put before the reason", () => {
+    for (const lead of [" -- ", " — ", ": ", " - ", " "]) {
+      const found = lineSuppression(`${SUPPRESS_LINE_COMMENT}${lead}reviewed: constant input`);
+      assert.deepEqual(found, { kind: "honoured", reason: "reviewed: constant input" }, lead);
+    }
+  });
+
+  it("does NOT honour a bare marker, and says which line it is on", () => {
+    // TOR-1377: an exemption with no reason is reported, not obeyed.
+    assert.deepEqual(lineSuppression(`const x = 1; ${SUPPRESS_LINE_COMMENT}`, 7), { kind: "bare", line: 7 });
+    assert.deepEqual(lineSuppression(`const x = 1; ${SUPPRESS_LINE_COMMENT} --`, 7), { kind: "bare", line: 7 });
+    assert.deepEqual(lineSuppression(`const x = 1; ${SUPPRESS_BLOCK_COMMENT} */`, 3), { kind: "bare", line: 3 });
+    assert.equal(suppressed([`const x = 1; ${SUPPRESS_LINE_COMMENT}`], 1), false);
   });
 
   it("rejects every near-miss spelling", () => {
     // The rigidity is deliberate: one greppable spelling, and an exemption
     // that cannot be written by accident.
     for (const near of [
-      "const x = 1; //kragg: ignore",
-      "const x = 1; // KRAGG: IGNORE",
-      "const x = 1; // kragg:ignore",
-      "const x = 1; // kragg ignore",
-      "const x = 1; # kragg: ignore",
+      "const x = 1; //kragg: ignore -- reason",
+      "const x = 1; // KRAGG: IGNORE -- reason",
+      "const x = 1; // kragg:ignore -- reason",
+      "const x = 1; // kragg ignore -- reason",
+      "const x = 1; # kragg: ignore -- reason",
       "const x = 1;",
       "",
     ]) {
-      assert.equal(lineSuppressed(near), false, `must not accept: ${near}`);
+      assert.deepEqual(lineSuppression(near), { kind: "none" }, `must not accept: ${near}`);
     }
   });
 
@@ -240,6 +256,13 @@ describe("suppression markers", () => {
     assert.equal(suppressed(lines, 4, 4), false);
   });
 
+  it("prefers a reasoned marker over a bare one in the same span", () => {
+    const lines = [`a ${SUPPRESS_LINE_COMMENT}`, line];
+    assert.deepEqual(suppression(lines, 1, 2), { kind: "honoured", reason: "input is a compile-time constant" });
+    assert.deepEqual(suppression(lines, 1, 1), { kind: "bare", line: 1 });
+    assert.deepEqual(suppression(["a", "b"], 1, 2), { kind: "none" });
+  });
+
   it("treats out-of-range lines as not suppressed rather than throwing", () => {
     // Fail closed: a span that disagrees with the file still reports the
     // violation instead of crashing the gate or silently exempting it.
@@ -251,5 +274,14 @@ describe("suppression markers", () => {
 
   it("tolerates an end line before the start line", () => {
     assert.equal(suppressed(["a", line], 2, 1), true);
+  });
+
+  it("appends the bare-marker note to a message only for a bare marker", () => {
+    assert.equal(unhonouredMessage("m", { kind: "none" }), "m");
+    assert.equal(unhonouredMessage("m", { kind: "honoured", reason: "r" }), "m");
+    assert.match(
+      unhonouredMessage("m", { kind: "bare", line: 4 }),
+      /^m \(the `\/\/ kragg: ignore` on line 4 names no reason and is not honoured; write `\/\/ kragg: ignore -- <why this site is safe>`\)$/u,
+    );
   });
 });

@@ -15,7 +15,7 @@ import {
 import type { TypeScriptApi } from "../../analysis/sourceFile.ts";
 import type { Violation } from "../../engine/models.ts";
 import type { ForbiddenCall } from "../../policy/policy.ts";
-import { suppressed } from "../../util/suppress.ts";
+import { suppression, unhonouredMessage } from "../../util/suppress.ts";
 import { toPosix, type Resolver } from "./resolver.ts";
 import {
   buildRules,
@@ -171,12 +171,13 @@ function checkCallee(
   }
   const start = file.getLineAndCharacterOfPosition(node.getStart(file));
   const end = file.getLineAndCharacterOfPosition(node.getEnd());
-  if (suppressed(lines, start.line + 1, end.line + 1)) {
+  const marker = suppression(lines, start.line + 1, end.line + 1);
+  if (marker.kind === "honoured") {
     return null;
   }
   const banned = match.entry === canonical ? "" : ` (banned: \`${match.entry}\`)`;
   return {
-    message: `forbidden call \`${canonical}\`${banned}`,
+    message: unhonouredMessage(`forbidden call \`${canonical}\`${banned}`, marker),
     file: relativePath,
     line: start.line + 1,
     column: start.character + 1,

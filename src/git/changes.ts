@@ -91,7 +91,7 @@ export async function changedFiles(
   if (!(await isGitRepository(root))) {
     return null;
   }
-  const base = await resolveBase(root, since);
+  const base = await diffBase(root, since);
   if (base === null) {
     return null;
   }
@@ -121,13 +121,26 @@ export async function gitDirty(root: string): Promise<boolean> {
  * `--changed --since main` reports what this branch changed and not what main
  * gained underneath it. An unknown ref makes `merge-base` fail, which
  * propagates as `null` — better than silently diffing against everything.
+ *
+ * Exported for `kragg brief`, which compares the base revision of a file
+ * against the working tree and must use the SAME base `changedFiles` used, or
+ * the two halves of one brief describe different change sets.
  */
-async function resolveBase(root: string, since: string | null): Promise<string | null> {
+export async function diffBase(root: string, since: string | null): Promise<string | null> {
   if (since === null) {
     return "HEAD";
   }
   const mergeBase = await git(root, ["merge-base", since, "HEAD"]);
   return mergeBase === null ? null : mergeBase.trim();
+}
+
+/**
+ * The contents of a repo-relative `path` at `ref`, or `null` when the file
+ * did not exist there (or git could not answer). `ref` comes from
+ * {@link diffBase} and `path` from `changedFiles`; each lands in one argv slot.
+ */
+export async function showAtRef(root: string, ref: string, path: string): Promise<string | null> {
+  return git(root, ["show", `${ref}:${normalize(path)}`]);
 }
 
 function filterSourceFiles(

@@ -43,7 +43,7 @@
  *    parsing and resolving across the test tree, and the honest answer is that
  *    this gate does not do it. Such a test is reported, and the fix is either
  *    to name the helper `assert*` (rule 4) or to mark the site with a visible
- *    `// kragg: ignore`;
+ *    `// kragg: ignore -- <reason>`;
  *  - a helper reached as a property (`helpers.assertShape()` where `helpers`
  *    is an imported object) unless its name starts with `assert`;
  *  - chai's property-getter style (`expect(x).to.be.true`) is caught by rule 1

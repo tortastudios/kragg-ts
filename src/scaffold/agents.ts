@@ -128,12 +128,26 @@ wrong because its guarantees stop at the edge of the program.
   wrapper — raw SQL, \`child_process\`, unbounded request-body reads,
   \`eval\` — build the wrapper in \`src/services/\`, ban the raw API in
   \`kragg.json\` under \`forbidden_calls\` with a hint naming the wrapper, and
-  mark the wrapper's OWN call site with a trailing \`// kragg: ignore\`. One
-  audited call site, banned everywhere else. The \`forbidden-calls\` gate
-  enforces the ban on every change; the ignore comment is the single documented
-  exception, not a way to quiet the gate wherever it is inconvenient.
-- Never suppress a security or typing finding without an explicit written
-  reason at the suppression site.
+  mark the wrapper's OWN call site with a trailing
+  \`// kragg: ignore -- <reason>\`. One audited call site, banned everywhere
+  else. The \`forbidden-calls\` gate enforces the ban on every change; the
+  ignore comment is the single documented exception, not a way to quiet the
+  gate wherever it is inconvenient.
+- **Every suppression carries its reason.** \`// kragg: ignore -- <why this
+  site is safe>\` is the only form the gates honour; a bare \`// kragg: ignore\`
+  suppresses nothing and is reported as the finding it tried to hide. Every
+  marker added or removed is listed with its reason by \`kragg brief\`, so a
+  reviewer sees each one.
+
+## Legacy debt
+
+Findings that predate the gates are adopted deliberately, never silently.
+\`kragg check --update-baseline\` records the current findings of the metric,
+structure and test-quality gates in the file \`kragg.json#baseline\` names
+(\`.kragg/baseline.json\`, git-tracked); those are reported as \`baselined:\`
+advisories instead of failing the run, and every NEW finding still fails.
+Never run it to make a red run green: security, compiler and evidence gates
+are refused, and \`kragg brief\` lists every entry added, removed or stale.
 
 ## Critical code
 

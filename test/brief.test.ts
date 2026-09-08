@@ -27,6 +27,7 @@ import { after, describe, it } from "node:test";
 import ts from "typescript";
 
 import { buildBrief, NOT_A_REPOSITORY_MESSAGE } from "../src/commands/brief.ts";
+import { lineFingerprint } from "../src/policy/baseline.ts";
 import { DEFAULT_POLICY, type KraggPolicy } from "../src/policy/policy.ts";
 
 const roots: string[] = [];
@@ -62,7 +63,7 @@ function git(root: string, args: readonly string[]): void {
   // `brief` reads real git history, so this test drives a real repository.
   // Routing it through `runCommand` would make the fixture setup async for no
   // benefit and couple the test to the thing it is testing around.
-  execFileSync("git", [...args], { cwd: root, stdio: "ignore" }); // kragg: ignore
+  execFileSync("git", [...args], { cwd: root, stdio: "ignore" }); // kragg: ignore -- test fixture setup drives a real git repository synchronously; argv array, no shell
 }
 
 /** A repository with one commit, so `HEAD` is a usable diff base. */
@@ -245,5 +246,104 @@ describe("brief: the gate section", () => {
     const text = await brief(repository({}));
     assert.ok(text.endsWith("\n"), JSON.stringify(text.slice(-4)));
     assert.ok(!text.endsWith("\n\n"), JSON.stringify(text.slice(-4)));
+  });
+});
+
+describe("brief: exemptions (TOR-1377)", () => {
+  /** A repository whose base commit holds `files`, with `changes` applied on top. */
+  function evolved(
+    files: Readonly<Record<string, string>>,
+    changes: Readonly<Record<string, string>>,
+  ): string {
+    const root = repository(files);
+    git(root, ["add", "-A"]);
+    git(root, ["commit", "-m", "base files"]);
+    write(root, changes);
+    return root;
+  }
+
+  it("lists every suppression added, with its reason, and calls out a bare one", async () => {
+    const root = repository({
+      "src/a.ts":
+        "const a = eval(x); // kragg: ignore -- x is a compile-time constant\n" +
+        "const b = eval(y); /* kragg: ignore — reviewed */\n" +
+        "const c = eval(z); // kragg: ignore\n",
+    });
+    const text = await brief(root);
+    assert.ok(
+      text.includes(
+        "## Suppressions\n" +
+          "- added src/a.ts:1 — x is a compile-time constant\n" +
+          "- added src/a.ts:2 — reviewed\n" +
+          "- added src/a.ts:3 — NO REASON (not honoured; the finding is reported)\n",
+      ),
+      text,
+    );
+  });
+
+  it("lists a removed suppression, and ignores one that merely moved", async () => {
+    const root = evolved(
+      { "src/a.ts": "const a = eval(x); // kragg: ignore -- constant\nconst b = eval(y); // kragg: ignore -- reviewed\n" },
+      { "src/a.ts": "// a new line above\nconst a = eval(x); // kragg: ignore -- constant\nconst b = eval(y);\n" },
+    );
+    const text = await brief(root);
+    assert.ok(text.includes("## Suppressions\n- removed src/a.ts:2 — reviewed\n\n"), text);
+  });
+
+  it("prints none when the change set adds or removes no marker", async () => {
+    const text = await brief(repository({ "src/a.ts": "export const a = 1;\n" }));
+    assert.ok(text.includes("## Suppressions\nnone\n"), text);
+    assert.ok(text.includes("## Baseline\nnone configured\n"), text);
+  });
+
+  it("lists baseline entries added, removed and stale", async () => {
+    const line = "export function legacy(n: number): number { return n; }";
+    const entry = (message: string, fingerprint: string): Record<string, unknown> => ({
+      gate: "complexity",
+      file: "src/legacy.ts",
+      code: "CC-C",
+      message,
+      fingerprint,
+    });
+    const root = evolved(
+      {
+        "src/legacy.ts": `${line}\n`,
+        ".kragg/baseline.json": JSON.stringify({
+          version: 1,
+          entries: [entry("kept", lineFingerprint(line)), entry("fixed", lineFingerprint(line))],
+        }),
+      },
+      {
+        ".kragg/baseline.json": JSON.stringify({
+          version: 1,
+          entries: [entry("kept", lineFingerprint(line)), entry("renamed", lineFingerprint("gone"))],
+        }),
+      },
+    );
+    const text = await buildBrief({
+      root,
+      since: null,
+      policy: { ...POLICY, baseline: ".kragg/baseline.json" },
+      api: ts,
+    });
+    assert.ok(text !== null);
+    assert.ok(
+      text.includes(
+        "## Baseline\n" +
+          "- added complexity src/legacy.ts CC-C — renamed\n" +
+          "- removed complexity src/legacy.ts CC-C — fixed\n" +
+          "- stale complexity src/legacy.ts CC-C — renamed (accepted line no longer in the file; re-run `kragg check --update-baseline`)\n",
+      ),
+      text,
+    );
+    assert.ok(!text.includes("kept"), text);
+  });
+
+  it("keeps the exemption sections between the critical and gate sections", async () => {
+    const text = await brief(repository({}));
+    const headings = ["## Critical functions touched", "## Suppressions", "## Baseline", "## Last gate run"];
+    const order = headings.map((heading) => text.indexOf(heading));
+    assert.ok(order.every((index) => index !== -1), text);
+    assert.deepEqual([...order].sort((a, b) => a - b), order, text);
   });
 });

@@ -291,11 +291,17 @@ describe("test-quality: what is not a broken test", () => {
     assert.deepEqual(violationsFor(`const ok = test(pattern, input);`), []);
   });
 
-  it("honours a suppression comment on the flagged site", () => {
+  it("honours a suppression comment with a reason on the flagged site", () => {
     assert.deepEqual(
-      violationsFor(`it("known gap", () => { setup(); }); // kragg: ignore`),
+      violationsFor(`it("known gap", () => { setup(); }); // kragg: ignore -- smoke test: setup throwing is the assertion`),
       [],
     );
+  });
+
+  it("reports a test whose bare marker names no reason, saying so", () => {
+    const violations = violationsFor(`it("known gap", () => { setup(); }); // kragg: ignore`);
+    assert.equal(violations.length, 1);
+    assert.match(violations[0]?.message ?? "", /^known gap has no assertions \(the `\/\/ kragg: ignore` on line 1 names no reason/u);
   });
 });
 

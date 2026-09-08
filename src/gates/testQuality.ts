@@ -29,7 +29,7 @@
  * exercises. Files holding no test calls contribute nothing to the first check,
  * so the wider net costs nothing but a parse. The one cost is a test-tree
  * FIXTURE that deliberately contains a broken test — mark it with
- * `// kragg: ignore`, which this gate honours per site.
+ * `// kragg: ignore -- <reason>`, which this gate honours per site.
  *
  * ── WHEN THIS GATE DOES NOT RUN ────────────────────────────────────────────
  * No parsable file under any test path means the gate SKIPS with that reason.
@@ -45,7 +45,7 @@ import {
   type TypeScriptApi,
 } from "../analysis/sourceFile.ts";
 import type { Violation } from "../engine/models.ts";
-import { suppressed } from "../util/suppress.ts";
+import { suppression, unhonouredMessage } from "../util/suppress.ts";
 import { assertionContext, hasAssertion } from "./testDepth/assertions.ts";
 import { publicCriticalNames, simpleName } from "./testDepth/criticalFunctions.ts";
 import { ran, skipped, type TestDepthOutcome } from "./testDepth/outcome.ts";
@@ -113,11 +113,12 @@ function assertionViolations(
       if (testCase.skipped || hasAssertion(testCase.body, context)) {
         continue;
       }
-      if (suppressed(source.lines, testCase.line, testCase.endLine)) {
+      const marker = suppression(source.lines, testCase.line, testCase.endLine);
+      if (marker.kind === "honoured") {
         continue;
       }
       violations.push({
-        message: `${testCase.title} has no assertions`,
+        message: unhonouredMessage(`${testCase.title} has no assertions`, marker),
         file: source.relative,
         line: testCase.line,
         code: NO_ASSERT_CODE,

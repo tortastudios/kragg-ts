@@ -361,7 +361,7 @@ describe("baseline", () => {
   it("documents the gitignore negation git actually honours", () => {
     // `.kragg/` alone would make the negation a no-op: git never descends into
     // an excluded directory. The contents form is the only one that works.
-    assert.deepEqual(GITIGNORE_LINES, [".kragg/*", "!.kragg/mutants.baseline"]);
+    assert.deepEqual(GITIGNORE_LINES, [".kragg/*", "!.kragg/mutants.baseline", "!.kragg/baseline.json"]);
   });
 });
 

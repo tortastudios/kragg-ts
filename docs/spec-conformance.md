@@ -273,9 +273,10 @@ Same key vocabulary, snake_case, on both sides; only the carrier differs —
 `package.json` `"kragg"` here. The standalone file wins outright; there is no
 merging. kragg-ts adds tool-selection keys (`lint_tool`, `test_runner`,
 `secret_scanner`, `audit_severity`) that have no Python analogue, where `"off"`
-is a deliberate, visible disable: the gate SKIPs with a reason saying so.
-Malformed *values* fail closed to the stricter default; a file that cannot be
-parsed at all is a usage error (exit 2).
+is a deliberate, visible disable: the gate SKIPs with a reason saying so — and
+`baseline`, the root-relative path of the legacy-debt baseline (row 21 of
+section 11), `null` by default. Malformed *values* fail closed to the stricter
+default; a file that cannot be parsed at all is a usage error (exit 2).
 
 ## 9. Fixtures in this repository
 
@@ -341,7 +342,7 @@ A conformance runner must not flag these; a suite that diffs the two
 implementations naively will flag every one. Rows 1–9 are this repository's
 original table, re-verified against both trees while the spec was written; rows
 10–12 were added by that verification and are also SPEC.md section 10's rows
-10–12; rows 13–19 were introduced by TOR-1358, TOR-1363, TOR-1361 and TOR-1369 on this branch. Fixtures that exercise a row carry a `divergences` entry naming its id.
+10–12; rows 13–19 were introduced by TOR-1358, TOR-1363, TOR-1361 and TOR-1369 on this branch; rows 20–21 by TOR-1377. Fixtures that exercise a row carry a `divergences` entry naming its id.
 
 | # | Divergence | Why it is intentional |
 | --- | --- | --- |
@@ -364,6 +365,8 @@ original table, re-verified against both trees while the spec was written; rows
 | 17 | `criticality --write --path` is exit 2 | Python writes whatever the scoped analysis produced. A partial `.kragg/criticality.json` is not read as partial: `critical-tests` and `critical-coverage` would treat every function outside the scope as uncritical. Refusing keeps the file whole-project by construction. |
 | 18 | `check --file` with `--changed`/`--since` is exit 2 | Python's `_check_targets` takes the git branch first and drops `--file` on the floor. Same file set either way; kragg-ts declines to guess which one the caller meant. |
 | 19 | `check` with an empty `--changed` set under `--format json` | Python prints `no changed Python files` in both formats. kragg-ts prints that only for text and emits the ordinary payload with `gates: []` for JSON, so every `--format json` path is parseable. No key is added, and the text path is byte-identical apart from the language name. |
+| 20 | `// kragg: ignore` requires a reason | Python's `# kragg: ignore` (`gates/suppress.py`) is honoured bare. kragg-ts honours only `// kragg: ignore -- <reason>`; a bare marker suppresses nothing and the finding is reported with a note naming it (`src/util/suppress.ts`). Pinned by the gate unit tests; no wire change. |
+| 21 | the legacy-debt baseline (`kragg.json#baseline`, `check --update-baseline`) | Python has no violation baseline. kragg-ts records accepted findings of the metric, structure and test-quality gates — never security, compiler or evidence gates, errors or skips — and reports them as `baselined:` entries in the existing `advisories` list of their gate, so `passed`, `exit_code`, `violation_count` and the journal describe the post-baseline results and **no key is added** to any payload. Stale entries are advisories too. `kragg.json#baseline` is a TypeScript-only policy key (see section 8). Pinned by `test/baseline.test.ts` and `test/cli.test.ts`; the cross-language fixtures configure no baseline and are unaffected. |
 
 Four defects found in the Python implementation during the port are recorded in
 [KNOWN_LIMITATIONS.md](../KNOWN_LIMITATIONS.md#found-in-the-python-implementation-during-this-port).

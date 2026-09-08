@@ -346,7 +346,7 @@ const FIXTURE: Readonly<Record<string, string>> = {
     'import { exec } from "node:child_process";', // 1
     "", // 2
     "export function wrapper(command: string): void {", // 3
-    "  exec(command); // kragg: ignore", // 4
+    "  exec(command); // kragg: ignore -- the wrapper's own call site: argv array, no shell", // 4
     "}", // 5
     "", // 6
     "export function unguarded(command: string): void {", // 7
@@ -354,10 +354,19 @@ const FIXTURE: Readonly<Record<string, string>> = {
     "}", // 9
     "", // 10
     "export function spanning(command: string): void {", // 11
-    "  exec( // kragg: ignore", // 12
+    "  exec( // kragg: ignore -- reviewed: the command is a constant", // 12
     "    command,", // 13
     "  );", // 14
     "}", // 15
+    "",
+  ].join("\n"),
+
+  "src/bare.ts": [
+    'import { exec } from "node:child_process";', // 1
+    "", // 2
+    "export function bare(command: string): void {", // 3
+    "  exec(command); // kragg: ignore", // 4
+    "}", // 5
     "",
   ].join("\n"),
 
@@ -668,6 +677,14 @@ describe("forbidden calls: suppression", () => {
     // exemption is per-site and visible in the diff — there is no file switch.
     assert.deepEqual(summary(scan("suppressed.ts", BAN_EXEC)), [
       "8: forbidden call `child_process.exec`",
+    ]);
+  });
+
+  it("does not honour a marker with no reason, and says so on the finding", () => {
+    // TOR-1377: a security exemption without a rationale is not an exemption.
+    assert.deepEqual(summary(scan("bare.ts", BAN_EXEC)), [
+      "4: forbidden call `child_process.exec` (the `// kragg: ignore` on line 4 names no " +
+        "reason and is not honoured; write `// kragg: ignore -- <why this site is safe>`)",
     ]);
   });
 });

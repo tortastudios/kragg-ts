@@ -140,6 +140,12 @@ export interface KraggPolicy {
    * means none. The two scanners' formats are NOT interchangeable.
    */
   readonly secretBaseline: string | undefined;
+  /**
+   * Reviewed legacy-debt baseline, root-relative; `undefined` means none.
+   * Written only by `kragg check --update-baseline`, read by every `check`.
+   * See `policy/baseline.ts` for what may and may not be recorded in it.
+   */
+  readonly baseline: string | undefined;
   /** Advisories below this severity are counted but not reported. */
   readonly auditSeverity: AuditSeverity;
   /** Where the test runner writes its istanbul JSON, relative to the root. */
@@ -216,6 +222,7 @@ export const DEFAULT_POLICY: KraggPolicy = {
   testRunner: "auto",
   secretScanner: "auto",
   secretBaseline: undefined,
+  baseline: undefined,
   auditSeverity: "high",
   coverageReportPath: "coverage/coverage-final.json",
 };
@@ -271,7 +278,10 @@ type PolicyBudgets = Pick<
 >;
 
 /** The settings that enumerate what a gate looks FOR. */
-type PolicyRules = Pick<KraggPolicy, "forbiddenCalls" | "secretNameSuffixes" | "secretBaseline">;
+type PolicyRules = Pick<
+  KraggPolicy,
+  "forbiddenCalls" | "secretNameSuffixes" | "secretBaseline" | "baseline"
+>;
 
 /** Which external tool each gate drives, and how strict it is. */
 type PolicyTools = Pick<
@@ -329,6 +339,7 @@ function readRules(source: Source): PolicyRules {
     forbiddenCalls: getStringPairs(source, "forbidden_calls", base.forbiddenCalls),
     secretNameSuffixes: getStringList(source, "secret_name_suffixes", base.secretNameSuffixes),
     secretBaseline: getOptionalString(source, "secret_baseline", base.secretBaseline),
+    baseline: getOptionalString(source, "baseline", base.baseline),
   };
 }
 
@@ -380,6 +391,7 @@ export function policyAsDict(policy: KraggPolicy): Record<string, unknown> {
     secret_baseline: policy.secretBaseline ?? null,
     audit_severity: policy.auditSeverity,
     coverage_report_path: policy.coverageReportPath,
+    baseline: policy.baseline ?? null,
   };
 }
 

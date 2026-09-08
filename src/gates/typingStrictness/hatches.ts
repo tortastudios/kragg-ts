@@ -47,16 +47,16 @@
  * flagging it would be flagging an inert comment. Likewise `@ts-nocheck` is
  * reported only where the compiler honours it — before the first statement.
  *
- * A reviewed-safe site is silenced with `// kragg: ignore` on a line it spans,
+ * A reviewed-safe site is silenced with `// kragg: ignore -- <reason>` on a line it spans,
  * per `util/suppress.ts`. For a directive comment that means writing both on
- * one line: `// @ts-expect-error // kragg: ignore`, which is ugly on purpose.
+ * one line: `// @ts-expect-error // kragg: ignore -- <reason>`, which is ugly on purpose.
  */
 
 import type ts from "typescript";
 
 import type { ParsedSource, TypeScriptApi } from "../../analysis/sourceFile.ts";
 import type { Violation } from "../../engine/models.ts";
-import { suppressed } from "../../util/suppress.ts";
+import { suppression, unhonouredMessage } from "../../util/suppress.ts";
 import { TYPING_STRICTNESS_CODES as CODE } from "./codes.ts";
 
 /** Findings from one file, split by whether they fail the gate. */
@@ -100,7 +100,7 @@ interface Finding {
   readonly fixHint: string;
 }
 
-/** Collects findings, applies `// kragg: ignore`, and fills in the location. */
+/** Collects findings, applies `// kragg: ignore -- <reason>`, and fills in the location. */
 interface Sink {
   /** Record a finding spanning `[start, end)`; `advisory` never fails the gate. */
   add(span: Span, finding: Finding, advisory: boolean): void;
@@ -115,11 +115,12 @@ function createSink(source: ParsedSource): Sink {
     add(span: Span, finding: Finding, advisory: boolean): void {
       const from = file.getLineAndCharacterOfPosition(span.start);
       const to = file.getLineAndCharacterOfPosition(span.end);
-      if (suppressed(source.lines, from.line + 1, to.line + 1)) {
+      const marker = suppression(source.lines, from.line + 1, to.line + 1);
+      if (marker.kind === "honoured") {
         return;
       }
       (advisory ? advisories : violations).push({
-        message: finding.message,
+        message: unhonouredMessage(finding.message, marker),
         file: source.relative,
         line: from.line + 1,
         column: from.character + 1,
@@ -280,7 +281,7 @@ function scanNodes(sink: Sink, source: ParsedSource, api: TypeScriptApi): void {
           message: "non-null assertion `!` — the checker cannot verify this is not null",
           fixHint:
             "narrow with a check the checker can follow, or make the type " +
-            "honest; if it is genuinely provable, `// kragg: ignore` it with a reason",
+            "honest; if it is genuinely provable, `// kragg: ignore -- <reason>` it",
         },
         true,
       );

@@ -431,7 +431,20 @@ describe("policyAsDict", () => {
       "secret_baseline",
       "audit_severity",
       "coverage_report_path",
+      "baseline",
     ]);
+  });
+
+  it("reads the legacy-debt baseline path, with null as the explicit none", () => {
+    // TOR-1377: absent and null both mean "no baseline"; a wrong type is
+    // rejected by name rather than read as none.
+    assert.equal(loadPolicy(configured({})).baseline, undefined);
+    assert.equal(loadPolicy(configured({ baseline: null })).baseline, undefined);
+    assert.equal(loadPolicy(configured({ baseline: ".kragg/baseline.json" })).baseline, ".kragg/baseline.json");
+    assert.equal(policyAsDict(loadPolicy(configured({})))["baseline"], null);
+    assert.throws(() => loadPolicy(configured({ baseline: true })), {
+      message: /kragg\.json#baseline must be a string or null \(got true\)/u,
+    });
   });
 
   it("serializes pairs as two-element arrays", () => {

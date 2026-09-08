@@ -38,11 +38,17 @@
  *    two end up diffing against different bases. Line counts are the least
  *    informative thing on the Python line anyway — the reviewer is about to
  *    read the diff.
+ *
+ * And ONE ADDITION Python does not have (TOR-1377): `## Suppressions` and
+ * `## Baseline`, between the critical section and the gate section, listing
+ * every `// kragg: ignore -- <reason>` and every baseline entry this change
+ * set added, removed or left stale. See `brief/exemptions.ts`.
  */
 
 import { EXIT_ENVIRONMENT, EXIT_OK, EXIT_USAGE } from "../engine/report.ts";
 import { readRuns, renderStatusLines } from "../engine/journal.ts";
-import { changedFiles } from "../git/changes.ts";
+import { changedFiles, diffBase } from "../git/changes.ts";
+import { baselineSection, suppressionSection } from "./brief/exemptions.ts";
 import { criticalFunctions } from "../gates/testDepth/criticalFunctions.ts";
 import type { TypeScriptApi } from "../analysis/sourceFile.ts";
 import { loadPolicy, PolicyError, type KraggPolicy } from "../policy/policy.ts";
@@ -127,10 +133,14 @@ export async function buildBrief(options: BuildBriefOptions): Promise<string | n
     ...policy.testPaths,
     ".",
   ]);
-  if (changed === null) {
+  const base = changed === null ? null : await diffBase(options.root, options.since);
+  if (changed === null || base === null) {
     return null;
   }
   const visible = changed.filter((file) => !isArtifact(file));
+  // The two exemption sections (TOR-1377): a reviewer sees every suppression
+  // and every baseline entry this change set added, removed or left stale.
+  const exemptions = { root: options.root, base, policy };
   const lines = [
     "# Change brief",
     "",
@@ -138,6 +148,8 @@ export async function buildBrief(options: BuildBriefOptions): Promise<string | n
     "",
     ...groupedSections(visible, policy),
     ...criticalSection(options, visible),
+    ...(await suppressionSection(exemptions, visible)),
+    ...(await baselineSection(exemptions)),
     ...gateSection(options.root),
   ];
   return `${lines.join("\n").replace(/\s+$/, "")}\n`;

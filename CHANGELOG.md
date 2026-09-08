@@ -20,6 +20,36 @@ a previously green run red — see [Gate additions](#gate-additions) below.
 
 ### Added
 
+- **TOR-1377** — a reviewed adoption path for legacy debt, and suppression
+  accountability. `kragg.json#baseline` names a git-tracked baseline file
+  (conventionally `.kragg/baseline.json`; `null`/absent means none) that only
+  `kragg check --update-baseline` writes — full runs only, never over a broken
+  environment, always replacing the previous file so a fixed finding is a
+  deletion in review. Findings recorded there are reported as `baselined:`
+  advisories of their gate instead of failing the run; every finding NOT in
+  it fails as before, so a new regression cannot hide behind old debt. Only
+  the metric, structure and test-quality gates are eligible (`lint`,
+  `complexity`, `maintainability`, `halstead`, `type-complexity`,
+  `boundaries`, `structure`, `nullable-default`, `test-quality`,
+  `critical-coverage`); `detect-secrets`, `secret-default`,
+  `forbidden-calls`, `tsc`, `typing-strictness`, `test-coverage`,
+  `critical-tests`, `audit`, every errored gate and every skip are refused at
+  record time, rejected at read time and ignored at apply time. An entry is
+  `(gate, file, code, message, fingerprint-of-the-flagged-line)` with no line
+  number: it survives edits above it and goes **stale** — reported as an
+  advisory, never dropped or re-matched — when the line, the message or the
+  file name changes, so a rename is a re-review. **No wire key is added**:
+  accepted and stale findings ride in the existing `advisories` list, and the
+  cross-language fixtures are unchanged. The Claude hook applies the same
+  baseline as `check`. `kragg.schema.json` gains the key.
+  `// kragg: ignore` now **requires a reason** — `// kragg: ignore --
+  <reason>` (or `/* kragg: ignore -- <reason> */`): a bare marker suppresses
+  nothing and the gate reports the finding it was written over with a note
+  naming the bare marker. kragg-ts's own three live markers carry reasons.
+  `kragg brief` gains `## Suppressions` (every marker the change set added or
+  removed, with its reason, bare ones flagged) and `## Baseline` (entries
+  added, removed or stale) between the critical and gate sections. The
+  scaffold's `AGENTS.md` and `.gitignore` lines state the new rules.
 - **TOR-1376** — metric-gate calibration on representative TypeScript
   projects, and a regression net so the result cannot be undone quietly.
   `scripts/calibrate.ts` measures `complexity`, `maintainability`, `halstead`,

@@ -172,8 +172,9 @@ repo-wide with a hint naming the wrapper.
 Resolution goes through `ts.TypeChecker`, so it catches what an import-based
 banned-API linter cannot: subclass overrides, receivers with no annotation,
 re-export chains, `await`ed dynamic imports. The wrapper's own call site is the
-one legitimate use, marked with a trailing `// kragg: ignore` so the exemption
-is **visible in review** rather than invisible in a config allowlist.
+one legitimate use, marked with a trailing `// kragg: ignore -- <reason>` so
+the exemption is **visible in review** rather than invisible in a config
+allowlist.
 
 kragg dogfoods this: `node:child_process` is banned in this very repository,
 and `src/engine/runner.ts` carries the single exemption.
@@ -196,6 +197,55 @@ and `kragg brief` renders the change set legible to a human reviewer.
 Scaffolding emits `AGENTS.md` as the canonical agent contract — read by Codex,
 Cursor and Gemini CLI, and by Claude Code via a `CLAUDE.md` pointer — plus
 hooks that run `kragg check --changed` after edits.
+
+## Exemptions are reviewed, never accumulated
+
+Two ways exist to not fail on a finding, and both leave a trail a reviewer can
+read.
+
+**Suppressing one site.** The native gates honour
+`// kragg: ignore -- <reason>` (or `/* kragg: ignore -- <reason> */`) on any
+line the flagged node spans. **The reason is not optional**: a bare
+`// kragg: ignore` suppresses nothing, and the gate reports the finding it was
+written over with a note naming the bare marker. The content of the reason is
+not judged — that is what review is for — and `kragg brief` lists every marker
+the change set added or removed, with its reason, under `## Suppressions`.
+
+**Adopting legacy debt.** An existing project has findings nobody will clear
+in one sitting. Name a baseline file in the policy and record them:
+
+```sh
+# kragg.json: { "baseline": ".kragg/baseline.json" }
+kragg check --update-baseline   # full runs only; add --all to reach the slow tier
+```
+
+Every finding recorded there is reported as a `baselined:` advisory of its
+gate instead of failing the run, and every finding **not** in it fails exactly
+as before, so a new regression cannot hide behind old debt. Nothing on the
+wire changes shape: the accepted findings ride in the existing `advisories`
+list and `advisory_count`. The file is git-tracked — commit it, and keep
+`.gitignore` at `.kragg/*` followed by `!.kragg/baseline.json` — and only
+`--update-baseline` ever writes it, replacing the previous one so a fixed
+finding shows up as a deletion in review.
+
+What a baseline can never hold, enforced in code: `detect-secrets`,
+`secret-default`, `forbidden-calls`, `tsc`, `typing-strictness`,
+`test-coverage`, `critical-tests` and `audit` findings, every errored gate and
+every skip. Only the metric, structure and test-quality gates (`lint`,
+`complexity`, `maintainability`, `halstead`, `type-complexity`, `boundaries`,
+`structure`, `nullable-default`, `test-quality`, `critical-coverage`) are
+eligible; `--update-baseline` names what it refused, and a hand-edited entry
+for any other gate is a config error. A baseline never loosens a threshold or
+widens an exclusion — the gates run exactly as configured and the subtraction
+happens afterwards, one recorded finding at a time.
+
+An entry is identified by gate, file, code, message and a fingerprint of the
+flagged line's text — no line number — so it survives edits above it and goes
+**stale** when the line, the message (a metric that grew) or the file name
+changes. A stale entry is reported as an advisory on its gate, never dropped
+and never re-matched: a renamed file is a re-review, with the old entries
+stale and the findings at the new path failing as new. `kragg brief` lists
+the entries a change set added, removed or left stale under `## Baseline`.
 
 ## Configuration
 
@@ -289,6 +339,8 @@ Deliberate, and documented at each site:
 | SessionStart hook | Emits the `hookSpecificOutput` envelope, which is what injects `additionalContext`; Python prints plain-text context lines. |
 | hook output | Capped at 9000 characters with an in-band marker, because the harness spills longer output to a file the model never sees. Python does not cap. |
 | test evidence | Python reads `.kragg/coverage.json` from a fixed path. kragg-ts gives every invocation its own `.kragg/runs/` directory, refuses anything incomplete, and hands `critical-coverage` the coverage in memory. Same gates, same wire format; only the provenance rule differs. |
+| `// kragg: ignore` | Requires a reason: `// kragg: ignore -- <reason>`. A bare marker is not honoured and is reported on the finding it tried to hide. Python's `# kragg: ignore` needs none. |
+| legacy-debt baseline | `kragg.json#baseline` plus `check --update-baseline` records accepted findings of the metric, structure and test-quality gates; they become `baselined:` advisories and new findings still fail. Python has no equivalent; no wire key is added. `brief` gains `## Suppressions` and `## Baseline`. |
 
 Each row is pinned by a fixture or a unit test, and the full list — with the
 `spec/SPEC.md` row it corresponds to — is in

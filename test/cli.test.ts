@@ -20,7 +20,17 @@
  */
 
 import assert from "node:assert/strict";
-import { chmodSync, mkdirSync, mkdtempSync, readdirSync, readFileSync, rmSync, writeFileSync } from "node:fs";
+import {
+  chmodSync,
+  existsSync,
+  mkdirSync,
+  mkdtempSync,
+  readdirSync,
+  readFileSync,
+  renameSync,
+  rmSync,
+  writeFileSync,
+} from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { fileURLToPath } from "node:url";
@@ -632,3 +642,162 @@ describe("the help text and the flag table cannot drift apart", () => {
   });
 });
 
+
+/**
+ * TOR-1377's fixture: a project with legacy complexity debt and one
+ * security finding, so the baseline's two edges are both in one tree — what
+ * it accepts, and what it refuses.
+ */
+function legacyProject(): string {
+  const root = mkdtempSync(join(tmpdir(), "kragg-legacy-"));
+  roots.push(root);
+  writeProjectFile(root, "package.json", '{"name":"x","version":"0.0.0","type":"module","private":true}');
+  writeProjectFile(
+    root,
+    "kragg.json",
+    '{"source_paths":["src"],"test_paths":["test"],"lint_tool":"off",' +
+      '"test_runner":"off","secret_scanner":"off","baseline":".kragg/baseline.json"}',
+  );
+  writeProjectFile(root, "tsconfig.json", TOR1359_TSCONFIG);
+  writeProjectFile(root, "src/legacy.ts", legacyFunction("legacyOne"));
+  // No `@types/node` in the fixture, so `process` is declared locally — via
+  // aliases, so the declaration itself is not a type-complexity finding.
+  writeProjectFile(
+    root,
+    "src/config.ts",
+    "type Env = Readonly<Record<string, string | undefined>>;\n" +
+      "interface ProcessLike { readonly env: Env }\n" +
+      "declare const process: ProcessLike;\n" +
+      'export const apiToken = process.env["API_TOKEN"] ?? "";\n',
+  );
+  writeProjectFile(root, "node_modules/.bin/tsc", `#!${process.execPath}\nimport(${JSON.stringify(TSC_ENTRY)});\n`);
+  chmodSync(join(root, "node_modules", ".bin", "tsc"), 0o755);
+  return root;
+}
+
+/** A function well over the cyclomatic budget (grade C). */
+function legacyFunction(name: string): string {
+  const branches = Array.from({ length: 14 }, (_, i) => `  if (n === ${String(i)}) { r += ${String(i)}; }`);
+  return `export function ${name}(n: number): number {\n  let r = 0;\n${branches.join("\n")}\n  return r;\n}\n`;
+}
+
+describe("legacy debt is adopted explicitly, and only what may be", () => {
+  // One tree, mutated in sequence: the steps ARE the adoption path.
+  const root = legacyProject();
+  const CHECK = ["check", "--no-journal"];
+
+  it("fails today, with no baseline recorded", async () => {
+    const result = await run(CHECK, root);
+    assert.equal(result.code, EXIT_GATE_FAILURES, result.out);
+    assert.match(result.out, /\[FAIL] complexity \(\d+\.\ds\) — 1 violations/);
+    assert.match(result.out, /\[FAIL] secret-default/);
+    assert.match(result.err, /baseline \.kragg\/baseline\.json: 0 findings accepted as legacy debt, 0 stale entries/);
+  });
+
+  it("refuses --update-baseline outside a full run, and without a configured file", async () => {
+    for (const argv of [["check", "--changed", "--update-baseline"], ["check", "--file", "src/legacy.ts", "--update-baseline"]]) {
+      const result = await run(argv, root);
+      assert.equal(result.code, EXIT_USAGE, argv.join(" "));
+      assert.match(result.err, /--update-baseline records a full run/);
+    }
+    const bare = project({ "kragg.json": '{"lint_tool":"off"}' });
+    const result = await run(["check", "--update-baseline"], bare);
+    assert.equal(result.code, EXIT_USAGE);
+    assert.match(result.err, /kragg\.json#baseline names no file/);
+    assert.equal(existsSync(join(bare, ".kragg", "baseline.json")), false);
+  });
+
+  it("records the complexity debt, refuses the security finding, and still fails on it", async () => {
+    const result = await run([...CHECK, "--update-baseline"], root);
+    assert.equal(result.code, EXIT_GATE_FAILURES, result.out);
+    assert.match(result.err, /recorded 1 findings as accepted legacy debt in \.kragg\/baseline\.json; COMMIT THIS FILE/);
+    assert.match(result.err, /refused to baseline 1 findings in secret-default/);
+    assert.match(result.out, /\[PASS] complexity/);
+    assert.match(result.out, /\[advisory] src\/legacy\.ts:1 CC-C baselined: legacyOne has cyclomatic complexity grade C/);
+    assert.match(result.out, /\[FAIL] secret-default/);
+    const written: unknown = JSON.parse(readFileSync(join(root, ".kragg", "baseline.json"), "utf8"));
+    assert.ok(typeof written === "object" && written !== null && "entries" in written);
+    const entries: unknown = written.entries;
+    assert.ok(Array.isArray(entries) && entries.length === 1);
+    const first: unknown = entries[0];
+    assert.ok(typeof first === "object" && first !== null && "fingerprint" in first);
+    assert.deepEqual(written, {
+      version: 1,
+      entries: [
+        {
+          gate: "complexity",
+          file: "src/legacy.ts",
+          code: "CC-C",
+          message: "legacyOne has cyclomatic complexity grade C (max allowed: B)",
+          fingerprint: first.fingerprint,
+        },
+      ],
+    });
+    assert.equal(typeof first.fingerprint === "string" && first.fingerprint.length, 16);
+  });
+
+  it("passes once the security finding is fixed, with the debt visible as an advisory in both formats", async () => {
+    writeProjectFile(root, "src/config.ts", "export const apiToken = 1;\n");
+    const text = await run(CHECK, root);
+    assert.equal(text.code, EXIT_OK, text.out);
+    assert.match(text.out, /\[PASS] complexity/);
+    assert.match(text.out, /\[advisory] src\/legacy\.ts:1 CC-C baselined:/);
+    assert.match(text.out, /passed, 0 failed, \d+ skipped, 1 advisories/);
+    assert.match(text.err, /baseline \.kragg\/baseline\.json: 1 findings accepted as legacy debt, 0 stale entries/);
+
+    const json = await run([...CHECK, "--format", "json"], root);
+    assert.equal(json.code, EXIT_OK, json.out);
+    const payload: ReportPayload = JSON.parse(json.out);
+    assert.equal(payload.passed, true);
+    const complexity = payload.gates.find((gate) => gate.name === "complexity");
+    assert.ok(complexity !== undefined);
+    // No key gained, lost or renamed: the accepted finding rides in `advisories`.
+    assert.deepEqual(Object.keys(complexity), [
+      "name", "passed", "skipped", "skip_reason", "error", "duration_ms", "violation_count",
+      "violations", "truncated", "raw_output", "advisories", "advisory_count",
+    ]);
+    assert.equal(complexity.passed, true);
+    assert.equal(complexity.violation_count, 0);
+    assert.deepEqual(complexity.violations, []);
+    assert.equal(complexity.advisory_count, 1);
+    assert.match(complexity.advisories[0]?.message ?? "", /^baselined: legacyOne has cyclomatic/);
+    assert.match(json.err, /1 findings accepted as legacy debt/);
+  });
+
+  it("survives a line shift above the accepted finding", async () => {
+    writeProjectFile(root, "src/legacy.ts", `// shifted down by one\n${legacyFunction("legacyOne")}`);
+    const result = await run(CHECK, root);
+    assert.equal(result.code, EXIT_OK, result.out);
+    assert.match(result.out, /\[advisory] src\/legacy\.ts:2 CC-C baselined:/);
+  });
+
+  it("still fails on a NEW finding beside the accepted one", async () => {
+    writeProjectFile(root, "src/legacy.ts", `${legacyFunction("legacyOne")}\n${legacyFunction("legacyTwo")}`);
+    const result = await run(CHECK, root);
+    assert.equal(result.code, EXIT_GATE_FAILURES, result.out);
+    assert.match(result.out, /\[FAIL] complexity \(\d+\.\ds\) — 1 violations/);
+    assert.match(result.out, /src\/legacy\.ts:\d+ CC-C legacyTwo has cyclomatic/);
+    assert.match(result.out, /\[advisory] src\/legacy\.ts:1 CC-C baselined: legacyOne/);
+    assert.doesNotMatch(result.out, /CC-C legacyOne has cyclomatic complexity grade C \(max allowed: B\) ->/);
+  });
+
+  it("reports a renamed file's entry as stale and the finding at the new path as new", async () => {
+    renameSync(join(root, "src", "legacy.ts"), join(root, "src", "old.ts"));
+    writeProjectFile(root, "src/old.ts", legacyFunction("legacyOne"));
+    const result = await run(CHECK, root);
+    assert.equal(result.code, EXIT_GATE_FAILURES, result.out);
+    assert.match(result.out, /\[FAIL] complexity \(\d+\.\ds\) — 1 violations/);
+    assert.match(result.out, /src\/old\.ts:1 CC-C legacyOne has cyclomatic/);
+    assert.match(result.out, /\[advisory] src\/legacy\.ts CC-C stale baseline entry: legacyOne has cyclomatic/);
+    assert.match(result.err, /0 findings accepted as legacy debt, 1 stale entries/);
+  });
+
+  it("writes nothing over a broken environment", async () => {
+    const before = readFileSync(join(root, ".kragg", "baseline.json"), "utf8");
+    rmSync(join(root, "node_modules"), { recursive: true, force: true });
+    const result = await run([...CHECK, "--update-baseline"], root);
+    assert.equal(result.code, EXIT_ENVIRONMENT, result.out);
+    assert.match(result.err, /baseline not written to \.kragg\/baseline\.json: a gate could not run \(exit 3\)/);
+    assert.equal(readFileSync(join(root, ".kragg", "baseline.json"), "utf8"), before);
+  });
+});

@@ -392,7 +392,7 @@ exactly the caller's error and printed `[PASS] tsc` for a change that broke it.
 It passes an argv array with `shell: false`; no string concatenation, no
 `exec`. This is enforced, not merely stated: `kragg.json` bans
 `node:child_process` via the `forbidden-calls` gate, and `runner.ts` carries
-the single `// kragg: ignore` exemption, visible in review rather than hidden
+the single `// kragg: ignore -- <reason>` exemption, visible in review rather than hidden
 in a config allowlist. kragg dogfooding its own security-contract mechanism is
 the point.
 

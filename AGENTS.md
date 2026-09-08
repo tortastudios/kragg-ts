@@ -120,7 +120,8 @@ higher one, and the `boundaries` gate enforces that on this repo.
   plus `hookCheck.ts` (the `RunCheck` injected into the hook). The three
   commands too large for one file have their own directory: `map/`
   (`symbols`, `render`), `spec/` (`property`), `mutation/` (`targets`,
-  `stryker`, `report`, `baseline`).
+  `stryker`, `report`, `baseline`), `brief/` (`exemptions` — the
+  `## Suppressions` and `## Baseline` sections).
 - `src/hooks/` — `claude.ts` (event dispatch; the deliberate fail-**open**
   exception to everything else here) and `protocol.ts` (narrowing untrusted
   stdin, building the stdout JSON the harness reads).
@@ -169,8 +170,12 @@ higher one, and the `boundaries` gate enforces that on this repo.
   failed", which decides exit 3 vs. exit 1).
 - `src/git/changes.ts` — changed-file detection for `--changed` / `--since`.
 - `src/policy/` — `policy.ts` loads `kragg.json`, then `package.json#kragg`,
-  then defaults; `readers.ts` holds the narrowing readers it is built from.
-- `src/util/` — `globs.ts`, and `suppress.ts` for `// kragg: ignore`.
+  then defaults; `readers.ts` holds the narrowing readers it is built from;
+  `baseline.ts` is the reviewed legacy-debt baseline `kragg.json#baseline`
+  names — which gates may be recorded (and which never), the line-fingerprint
+  identity, and the apply/record/stale logic `check`, the hook and `brief` use.
+- `src/util/` — `globs.ts`, and `suppress.ts` for
+  `// kragg: ignore -- <reason>` (a bare marker is not honoured).
 - `src/engine/` — the bottom layer, importable by everything:
   - `models.ts` — `Violation`, `GateResult`, `CompletedCommand`,
     `ProjectContext` as plain interfaces.
@@ -183,7 +188,7 @@ higher one, and the `boundaries` gate enforces that on this repo.
   - `journal.ts` — `.kragg/history.jsonl`, append-only.
   - `runner.ts` — the only approved external-command wrapper, and the one
     legitimate `node:child_process` import in the repo.
-- `test/` — 46 test files using `node:test`, flat, plus `test/fixtures/`
+- `test/` — 47 test files using `node:test`, flat, plus `test/fixtures/`
   and one non-test helper, `conformanceContract.ts`. `conformance.test.ts`
   drives the versioned fixtures under `test/fixtures/conformance/` that pin
   the cross-language contract; see `docs/spec-conformance.md`.
@@ -256,8 +261,9 @@ authority; this list must match it.
 | `hook claude` | hook adapter; reads hook JSON on stdin |
 
 `check` and `security` share `--file`, `--format`, `--max-violations` and
-`--no-journal`. `--changed`, `--since`, `--fail-fast` and `--all` are
-`check`-only. The rest: `fix --file`; `status --format --last`; `map --write`;
+`--no-journal`. `--changed`, `--since`, `--fail-fast`, `--all` and
+`--update-baseline` are `check`-only. The rest: `fix --file`; `status --format
+--last`; `map --write`;
 `brief --since`; `criticality --write --path`; `mutation --path --since --all
 --update-baseline`; `flaky --last --rerun`.
 
