@@ -67,6 +67,7 @@ kragg audit                    # dead code and dependency drift
 kragg new my-app --kind cli    # scaffold (cli | api | mcp)
 kragg gen module payments      # service/domain/test slots in the layout
 kragg init                     # add guardrails to an existing project
+kragg init --dry-run           # ...or just print what that would change
 kragg hook claude              # harness hook adapter (reads hook JSON on stdin)
 ```
 
@@ -197,6 +198,16 @@ has looked at it.
 Settings go in `kragg.json`, or under a `"kragg"` key in `package.json`. A
 standalone `kragg.json` wins outright; the two are never merged. Keys are
 snake_case, matching the Python implementation.
+
+Because a `kragg.json` wins outright, `kragg init` will not create one in a
+project that already states a policy — in either place. Writing one would not
+add to that policy, it would replace it, silently retiring every threshold the
+project had tightened. For the same reason `init` never adds `type`,
+`engines`, `packageManager` or `private` to a `package.json` that already
+exists: each answers a question the project has already answered, and adding
+`"type": "module"` to a CommonJS project breaks it outright. Run
+`kragg init --dry-run` to see the exact set of files and keys before anything
+is written.
 
 ```json
 {

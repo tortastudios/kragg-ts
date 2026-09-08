@@ -9,7 +9,9 @@
  *     is how a scaffold destroys something.
  *  2. `init` never overwrites (`overwrite=False`). It is run against a project
  *     that already has content and opinions; a guardrail file that clobbers a
- *     hand-written config teaches everyone to distrust the tool.
+ *     hand-written config teaches everyone to distrust the tool. Kept, and
+ *     extended: `initPlan.ts` withholds the additions that would redefine the
+ *     project even though they overwrite no file at all.
  *  3. `gen module` refuses when the module already exists, rather than
  *     silently writing nothing and reporting success.
  *
@@ -19,10 +21,25 @@
  * have run before the human read what it was agreeing to.
  */
 
-import { existsSync, mkdirSync, readdirSync, readFileSync, writeFileSync } from "node:fs";
+import {
+  accessSync,
+  constants,
+  existsSync,
+  mkdirSync,
+  readdirSync,
+  readFileSync,
+  writeFileSync,
+} from "node:fs";
 import { dirname, join, resolve } from "node:path";
 
-import { guardrailFiles, packageJson, kraggConfig } from "./guardrails.ts";
+import { guardrailFiles } from "./guardrails.ts";
+import {
+  isPlainObject,
+  mergeAdditions,
+  planInit,
+  type InitPlan,
+  type InitSkip,
+} from "./initPlan.ts";
 import type { Kind, McpSdk } from "./kinds.ts";
 import { normalizePackageName, shadowConflict, shadowRefusal, validatePackageName } from "./naming.ts";
 import { kindFiles, moduleFiles } from "./templates.ts";
@@ -87,36 +104,100 @@ export function createNewProject(options: NewProjectOptions): ScaffoldResult {
     ...guardrailFiles(identity),
     ...kindFiles(options.kind, options.projectName, mcpSdk),
   };
-  return { written: writeFiles(root, files, true), warnings };
+  return { written: writeFiles(root, files), warnings };
+}
+
+/** What `initializeProject` did, including what it deliberately did not do. */
+export interface InitResult extends ScaffoldResult {
+  /** Files and keys left alone, with the reason each was left alone. */
+  readonly skipped: readonly InitSkip[];
 }
 
 /**
- * Add guardrail files to an EXISTING project. No skeleton, no overwrites.
+ * Work out what `kragg init` would do to `root`, writing nothing.
  *
- * `package.json` and `kragg.json` are merged rather than written, because both
- * are near-certain to exist already and both are the file most likely to hold
- * work nobody wants replaced.
+ * This is the only place the decision is made — `initializeProject` applies
+ * the plan this returns, and `--dry-run` prints it — so the dry run cannot
+ * drift from the real one. It does not create `root` either: asking what init
+ * would do must not leave a directory behind.
+ *
+ * An unparseable `package.json` fails HERE, before the first write, rather
+ * than halfway through. "We could not read your config, so we replaced it" is
+ * the failure mode that loses work.
  */
-export function initializeProject(root: string): ScaffoldResult {
+export function planInitialization(root: string): InitPlan {
   const absolute = resolve(root);
-  mkdirSync(absolute, { recursive: true });
-  const projectName = basenameOf(absolute);
-  const identity = {
-    projectName,
-    packageName: normalizePackageName(projectName),
-    kind: null,
-    mcpSdk: "fastmcp" as const,
-  };
-  const files = guardrailFiles(identity);
-  // Both are merged below; writing them here would clobber the existing file.
-  delete files["package.json"];
-  delete files["kragg.json"];
-  const written = writeFiles(absolute, files, false);
-  const merged = [
-    mergeJson(join(absolute, "package.json"), packageJson(identity)),
-    mergeJson(join(absolute, "kragg.json"), kraggConfig(null)),
-  ].filter((path): path is string => path !== null);
-  return { written: [...written, ...merged], warnings: [] };
+  const manifestPath = join(absolute, "package.json");
+  const manifest = existsSync(manifestPath) ? readJsonObject(manifestPath) : null;
+  return planInit(absolute, manifest);
+}
+
+/**
+ * Add guardrail files to an EXISTING project. No skeleton, no overwrites, and
+ * no change to what the project already means.
+ *
+ * `package.json` and `kragg.json` are the two files most likely to hold work
+ * nobody wants replaced, so neither is written over: the manifest gains only
+ * keys that are additive in effect as well as in the diff, and the policy is
+ * created only when the project does not already state one. See `initPlan.ts`
+ * for why each of those is not the obvious "merge everything in" behaviour.
+ */
+export function initializeProject(root: string): InitResult {
+  return applyInitPlan(planInitialization(root));
+}
+
+/**
+ * Carry out a plan, reporting honestly if it cannot be finished.
+ *
+ * Writability is checked before the first write, so the common failure — a
+ * read-only target — costs nothing and leaves nothing behind. A failure part
+ * way through cannot be undone (there is no transaction over a filesystem),
+ * so it names every file already written instead of pretending it is clean.
+ */
+function applyInitPlan(plan: InitPlan): InitResult {
+  requireWritable(plan.root);
+  const written: string[] = [];
+  try {
+    for (const file of plan.writes) {
+      mkdirSync(dirname(file.path), { recursive: true });
+      writeFileSync(file.path, file.contents, "utf8");
+      written.push(file.path);
+    }
+    for (const merge of plan.merges) {
+      const path = mergeJson(merge.path, merge.additions);
+      if (path !== null) {
+        written.push(path);
+      }
+    }
+  } catch (error: unknown) {
+    if (error instanceof ScaffoldError) {
+      throw error;
+    }
+    throw new ScaffoldError(writeFailure(error, written));
+  }
+  return { written, warnings: [], skipped: plan.skipped };
+}
+
+/** Create the root if needed, and refuse before writing if it is read-only. */
+function requireWritable(root: string): void {
+  try {
+    mkdirSync(root, { recursive: true });
+    accessSync(root, constants.W_OK);
+  } catch (error: unknown) {
+    const detail = error instanceof Error ? error.message : String(error);
+    throw new ScaffoldError(`cannot write to ${root}: ${detail}`);
+  }
+}
+
+/** Report a failed write, and every file that was written before it. */
+function writeFailure(error: unknown, written: readonly string[]): string {
+  const detail = error instanceof Error ? error.message : String(error);
+  const head = `kragg init could not finish: ${detail}`;
+  if (written.length === 0) {
+    return `${head}\nNothing was written.`;
+  }
+  const lines = written.map((path) => `  ${path}`).join("\n");
+  return `${head}\nThese files were written before the failure and are still there:\n${lines}`;
 }
 
 /**
@@ -145,7 +226,7 @@ export function generateModule(root: string, name: string): ScaffoldResult {
       `module '${module}' already exists: ${existing.join(", ")}`,
     );
   }
-  return { written: writeFiles(absolute, files, true), warnings: [] };
+  return { written: writeFiles(absolute, files), warnings: [] };
 }
 
 /** The npm name to use: explicit and validated, or derived and normalized. */
@@ -170,23 +251,17 @@ function requireEmptyDirectory(root: string): void {
   }
 }
 
-/** The final path segment, used as the project name for `init`. */
-function basenameOf(absolute: string): string {
-  const segments = absolute.split(/[\\/]/).filter((part) => part !== "");
-  return segments[segments.length - 1] ?? "app";
-}
-
 /**
  * Write `files` under `root`, returning the absolute paths written.
  *
- * With `overwrite` false, an existing file is skipped silently — that is the
- * `init` contract, and the caller reports what was written, not what it
- * intended to write.
+ * Unconditional, and used only where the target has already been established
+ * as safe to write: `new` refuses a non-empty directory and `gen module`
+ * refuses an existing slot. `init`, which writes into a project full of
+ * somebody else's files, decides file by file in `initPlan.ts` instead.
  */
 export function writeFiles(
   root: string,
   files: Readonly<Record<string, string>>,
-  overwrite: boolean,
 ): string[] {
   const written: string[] = [];
   for (const relative of Object.keys(files).sort()) {
@@ -195,9 +270,6 @@ export function writeFiles(
       continue;
     }
     const path = join(root, relative);
-    if (!overwrite && existsSync(path)) {
-      continue;
-    }
     mkdirSync(dirname(path), { recursive: true });
     writeFileSync(path, contents, "utf8");
     written.push(path);
@@ -225,31 +297,11 @@ export function mergeJson(
     writeFileSync(path, `${JSON.stringify(additions, null, 2)}\n`, "utf8");
     return path;
   }
-  const existing = readJsonObject(path);
-  const merged = { ...existing };
-  let changed = false;
-  for (const [key, value] of Object.entries(additions)) {
-    const current = merged[key];
-    if (current === undefined) {
-      merged[key] = value;
-      changed = true;
-      continue;
-    }
-    if (isPlainObject(current) && isPlainObject(value)) {
-      const nested = { ...current };
-      for (const [innerKey, innerValue] of Object.entries(value)) {
-        if (nested[innerKey] === undefined) {
-          nested[innerKey] = innerValue;
-          changed = true;
-        }
-      }
-      merged[key] = nested;
-    }
-  }
-  if (!changed) {
+  const outcome = mergeAdditions(readJsonObject(path), additions);
+  if (outcome.added.length === 0) {
     return null;
   }
-  writeFileSync(path, `${JSON.stringify(merged, null, 2)}\n`, "utf8");
+  writeFileSync(path, `${JSON.stringify(outcome.merged, null, 2)}\n`, "utf8");
   return path;
 }
 
@@ -266,9 +318,4 @@ function readJsonObject(path: string): Record<string, unknown> {
     throw new ScaffoldError(`${path} does not contain a JSON object`);
   }
   return { ...parsed };
-}
-
-/** True for a JSON object, false for arrays, null, and primitives. */
-function isPlainObject(value: unknown): value is Record<string, unknown> {
-  return typeof value === "object" && value !== null && !Array.isArray(value);
 }

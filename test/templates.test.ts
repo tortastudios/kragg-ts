@@ -9,7 +9,7 @@
  */
 
 import assert from "node:assert/strict";
-import { mkdtempSync, readdirSync, readFileSync, rmSync } from "node:fs";
+import { existsSync, mkdtempSync, readdirSync, readFileSync, rmSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { after, describe, it } from "node:test";
@@ -386,6 +386,30 @@ describe("command handlers", () => {
 
   it("kragg init rejects extra positionals", () => {
     assert.equal(capture(() => runInit(["a", "b"])).code, 2);
+  });
+
+  it("kragg init rejects a flag it does not accept", () => {
+    assert.equal(capture(() => runInit(["--force"])).code, 2);
+  });
+
+  it("kragg init --dry-run prints the plan and writes nothing", () => {
+    const root = temporaryRoot();
+    writeFileSync(join(root, "package.json"), `{ "name": "existing", "kragg": {} }\n`);
+    const before = readdirSync(root);
+    const result = capture(() => runInit([root, "--dry-run"]));
+    assert.equal(result.code, 0);
+    assert.match(result.out, /Dry run/);
+    assert.match(result.out, /would create .*AGENTS\.md/);
+    assert.match(result.out, /would add to .*package\.json: /);
+    assert.match(result.out, /preserved .*kragg\.json: not created/);
+    assert.match(result.out, /Re-run without --dry-run to apply\./);
+    assert.deepEqual(readdirSync(root), before, "a dry run must not touch the project");
+  });
+
+  it("kragg init --dry-run does not create the directory it was asked about", () => {
+    const root = join(temporaryRoot(), "not-yet");
+    assert.equal(capture(() => runInit([root, "--dry-run"])).code, 0);
+    assert.equal(existsSync(root), false);
   });
 });
 

@@ -101,7 +101,7 @@ failed task, not a judgement call.
 
 ## Project Map
 
-165 modules under `src/`, listed top-down in the order `kragg.json`'s
+166 modules under `src/`, listed top-down in the order `kragg.json`'s
 `layers` declares — a module may import its own layer or a lower one, never a
 higher one, and the `boundaries` gate enforces that on this repo.
 
@@ -144,8 +144,10 @@ higher one, and the `boundaries` gate enforces that on this repo.
   parsers, the per-runner test reports, lcov/istanbul readers, the
   `Unavailable` outcome kinds, and the `runCommand` helpers.
 - `src/scaffold/` — `kragg new` / `init` / `gen module`: `project.ts` (the
-  engine), `kinds.ts`, `naming.ts`, `agents.ts`, `guardrails.ts`,
-  `supplyChain.ts`, and `templates/` (`cli`, `api`, `mcp`, `common`).
+  engine), `initPlan.ts` (what `init` would change, decided before anything is
+  written, so `--dry-run` and the real run cannot disagree), `kinds.ts`,
+  `naming.ts`, `agents.ts`, `guardrails.ts`, `supplyChain.ts`, and
+  `templates/` (`cli`, `api`, `mcp`, `common`).
 - `src/coverage/` — `model.ts` is the one line-coverage model; `istanbul.ts`
   and `lcov.ts` normalize into it; `spans.ts` bounds a function from source.
 - `src/analysis/` — the two analysis tiers. `compiler.ts` resolves which

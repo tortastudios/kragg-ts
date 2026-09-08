@@ -18,7 +18,32 @@ a previously green run red — see [Gate additions](#gate-additions) below.
 
 ## [Unreleased]
 
-Nothing yet.
+### Fixed
+
+- **TOR-1362:** `kragg init` no longer changes what an existing project means.
+  It previously merged `"type": "module"`, `engines`, `packageManager` and
+  `private` into any `package.json` — turning a CommonJS project into ESM,
+  where `require()` of the project's own files then fails — and wrote a default
+  `kragg.json` even when the project configured kragg in `package.json#kragg`.
+  Since a standalone `kragg.json` wins outright over the embedded table, that
+  replaced the project's policy with weaker defaults: stricter thresholds,
+  `forbidden_calls` entries and non-default `source_paths` all stopped
+  applying. `init` now withholds those four manifest keys from a manifest that
+  already exists, creates `kragg.json` only when the project states no policy
+  at all, leaves an existing `kragg.json` untouched rather than merging
+  defaults into it, and names the source and test directories that actually
+  exist instead of asserting `src/` and `test/`. Every file and key it leaves
+  alone is reported with the reason.
+
+### Added
+
+- **TOR-1362:** `kragg init --dry-run` prints the exact changes `init` would
+  make — files to create, keys to add, files and keys skipped and why — and
+  writes nothing, not even the target directory. The plan it prints is the
+  same one the real run applies, so the two cannot drift apart.
+- **TOR-1362:** `kragg init` refuses a read-only target before its first write
+  (exit 2, one line, nothing written) instead of failing part way through with
+  an uncaught `EACCES` and exit 1.
 
 ## [0.0.0] — unreleased
 
