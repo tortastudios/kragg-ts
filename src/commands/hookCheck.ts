@@ -44,7 +44,7 @@ import { runGates } from "../engine/gate.ts";
 import { appendRun } from "../engine/journal.ts";
 import { buildReport, utcNow, type CheckReport } from "../engine/report.ts";
 import { toPayload } from "../engine/reportPayload.ts";
-import { resolveProjectEnvironment } from "../environment/project.ts";
+import { projectTsconfig, resolveProjectEnvironment } from "../environment/project.ts";
 import { gitDirty, gitSha } from "../git/changes.ts";
 import type { HookCheckRequest } from "../hooks/claude.ts";
 import { loadPolicy } from "../policy/policy.ts";
@@ -114,6 +114,6 @@ export function hookCriticality(root: string): void {
   criticalityCache({
     root,
     scanPaths: [...policy.sourcePaths, ...policy.testPaths],
-    analysis: analysisProgram({ root }),
+    analysis: analysisProgram({ root, tsconfigPath: projectTsconfig(root, policy.tsconfig) }),
   }).ensure();
 }

@@ -101,7 +101,7 @@ failed task, not a judgement call.
 
 ## Project Map
 
-174 modules under `src/`, listed top-down in the order `kragg.json`'s
+178 modules under `src/`, listed top-down in the order `kragg.json`'s
 `layers` declares — a module may import its own layer or a lower one, never a
 higher one, and the `boundaries` gate enforces that on this repo.
 
@@ -121,7 +121,12 @@ higher one, and the `boundaries` gate enforces that on this repo.
   (the one resolver for `full`/`changed`/`file`, shared by `check` and
   `security`: what the external tools are invoked on, what the path-aware
   gates narrow to, when a configuration change makes an incremental run a
-  full one, and which unresolvable selections are exit 2 or exit 3) and
+  full one, and which unresolvable selections are exit 2 or exit 3),
+  `pipeline.ts` (the one runner `check`, `security` and package runs share:
+  run the gates, build the report, journal it, render it), `packages.ts`
+  (`--package`: one complete run per workspace member — its own root, policy,
+  tsconfig, compiler and program — plus the stderr notice a root run prints
+  about the members it did not check) and
   `inventory.ts` (the filter and output-budget vocabulary `map`, `spec` and
   `brief` share). The four commands too large for one file have their own
   directory: `map/` (`symbols`, `render`, `select`), `spec/` (`property`,
@@ -173,10 +178,14 @@ higher one, and the `boundaries` gate enforces that on this repo.
   `program.ts` is the type-aware tier (one lazy shared `ts.Program`);
   `betweenness.ts` is Brandes' algorithm for the call graph.
 - `src/environment/` — the target project's environment as data: `model.ts`,
-  `project.ts` (entry point), `bin.ts` (project-local binary resolution —
-  never `PATH`, never global, never kragg's own tree), `packageManager.ts`,
-  `manifest.ts`, `workspaces.ts`, `missing.ts` ("not installed" vs. "ran and
-  failed", which decides exit 3 vs. exit 1).
+  `project.ts` (entry point, and `projectTsconfig` — the ONE resolver of which
+  tsconfig a run reads, from the policy's `tsconfig`), `bin.ts` (project-local
+  binary resolution — never `PATH`, never global, never kragg's own tree),
+  `packageManager.ts`, `manifest.ts`, `workspaces.ts` (workspace declarations
+  expanded to members, or an honest note about why they could not be),
+  `workspacePatterns.ts` (the two small fail-closed grammars that expansion is
+  built on: `pnpm-workspace.yaml#packages` and workspace globs), `missing.ts`
+  ("not installed" vs. "ran and failed", which decides exit 3 vs. exit 1).
 - `src/git/changes.ts` — changed-file detection for `--changed` / `--since`.
 - `src/policy/` — `policy.ts` loads `kragg.json`, then `package.json#kragg`,
   then defaults; `readers.ts` holds the narrowing readers it is built from.
@@ -193,7 +202,7 @@ higher one, and the `boundaries` gate enforces that on this repo.
   - `journal.ts` — `.kragg/history.jsonl`, append-only.
   - `runner.ts` — the only approved external-command wrapper, and the one
     legitimate `node:child_process` import in the repo.
-- `test/` — 50 test files using `node:test`, flat, plus `test/fixtures/`
+- `test/` — 52 test files using `node:test`, flat, plus `test/fixtures/`
   and one non-test helper, `conformanceContract.ts`. `conformance.test.ts`
   drives the versioned fixtures under `test/fixtures/conformance/` that pin
   the cross-language contract; see `docs/spec-conformance.md`.

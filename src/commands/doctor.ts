@@ -33,14 +33,16 @@
  */
 
 import { existsSync } from "node:fs";
-import { join } from "node:path";
+import { join, relative } from "node:path";
 
 import { detectLintTool, type LintToolSetting } from "../adapters/lint.ts";
 import type { TestRunnerChoice } from "../adapters/support/detect.ts";
+import { resolveTypeScript } from "../analysis/sourceFile.ts";
 import { EXIT_GATE_FAILURES, EXIT_OK } from "../engine/report.ts";
 import {
   describe,
   environmentFound,
+  projectTsconfig,
   remediation,
   resolveBin,
   resolveProjectEnvironment,
@@ -84,12 +86,21 @@ export function runDoctor(root: string): number {
   const env = resolveProjectEnvironment(root);
   let ok = true;
 
-  for (const [label, present] of layoutChecks(root, policy.sourcePaths, policy.testPaths)) {
+  for (const [label, present] of layoutChecks(root, policy)) {
     process.stdout.write(`${label}: ${present ? "ok" : "missing"}\n`);
     ok = ok && present;
   }
 
   process.stdout.write(`${describe(env)}\n`);
+  process.stdout.write(`${describeCompiler(root)}\n`);
+  if (env.workspaces.kind !== "none") {
+    // The one thing a root run cannot do is check a member, and the one
+    // thing doctor must not do is let that pass unmentioned.
+    process.stdout.write(
+      "                 a root run checks only the root package; run " +
+        "`kragg check --package <name-or-path>` for each member\n",
+    );
+  }
   if (!environmentFound(env)) {
     process.stdout.write(
       "Fix: add a lockfile or a package.json#packageManager field so kragg " +
@@ -118,20 +129,44 @@ function reportTools(env: ProjectEnvironment, policy: KraggPolicy): boolean {
   return results.every((result) => result);
 }
 
-/** The files and directories the policy says this project has. */
+/**
+ * The files and directories the policy says this project has.
+ *
+ * The tsconfig line names the SELECTED file — the policy's `tsconfig`,
+ * through the one resolver every gate uses — so doctor and the gates agree
+ * about which file is being asked for.
+ */
 function layoutChecks(
   root: string,
-  sourcePaths: readonly string[],
-  testPaths: readonly string[],
+  policy: KraggPolicy,
 ): readonly (readonly [string, boolean])[] {
   const any = (paths: readonly string[]): boolean =>
     paths.some((path) => existsSync(join(root, path)));
   return [
     ["package.json", existsSync(join(root, "package.json"))],
-    ["tsconfig.json", existsSync(join(root, "tsconfig.json"))],
-    ["source path", any(sourcePaths)],
-    ["test path", any(testPaths)],
+    [`tsconfig (${policy.tsconfig})`, existsSync(projectTsconfig(root, policy.tsconfig))],
+    ["source path", any(policy.sourcePaths)],
+    ["test path", any(policy.testPaths)],
   ];
+}
+
+/**
+ * Which compiler the analysis tiers would use, and where it came from.
+ *
+ * The same `resolveTypeScript` the pipeline calls, so doctor cannot name a
+ * different compiler from the one a `check` analyzes with. A bundled fallback
+ * carries its note on the next line: it is exactly the case a reader of
+ * doctor needs to see, since every type-aware verdict is then made by a
+ * compiler the project did not choose.
+ */
+function describeCompiler(root: string): string {
+  const compiler = resolveTypeScript(root);
+  const origin =
+    compiler.path === null
+      ? compiler.source
+      : `${compiler.source}: ${relative(root, compiler.path) || compiler.path}`;
+  const line = `compiler:        typescript ${compiler.version} (${origin})`;
+  return compiler.note === null ? line : `${line}\n                 note: ${compiler.note}`;
 }
 
 /**

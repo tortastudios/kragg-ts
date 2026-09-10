@@ -141,12 +141,16 @@ probe, not a safety net.
 It verifies that the type checker is strict and has not been muzzled. It
 performs no inference of its own.
 
-- **Only `<root>/tsconfig.json`.** Per-package configs in a monorepo and
-  non-root names (`tsconfig.app.json`) are **not** audited.
-- **Solution-style builds are not audited.** When the root config has
-  `references`, the `include`/`exclude` audit reports an advisory and stops,
-  because auditing a solution config would flag every file in the repo. A
-  stated skip, not silence — but a skip.
+- **One tsconfig per run: the policy's `tsconfig`.** A project whose real
+  config is `tsconfig.app.json` must say so; a workspace member is audited by
+  a `--package` run rooted in the member. Nothing walks the other configs.
+- **A solution-style config is refused, not audited.** When the selected file
+  has `references` and no inputs of its own, the gate is `error: true` (exit 3)
+  naming the referenced projects — its `compilerOptions` are not what
+  type-checks anything. A **hybrid** config (references *and* inputs) has its
+  own inputs audited and reports an advisory that the referenced projects'
+  include coverage was not walked. A stated non-audit, not silence — but the
+  referenced projects are unaudited until each is selected in turn.
 - **`.d.ts` files are not scanned**, so a hand-authored declaration file full
   of `any` is invisible to both this gate and `type-complexity`.
 - `Function` and `object` are matched **by name**, not through the checker.
@@ -247,13 +251,16 @@ ones a reader needs before trusting a number.
   by the gate's own contract — the fix is a named `Props` interface, and it
   takes a minute — but a React project should expect this gate to talk mostly
   about that one idiom.
-- **The type-aware tier sees one tsconfig, so a workspace is partly
-  unmeasured.** The pnpm workspace sample has no root `tsconfig.json`: pointed
-  at one package's config, the program held **189 files against the 309** the
-  syntax tier walked, and `resolveTypeScript` fell back to the **bundled**
-  compiler because a workspace root has no hoisted `typescript`. A clean
-  `nullable-default` result on a monorepo is clean over the program, not over
-  the repository. Run kragg per package there.
+- **The type-aware tier sees one tsconfig per run, so a root run over a
+  workspace is partly unmeasured — and now says so.** The pnpm workspace sample
+  has no root `tsconfig.json`: pointed at one package's config, the program
+  held **189 files against the 309** the syntax tier walked, and
+  `resolveTypeScript` fell back to the **bundled** compiler because a
+  workspace root has no hoisted `typescript`. A clean `nullable-default`
+  result from a root run on a monorepo is clean over the program, not over the
+  repository. A root run prints which members it did not check; `check
+  --package <member>` checks each with its own tsconfig, compiler and program
+  — see [Workspaces and project selection](#workspaces-and-project-selection).
 
 Precision, from reading the code behind a sample of findings: `type-complexity`
 7 true positives / 0 false positives; `maintainability` 5/0 (its whole output);
@@ -272,8 +279,9 @@ sites, so its precision on real code is undefined — see below.
   candidates are compared by layer; genuine disagreement emits
   `layer-unresolved`, which says the contract was **not** checked. Nothing
   alias-shaped is silently waved through — but "not checked" is not "checked".
-- Only `<root>/tsconfig.json`. No monorepo walk, no package `exports` maps, no
-  bundler aliases.
+- One tsconfig — the policy's `tsconfig` — per run, keyed by its path. No
+  package `exports` maps, no bundler aliases. A workspace member's aliases are
+  read by that member's `--package` run.
 - **Barrel chains are followed** name-aware and depth-capped, but only
   index-named files count as barrels, and unresolvable re-export targets are
   dropped silently.
@@ -300,6 +308,53 @@ sites, so its precision on real code is undefined — see below.
   well-documented modules split earlier than terse ones.
 - `structure_exclude` exempts a file from **both** budgets and nothing else.
   Each entry should carry a comment earning its place.
+
+---
+
+## Workspaces and project selection
+
+One run analyzes **one** project file — the policy's `tsconfig` — and
+`--package` runs a workspace member as a whole separate run. What that
+deliberately does not cover, each detected and reported rather than guessed:
+
+- **A solution-style tsconfig is not expanded.** `references` with no inputs
+  is a gate error naming the projects to choose from; the fix is one
+  `tsconfig` setting. Expanding into N runs over one source tree would put N
+  `tsc` rows nobody asked for into one report.
+- **Nested workspaces are not expanded from the root.** A member that is
+  itself a workspace root is listed once, as a member; its own members are
+  that member's business, and a `--package` run rooted there prints its own
+  notice about them.
+- **`--package` is always a full run of the member.** `--changed`, `--since`
+  and `--file` are usage errors alongside it: git reports paths relative to
+  the repository root, not the member, and the known limitation on
+  `changedFiles` below makes an incremental member run wrong today rather
+  than merely unimplemented.
+- **The workspace readers are deliberately small, and refuse the rest.**
+  `pnpm-workspace.yaml#packages` is read as a block sequence of plain or
+  quoted scalars, nothing else; `package.json#workspaces` and pnpm patterns
+  support literal segments, `*` within a segment, a whole `**` segment and a
+  leading `!`. A flow sequence, anchor, block scalar, brace expansion,
+  character class or `?` empties the member list and names the line or
+  pattern. A root run then says the list could not be read; `--package <path>`
+  still works, `--package <name>` repeats the reason. `**` is followed at most
+  eight directories deep.
+- **A non-TypeScript member is an error, not a skip.** A member with no
+  tsconfig gets `tsconfig-missing` and a `tsc` error (exit 3), like any
+  single-package project without one; there is no "this package is
+  JavaScript" opt-out, because a member kragg is asked to check and cannot is
+  a fact the run must not hide.
+- **A member's policy is its own or the root's, never a merge.** A member
+  `kragg.json` that sets one key loses every root setting; that is the same
+  rule as `kragg.json` over `package.json#kragg`.
+- **Per-member journals.** Each member writes `<member>/.kragg/history.jsonl`;
+  `kragg status` and `kragg flaky` at the root do not see them.
+- **The JSON shape under `--package` is an array**, one payload per member,
+  even for a single `--package`. A consumer that parses `check --format json`
+  as one object must branch on the flag it passed.
+- **`extends` across members works** (the compiler resolves it, and
+  provenance names the base), but the freshness stamp still watches only the
+  selected file's own bytes, not its `extends` targets.
 
 ---
 

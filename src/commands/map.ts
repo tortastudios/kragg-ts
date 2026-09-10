@@ -54,6 +54,7 @@ import { dirname, join } from "node:path";
 
 import { analysisProgram } from "../analysis/program.ts";
 import { resolveTypeScript, type TypeScriptApi } from "../analysis/sourceFile.ts";
+import { projectTsconfig } from "../environment/project.ts";
 import { criticalityCache } from "../catalog/criticalityCache.ts";
 import { EXIT_ENVIRONMENT, EXIT_OK, EXIT_USAGE } from "../engine/report.ts";
 import { readJson } from "../gates/criticality.ts";
@@ -161,6 +162,7 @@ async function mapReport(
   }
   const analysis = analysisProgram({
     root,
+    tsconfigPath: projectTsconfig(root, policy.tsconfig),
     ...(options.api === undefined ? {} : { api: options.api }),
   });
   criticalityCache({

@@ -112,6 +112,7 @@ const OPTIONS = {
   "update-baseline": { type: "boolean" },
   symbol: { type: "string", multiple: true },
   limit: { type: "string" },
+  package: { type: "string", multiple: true },
 } as const;
 
 /** Command name -> the flags it accepts. */
@@ -119,8 +120,8 @@ type FlagTable = Readonly<Record<string, readonly string[]>>;
 
 /** Which flags each command accepts. Anything else is a usage error. */
 const ALLOWED: FlagTable = {
-  check: ["file", "format", "max-violations", "no-journal", "changed", "since", "fail-fast", "all"],
-  security: ["file", "format", "max-violations", "no-journal"],
+  check: ["file", "format", "max-violations", "no-journal", "changed", "since", "fail-fast", "all", "package"],
+  security: ["file", "format", "max-violations", "no-journal", "package"],
   fix: ["file"],
   status: ["format", "last"],
   doctor: [],
@@ -377,6 +378,7 @@ function reportFlags(values: Values, root: string): ReportFlags {
     journal: values["no-journal"] !== true,
     failFast: values["fail-fast"] === true,
     all: values.all === true,
+    packages: values.package ?? [],
   };
 }
 
@@ -424,6 +426,12 @@ function conflict(values: Values): string | null {
   const fromGit = values.changed === true || values.since !== undefined;
   if (fromGit && values.file !== undefined) {
     return "--file cannot be combined with --changed or --since; git decides the file set";
+  }
+  // A package run is a FULL run of that package: git reports paths relative
+  // to the repository root, not the member, and a `--file` would be relative
+  // to whichever root the reader had in mind. Neither can be honoured yet.
+  if (values.package !== undefined && (fromGit || values.file !== undefined)) {
+    return "--package cannot be combined with --file, --changed or --since; a package run checks the whole package";
   }
   // Same class, one level down: `--all` is the inventories' spelling of
   // `--limit 0`, so accepting both means silently honouring one.

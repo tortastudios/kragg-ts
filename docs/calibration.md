@@ -453,7 +453,11 @@ package owns its own. Two consequences, both measured:
   this; it is still the wrong compiler, and the run says so.
 - **The type-aware tier saw 61% of the tree.** Pointed at one package's config,
   the program contained **189 files** against the **309** the syntax tier
-  walked. `nullable-default`'s zero on `bakery` is therefore a zero over 189
+  walked. (Since TOR-1371 a workspace root run says which members it did not
+  check, and `kragg check --package <member>` checks each with its own
+  tsconfig, compiler and program; the numbers here are the root-run
+  measurement and stand as recorded.) `nullable-default`'s zero on `bakery` is
+  therefore a zero over 189
   files, not 309 — which is exactly why the script reports the `program files`
   count next to the site count.
 

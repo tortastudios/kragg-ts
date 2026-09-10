@@ -47,7 +47,8 @@ import {
   writeStamp,
 } from "../gates/criticality.ts";
 import type { FunctionProfile } from "../gates/criticality.ts";
-import { DEFAULT_POLICY, loadPolicy } from "../policy/policy.ts";
+import { projectTsconfig } from "../environment/project.ts";
+import { DEFAULT_POLICY, loadPolicy, type KraggPolicy } from "../policy/policy.ts";
 
 export interface CriticalityCommandOptions {
   readonly root: string;
@@ -102,7 +103,12 @@ type ScopedAnalysis =
 
 /** Build the program once, narrow it to `paths`, and analyze what is left. */
 function analyzeScoped(root: string, paths: readonly string[]): ScopedAnalysis {
-  const analysis = analysisProgram({ root });
+  // The policy's tsconfig, through the one resolver: the same file a `check`
+  // derives from, so the two never disagree about what the program holds.
+  const analysis = analysisProgram({
+    root,
+    tsconfigPath: projectTsconfig(root, policyOf(root).tsconfig),
+  });
   const scoped = scopeFiles(analysis, root, paths);
   if (scoped !== null && !scoped.ok) {
     return scoped;
@@ -233,10 +239,15 @@ function errorText(error: unknown): string {
  * next `check` re-derives.
  */
 function scanPaths(root: string): readonly string[] {
+  const policy = policyOf(root);
+  return [...policy.sourcePaths, ...policy.testPaths];
+}
+
+/** The project's policy, or the defaults when it cannot be loaded. */
+function policyOf(root: string): KraggPolicy {
   try {
-    const policy = loadPolicy(root);
-    return [...policy.sourcePaths, ...policy.testPaths];
+    return loadPolicy(root);
   } catch {
-    return [...DEFAULT_POLICY.sourcePaths, ...DEFAULT_POLICY.testPaths];
+    return DEFAULT_POLICY;
   }
 }

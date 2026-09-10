@@ -54,6 +54,15 @@ Options for check and security:
   --format text|json     output format (default: text)
   --max-violations <n>   cap violations shown per gate
   --no-journal           do not append to .kragg/history.jsonl
+  --package <name-or-path>
+                         check this workspace member instead of the root
+                         (repeatable): a package.json name or a directory
+                         under the root. Each member is a separate run with
+                         its own root, policy (its kragg.json, else the
+                         root's), tsconfig, compiler and program, and its
+                         own .kragg/ journal; not with --file, --changed or
+                         --since. Text output has one section per member;
+                         --format json prints an ARRAY of per-member reports.
 
 Options for check only:
   --changed              only files changed against HEAD
@@ -67,6 +76,14 @@ lockfile, a linter or test-runner config, the secret baseline) or when its only
 source change is a deletion: all of those change what every gate concludes.
 The report says mode "full", and the reason is printed on stderr. A change set
 with nothing to check is exit 0; git being unable to answer is exit 3.
+
+Every type-aware surface (the shared program, tsc --project, typing-strictness,
+the boundaries alias table, the criticality stamp) reads the ONE tsconfig the
+policy's \`tsconfig\` setting names (default: tsconfig.json). A configured file
+that does not exist is exit 2; a solution-style file (references only, no
+inputs) is a gate error naming the projects to choose from. In a workspace
+root, a run without --package checks only the root package and says on stderr
+which members it did not check.
 
 Options for fix:
   --file <path>          format and fix only this file (repeatable)

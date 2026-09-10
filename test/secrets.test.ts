@@ -91,7 +91,7 @@ const SECRETLINT_REPORT = JSON.stringify([
 const ENV: ProjectEnvironment = {
   root: "/repo", packageManager: "pnpm", source: "pnpm-lock.yaml",
   binDir: "/repo/node_modules/.bin",
-  workspaces: { kind: "none", configPath: null, patterns: [], note: null },
+  workspaces: { kind: "none", configPath: null, patterns: [], packages: [], note: null },
 };
 
 const GITLEAKS_BIN = "/opt/bin/gitleaks";

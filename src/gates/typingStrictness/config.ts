@@ -30,10 +30,11 @@
  * disagree, or the walk cannot resolve a link, the annotation is simply
  * dropped. It can never create, suppress or change a finding.
  *
- * ONE FILE, AT THE ROOT. Only `<root>/tsconfig.json` is audited. A monorepo
- * with per-package configs, or a project whose real config is
- * `tsconfig.app.json`, is out of scope here — see the gate's module doc, which
- * records this as a known limitation rather than guessing at a file layout.
+ * ONE FILE, THE SELECTED ONE. The audit is over the tsconfig the caller
+ * resolved — the policy's `tsconfig` — and every finding names that file by
+ * its root-relative path, so `tsconfig.app.json` findings say so. A file that
+ * only references other projects is refused before any flag is judged: see
+ * the gate's module doc.
  *
  * TWO HALVES. This module judges the resolved `compilerOptions`; `included.ts`
  * judges whether the config's `files`/`include`/`exclude` actually reach the
@@ -42,13 +43,15 @@
  */
 
 import { readFileSync } from "node:fs";
-import { dirname, join } from "node:path";
+import { dirname, relative } from "node:path";
 
 import type ts from "typescript";
 
+import { toPosix } from "../../analysis/modulePath.ts";
+import { readProjectConfig } from "../../analysis/program.ts";
 import type { TypeScriptApi } from "../../analysis/sourceFile.ts";
 import type { Violation } from "../../engine/models.ts";
-import { configChain, provenance, TSCONFIG_NAME, type ConfigFile } from "./chain.ts";
+import { configChain, provenance, type ConfigFile } from "./chain.ts";
 import { TYPING_STRICTNESS_CODES as CODE } from "./codes.ts";
 import { auditIncludedSources } from "./included.ts";
 
@@ -149,7 +152,7 @@ const ADVISORY_FLAGS: readonly AdvisoryFlag[] = [
 ];
 
 /**
- * Audit `<root>/tsconfig.json`, resolving its `extends` chain.
+ * Audit the tsconfig at `tsconfigPath`, resolving its `extends` chain.
  *
  * TWO QUESTIONS, ONE READ OF THE FILE. The flag audit asks whether the
  * compiler is strict; `included.ts` asks whether the compiler ever LOOKS at
@@ -159,54 +162,58 @@ const ADVISORY_FLAGS: readonly AdvisoryFlag[] = [
  */
 export function auditTsconfig(
   root: string,
+  tsconfigPath: string,
   api: TypeScriptApi,
   sourcePaths: readonly string[],
 ): ConfigOutcome {
-  const path = join(root, TSCONFIG_NAME);
+  const name = toPosix(relative(root, tsconfigPath));
   let text: string;
   try {
-    text = readFileSync(path, "utf8");
+    text = readFileSync(tsconfigPath, "utf8");
   } catch (error: unknown) {
     if (!isMissingFile(error)) {
       // The file is there and unreadable. That is "the gate could not run",
       // which is a different thing from "the project has no config".
-      return { ok: false, message: `could not read ${TSCONFIG_NAME}: ${describe(error)}` };
+      return { ok: false, message: `could not read ${name}: ${describe(error)}` };
     }
     return {
       ok: true,
       audit: single({
-        message: `no \`${TSCONFIG_NAME}\` (nothing is type-checked)`,
-        file: TSCONFIG_NAME,
+        message: `no \`${name}\` (nothing is type-checked)`,
+        file: name,
         code: CODE.tsconfigMissing,
         fixHint:
-          `add a \`${TSCONFIG_NAME}\` with \`"strict": true\` and ` +
-          '`"noUncheckedIndexedAccess": true` (see the kragg scaffold)',
+          `add a \`${name}\` with \`"strict": true\` and ` +
+          '`"noUncheckedIndexedAccess": true` (see the kragg scaffold), or set ' +
+          "`tsconfig` in kragg.json to the project file that exists",
       }),
     };
   }
 
-  const options = resolveOptions(path, text, api);
+  const options = resolveOptions(tsconfigPath, text, api, name);
   if (!options.ok) {
     return { ok: true, audit: single(options.violation) };
   }
-  const flags = judge(options.value, configChain(path, api));
-  const inputs = auditIncludedSources(root, options.config, sourcePaths, api);
+  // The compiler's own resolution of the config, with a real `readDirectory`:
+  // the shape that names no inputs of its own is refused HERE, before any flag
+  // is judged, because its flags are not the ones that type-check anything.
+  const inputs = readProjectConfig(api, tsconfigPath);
+  if (!inputs.ok && inputs.kind === "solution") {
+    return { ok: false, message: `${inputs.message}\nThe typing-strictness gate did not run.` };
+  }
+  const flags = judge(options.value, configChain(tsconfigPath, api), name);
+  const included = auditIncludedSources(root, name, inputs, sourcePaths);
   return {
     ok: true,
     audit: {
-      violations: [...flags.violations, ...inputs.violations],
-      advisories: [...flags.advisories, ...inputs.advisories],
+      violations: [...flags.violations, ...included.violations],
+      advisories: [...flags.advisories, ...included.advisories],
     },
   };
 }
 
 type OptionsResult =
-  | {
-      readonly ok: true;
-      readonly value: ts.CompilerOptions;
-      /** The parsed JSON, handed on so `included.ts` re-reads nothing. */
-      readonly config: unknown;
-    }
+  | { readonly ok: true; readonly value: ts.CompilerOptions }
   | { readonly ok: false; readonly violation: Violation };
 
 /**
@@ -215,13 +222,18 @@ type OptionsResult =
  * `readDirectory` is stubbed out because THIS call only wants the options, and
  * globbing a large repo to throw the result away is a cost with no payer. The
  * two diagnostics that stub provokes are filtered; everything else is a real
- * config error and fails closed. `included.ts` does its own parse with a real
- * `readDirectory` when — and only when — the file list is the question.
+ * config error and fails closed. `readProjectConfig` does the parse with a
+ * real `readDirectory` when — and only when — the file list is the question.
  */
-function resolveOptions(path: string, text: string, api: TypeScriptApi): OptionsResult {
+function resolveOptions(
+  path: string,
+  text: string,
+  api: TypeScriptApi,
+  name: string,
+): OptionsResult {
   const parsed = api.parseConfigFileTextToJson(path, text);
   if (parsed.error !== undefined) {
-    return { ok: false, violation: invalid(diagnosticText(parsed.error, api)) };
+    return { ok: false, violation: invalid(diagnosticText(parsed.error, api), name) };
   }
   const host: ts.ParseConfigHost = {
     useCaseSensitiveFileNames: api.sys.useCaseSensitiveFileNames,
@@ -241,16 +253,20 @@ function resolveOptions(path: string, text: string, api: TypeScriptApi): Options
   );
   const first = errors[0];
   if (first !== undefined) {
-    return { ok: false, violation: invalid(diagnosticText(first, api)) };
+    return { ok: false, violation: invalid(diagnosticText(first, api), name) };
   }
-  return { ok: true, value: command.options, config: parsed.config };
+  return { ok: true, value: command.options };
 }
 
 /** "No inputs were found" / "The 'files' list is empty" — caused by our stub. */
 const EMPTY_INPUT_DIAGNOSTICS: ReadonlySet<number> = new Set([18002, 18003]);
 
 /** Apply the floor to one set of resolved options. */
-function judge(options: ts.CompilerOptions, chain: readonly ConfigFile[]): ConfigAudit {
+function judge(
+  options: ts.CompilerOptions,
+  chain: readonly ConfigFile[],
+  name: string,
+): ConfigAudit {
   const violations: Violation[] = [];
   const advisories: Violation[] = [];
   const note = (flag: string, value: boolean): string => provenance(chain, flag, value);
@@ -258,7 +274,7 @@ function judge(options: ts.CompilerOptions, chain: readonly ConfigFile[]): Confi
   if (!meetsFloor(options)) {
     violations.push({
       message: `TypeScript is not strict (missing \`"strict": true\`)${note("strict", false)}`,
-      file: TSCONFIG_NAME,
+      file: name,
       code: CODE.tsconfigNotStrict,
       fixHint: 'set `"strict": true` in compilerOptions',
     });
@@ -267,7 +283,7 @@ function judge(options: ts.CompilerOptions, chain: readonly ConfigFile[]): Confi
     if (flagValue(options, flag) === false) {
       violations.push({
         message: `\`${flag}\` is disabled — re-opens the typing hole \`strict\` closes${note(flag, false)}`,
-        file: TSCONFIG_NAME,
+        file: name,
         code: CODE.tsconfigLoosened,
         fixHint: `remove \`"${flag}": false\`; keep the strict floor`,
       });
@@ -277,15 +293,15 @@ function judge(options: ts.CompilerOptions, chain: readonly ConfigFile[]): Confi
     if (flagValue(options, required.name) !== true) {
       violations.push({
         message: `\`${required.name}\` is not enabled — ${required.why}`,
-        file: TSCONFIG_NAME,
+        file: name,
         code: CODE.tsconfigMissingFlag,
         fixHint: required.fixHint,
       });
     }
   }
-  violations.push(...emitSafety(options));
-  violations.push(...javaScript(options, advisories, note));
-  advisories.push(...advisory(options, note));
+  violations.push(...emitSafety(options, name));
+  violations.push(...javaScript(options, advisories, note, name));
+  advisories.push(...advisory(options, note, name));
   return { violations, advisories };
 }
 
@@ -297,14 +313,14 @@ function judge(options: ts.CompilerOptions, chain: readonly ConfigFile[]): Confi
  * on the artifact. A `noEmit: true` config produces no artifact, so the flag
  * is meaningless there and demanding it would be noise.
  */
-function emitSafety(options: ts.CompilerOptions): readonly Violation[] {
+function emitSafety(options: ts.CompilerOptions, name: string): readonly Violation[] {
   if (options.noEmit === true || flagValue(options, "noEmitOnError") === true) {
     return [];
   }
   return [
     {
       message: "`noEmitOnError` is not enabled — tsc emits output for code that failed to typecheck",
-      file: TSCONFIG_NAME,
+      file: name,
       code: CODE.tsconfigMissingFlag,
       fixHint:
         'set `"noEmitOnError": true`, or `"noEmit": true` if this config only ' +
@@ -318,6 +334,7 @@ function javaScript(
   options: ts.CompilerOptions,
   advisories: Violation[],
   note: (flag: string, value: boolean) => string,
+  name: string,
 ): readonly Violation[] {
   if (flagValue(options, "allowJs") !== true) {
     return [];
@@ -325,7 +342,7 @@ function javaScript(
   if (flagValue(options, "checkJs") === true) {
     advisories.push({
       message: `\`allowJs\` admits JavaScript; \`checkJs\` checks it, but more weakly than TypeScript${note("allowJs", true)}`,
-      file: TSCONFIG_NAME,
+      file: name,
       code: CODE.tsconfigAllowJs,
       fixHint: "prefer converting the remaining JavaScript; keep `checkJs` on until then",
     });
@@ -334,7 +351,7 @@ function javaScript(
   return [
     {
       message: `\`allowJs\` without \`checkJs\` — JavaScript compiles into this project unchecked${note("allowJs", true)}`,
-      file: TSCONFIG_NAME,
+      file: name,
       code: CODE.tsconfigUncheckedJs,
       fixHint: 'set `"checkJs": true`, or drop `"allowJs"` and convert the JavaScript',
     },
@@ -357,12 +374,13 @@ function javaScript(
 function advisory(
   options: ts.CompilerOptions,
   note: (flag: string, value: boolean) => string,
+  name: string,
 ): readonly Violation[] {
   const found: Violation[] = [];
   if (flagValue(options, "skipLibCheck") === true) {
     found.push({
       message: `\`skipLibCheck\` is on — breakage inside dependency type definitions is invisible${note("skipLibCheck", true)}`,
-      file: TSCONFIG_NAME,
+      file: name,
       code: CODE.tsconfigSkipLibCheck,
       fixHint:
         'weigh this one: `"skipLibCheck": false` checks dependency types and ' +
@@ -374,7 +392,7 @@ function advisory(
     if (flagValue(options, flag.name) !== true) {
       found.push({
         message: `\`${flag.name}\` is not enabled — ${flag.why}`,
-        file: TSCONFIG_NAME,
+        file: name,
         code: CODE.tsconfigAdvisoryFlag,
         fixHint: flag.fixHint,
       });
@@ -407,10 +425,10 @@ function single(violation: Violation): ConfigAudit {
   return { violations: [violation], advisories: [] };
 }
 
-function invalid(detail: string): Violation {
+function invalid(detail: string, name: string): Violation {
   return {
-    message: `\`${TSCONFIG_NAME}\` could not be resolved (${detail}) — the strict floor cannot be verified`,
-    file: TSCONFIG_NAME,
+    message: `\`${name}\` could not be resolved (${detail}) — the strict floor cannot be verified`,
+    file: name,
     code: CODE.tsconfigInvalid,
     fixHint: "fix the config (or its `extends` target) so tsc can read it",
   };

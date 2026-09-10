@@ -276,7 +276,8 @@ Same key vocabulary, snake_case, on both sides; only the carrier differs —
 `package.json` `"kragg"` here. The standalone file wins outright; there is no
 merging. kragg-ts adds tool-selection keys (`lint_tool`, `test_runner`,
 `secret_scanner`, `audit_severity`) that have no Python analogue, where `"off"`
-is a deliberate, visible disable: the gate SKIPs with a reason saying so.
+is a deliberate, visible disable: the gate SKIPs with a reason saying so — and
+`tsconfig`, the one project file every type-aware surface reads (row 29).
 Malformed *values* fail closed to the stricter default; a file that cannot be
 parsed at all is a usage error (exit 2).
 
@@ -344,7 +345,7 @@ A conformance runner must not flag these; a suite that diffs the two
 implementations naively will flag every one. Rows 1–9 are this repository's
 original table, re-verified against both trees while the spec was written; rows
 10–12 were added by that verification and are also SPEC.md section 10's rows
-10–12; rows 13–28 were introduced by TOR-1358, TOR-1363, TOR-1361, TOR-1369, TOR-1375, TOR-1364 and TOR-1365 on this branch. Fixtures that exercise a row carry a `divergences` entry naming its id.
+10–12; rows 13–28 were introduced by TOR-1358, TOR-1363, TOR-1361, TOR-1369, TOR-1375, TOR-1364 and TOR-1365 on this branch; rows 29–30 by TOR-1371. Fixtures that exercise a row carry a `divergences` entry naming its id.
 
 | # | Divergence | Why it is intentional |
 | --- | --- | --- |
@@ -376,6 +377,8 @@ original table, re-verified against both trees while the spec was written; rows
 | 26 | a change set whose only source change is a **deletion** is likewise a FULL run | Both implementations drop deletions from the selection (a deleted file cannot be checked), which turned "the module half the tree imports is gone" into an empty selection and exit 0. A deleted file is still never handed to a per-file tool; it just stops being mistaken for "nothing changed". |
 | 27 | `check --file <path that does not exist>` is exit 2, naming the path | Python runs the pipeline over a selection that matches nothing, which reads as a clean pass: the linter errors about *itself* finding no files while every path-aware gate prints a `[PASS]` over zero files. `targets` for a path that DOES exist is unchanged — including a directory, which stays verbatim on the wire and is expanded only into the internal narrowing. |
 | 28 | git plumbing runs with `-z`; a git failure carries git's message | Python reads `git diff --name-only` with `core.quotePath` on, so `src/café.ts` arrives as `"src/caf\303\251.ts"`, fails the existence check and leaves the selection silently. It also treats any non-zero git exit as an empty diff, so a repository with no commit yet (`git diff HEAD` has no HEAD) reports only untracked files. kragg-ts parses NUL-separated records and reports a git failure as exit 3 with git's own diagnostic. |
+| 29 | a `tsconfig` policy setting selects the ONE project file every type-aware surface reads; a solution-style file is a gate ERROR | TypeScript-only, like the tool-selection keys in §8: Python has one `pyproject.toml`. The shared program, `tsc --project`, the `typing-strictness` audit, the alias table and the freshness stamp all read the file the setting names, so a `tsconfig.app.json` project is checked where it is configured. A file with `references` and no inputs makes `tsc -p` exit 0 having checked nothing; kragg-ts refuses it as `error: true` (SPEC §4.3's "could not run") naming the referenced projects, rather than reporting a `[PASS] tsc` over an unchecked tree. A configured file that does not exist is exit 2. No key is added to the report or the stamp — the selected file is folded into the existing `inputs_digest`. |
+| 30 | `check --package` / `security --package` run a workspace member as its own run; a root run names the members it did not check | TypeScript-only: Python has no workspace notion. Each member is a complete run (own root, policy, tsconfig, compiler, program, journal) and produces the ordinary payload with the unchanged schema; several members are an **array** of payloads on stdout, never one merged report. The exit code is the worst member's; every usage error refuses the invocation before a gate runs. No fixture covers `--package`, so no golden moves. |
 
 Four defects found in the Python implementation during the port are recorded in
 [KNOWN_LIMITATIONS.md](../KNOWN_LIMITATIONS.md#found-in-the-python-implementation-during-this-port).

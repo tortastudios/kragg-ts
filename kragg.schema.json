@@ -110,6 +110,11 @@
     "coverage_report_path": {
       "type": "string",
       "description": "Where the test runner writes its istanbul JSON, relative to the project root. Default: \"coverage/coverage-final.json\"."
+    },
+    "tsconfig": {
+      "type": "string",
+      "minLength": 1,
+      "description": "The tsconfig every type-aware surface reads, relative to the project root: the shared program, the tsc gate's --project, the typing-strictness audit, the boundaries alias table and the criticality freshness stamp. Name a concrete project here (e.g. \"tsconfig.app.json\"); a solution-style file with only references is refused. A configured file that does not exist is a usage error (exit 2). Default: \"tsconfig.json\"."
     }
   }
 }

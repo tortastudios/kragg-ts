@@ -41,10 +41,13 @@
  *    ~6 ms over this repo's 214 source and test files (~2 MB), up from ~1 ms
  *    for the old three numbers, against the ~1s a graph rebuild costs.
  *  - THE OTHER ANALYSIS INPUTS: `kragg.json` and `package.json#kragg` (which
- *    decide the paths and the thresholds), `tsconfig.json` (which decides
- *    which files are in the program at all), and the RESOLVED COMPILER's
- *    version and path (which decides how they parse). None of these lives
- *    under the source paths, and each of them can change the graph on its own.
+ *    decide the paths, the thresholds and WHICH TSCONFIG), the SELECTED
+ *    tsconfig — the policy's `tsconfig`, through the same `projectTsconfig`
+ *    resolver the program uses, hashed under its root-relative name so a
+ *    switch from `tsconfig.json` to `tsconfig.app.json` is a change even when
+ *    both files are untouched — and the RESOLVED COMPILER's version and path
+ *    (which decides how they parse). None of these lives under the source
+ *    paths, and each of them can change the graph on its own.
  *
  * Count and total size are still recorded and compared. They are redundant
  * against the hash and are cheap; they make a mismatch legible to a human
@@ -100,8 +103,8 @@
  *     the tsconfig names, with the tsconfig unchanged, is still not seen. The
  *     fix is for the policy and the tsconfig to agree, which every other gate
  *     already assumes.
- *  2. A `tsconfig.json` that `extends` another file watches only its own
- *     bytes, not the base's.
+ *  2. A tsconfig that `extends` another file watches only its own bytes, not
+ *     the base's.
  *  3. The compiler is fingerprinted by the version and path `resolveTypeScript`
  *     reports. A compiler replaced in place, at the same path and with the same
  *     `version` string, is not distinguishable from the old one.
@@ -109,10 +112,12 @@
 
 import { createHash } from "node:crypto";
 import { mkdirSync, readFileSync, statSync, writeFileSync } from "node:fs";
-import { join, relative, resolve } from "node:path";
+import { join, relative, resolve, sep } from "node:path";
 
 import { resolveTypeScript } from "../../analysis/sourceFile.ts";
 import { walkFiles } from "../../analysis/walk.ts";
+import { projectTsconfig } from "../../environment/project.ts";
+import { loadPolicy, PolicyError } from "../../policy/policy.ts";
 
 /** The journal directory both siblings write into. */
 const JOURNAL_DIR = ".kragg";
@@ -162,13 +167,14 @@ const SOURCE_EXTENSIONS: readonly string[] = [
 /**
  * Files outside the source tree whose bytes the analysis depends on.
  *
- * `kragg.json` decides which paths are analyzed and where the thresholds sit;
- * `tsconfig.json` decides which files end up in the program and how they are
- * parsed. Either can change the call graph without a single source byte
- * moving. `package.json#kragg` is watched too, separately, because the rest of
- * `package.json` churns for reasons that have nothing to do with analysis.
+ * `kragg.json` decides which paths are analyzed, where the thresholds sit and
+ * which tsconfig is read; that tsconfig (see `selectedTsconfig`) decides which
+ * files end up in the program and how they are parsed. Either can change the
+ * call graph without a single source byte moving. `package.json#kragg` is
+ * watched too, separately, because the rest of `package.json` churns for
+ * reasons that have nothing to do with analysis.
  */
-const INPUT_FILES: readonly string[] = ["kragg.json", "tsconfig.json"];
+const INPUT_FILES: readonly string[] = ["kragg.json"];
 
 /** Bumped whenever the fingerprint changes meaning; older stamps read stale. */
 const STAMP_VERSION = 2;
@@ -237,9 +243,11 @@ export function scanSources(root: string, paths: readonly string[]): SourceScan 
  */
 function analysisInputs(root: string): string {
   const hash = createHash("sha256");
-  for (const name of INPUT_FILES) {
+  const inputs = [...INPUT_FILES.map((name) => join(root, name)), selectedTsconfig(root)];
+  for (const path of inputs) {
+    const name = relative(root, path).split(sep).join("/");
     try {
-      const content = readFileSync(join(root, name));
+      const content = readFileSync(path);
       hash.update(`${name}:${content.length}:`);
       hash.update(content);
     } catch {
@@ -250,6 +258,30 @@ function analysisInputs(root: string): string {
   const compiler = resolveTypeScript(root);
   hash.update(`compiler:${compiler.version}:${compiler.path ?? ""}:`);
   return hash.digest("hex");
+}
+
+/**
+ * The tsconfig the program is built from, through the one resolver every
+ * consumer uses — so the stamp fingerprints the file the analysis actually
+ * read, whatever the policy calls it.
+ *
+ * The policy is re-read here rather than threaded through every reader of
+ * `criticality.json`, and that is safe because the answer is a pure function
+ * of the root: the writer (`ensure()`, `criticality --write`) and every
+ * reader (`readJson` inside a gate) compute the same path. A policy that
+ * cannot be loaded resolves to the default so the digest still exists; the
+ * CLI has already refused to run any gate over such a policy (exit 2), and
+ * `kragg.json`'s own bytes are in the digest regardless.
+ */
+function selectedTsconfig(root: string): string {
+  try {
+    return projectTsconfig(root, loadPolicy(root).tsconfig);
+  } catch (error: unknown) {
+    if (error instanceof PolicyError) {
+      return projectTsconfig(root);
+    }
+    throw error;
+  }
 }
 
 /** The `kragg` block of `package.json`, serialized; a marker when unreadable. */

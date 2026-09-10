@@ -101,6 +101,16 @@ export interface KraggPolicy {
   readonly sourcePaths: readonly string[];
   /** Directories holding tests, relative to the project root. */
   readonly testPaths: readonly string[];
+  /**
+   * The tsconfig every type-aware surface reads, relative to the project
+   * root: the shared `ts.Program`, the `tsc` gate's `--project`, the
+   * `typing-strictness` audit, the `boundaries` alias table and the
+   * criticality freshness stamp. ONE setting, so they cannot disagree about
+   * which file configures the project. A solution-style file (`references`
+   * and no inputs of its own) is refused by every one of them — see
+   * `analysis/program.ts` — and the fix is to name a concrete project here.
+   */
+  readonly tsconfig: string;
   /** Line-coverage percentage below which the coverage gate fails. */
   readonly coverageFailUnder: number;
   /** How deeply a type may nest before the type-complexity gate complains. */
@@ -169,6 +179,8 @@ export const DEFAULT_POLICY: KraggPolicy = {
    * Both are listed; a path that does not exist is simply not scanned.
    */
   testPaths: ["test", "tests"],
+  /** `tsc -p`'s own default. TypeScript-only: Python has no equivalent knob. */
+  tsconfig: "tsconfig.json",
   coverageFailUnder: 80,
   typeMaxNestingDepth: 2,
   typeMaxLength: 40,
@@ -252,6 +264,7 @@ type PolicyScopes = Pick<
   | "profile"
   | "sourcePaths"
   | "testPaths"
+  | "tsconfig"
   | "layers"
   | "structureExclude"
   | "mutationInclude"
@@ -285,6 +298,7 @@ function readScopes(source: Source): PolicyScopes {
     profile: getString(source, "profile", base.profile),
     sourcePaths: getStringList(source, "source_paths", base.sourcePaths),
     testPaths: getStringList(source, "test_paths", base.testPaths),
+    tsconfig: getPath(source, "tsconfig", base.tsconfig),
     layers: getStringList(source, "layers", base.layers),
     structureExclude: getStringList(source, "structure_exclude", base.structureExclude),
     mutationInclude: getStringList(source, "mutation_include", base.mutationInclude),
@@ -380,7 +394,43 @@ export function policyAsDict(policy: KraggPolicy): Record<string, unknown> {
     secret_baseline: policy.secretBaseline ?? null,
     audit_severity: policy.auditSeverity,
     coverage_report_path: policy.coverageReportPath,
+    tsconfig: policy.tsconfig,
   };
+}
+
+/**
+ * A path setting: a string, and a non-empty one.
+ *
+ * `""` resolves to the root directory itself, so `tsconfig: ""` would send
+ * every type-aware surface to open a directory and report a confusing
+ * failure about it. Rejected by name instead, like every other malformed
+ * value; the schema mirrors the `minLength`.
+ */
+function getPath(source: Source, key: string, fallback: string): string {
+  const value = getString(source, key, fallback);
+  if (value === "") {
+    throw new PolicyError(`${source.label}${key} must be a non-empty path (got "")`);
+  }
+  return value;
+}
+
+/**
+ * Whether `root` carries a policy of its own — a `kragg.json`, or a
+ * `package.json` with a `kragg` key.
+ *
+ * For a workspace member under `--package`: a member that declares nothing
+ * inherits the ROOT's policy rather than the defaults, because the root's
+ * `kragg.json` is where a workspace writes its rules once. A member that
+ * declares anything at all is on its own, exactly as `loadPolicy` treats a
+ * standalone project — there is no merge, and a malformed member policy is
+ * still a `PolicyError` here.
+ */
+export function declaresPolicy(root: string): boolean {
+  if (readTable(join(root, "kragg.json")) !== null) {
+    return true;
+  }
+  const pkg = readTable(join(root, "package.json"));
+  return pkg !== null && own(pkg, "kragg") !== undefined;
 }
 
 /**

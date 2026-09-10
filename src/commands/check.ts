@@ -1,11 +1,9 @@
 /**
- * `kragg check` — the whole quality pipeline, and the shared pipeline runner.
+ * `kragg check` — the whole quality pipeline.
  *
- * Ported from `cmd_check`, `_check_targets` and `_run_pipeline` in
- * `commands.py`. `runPipeline` lives here rather than in its own module
- * because `check` and `security` differ only in which gates they assemble;
- * giving each its own runner is how the two start rendering, journaling and
- * exiting differently for no reason anyone intended.
+ * Ported from `cmd_check` and `_check_targets` in `commands.py`; the shared
+ * `_run_pipeline` is `pipeline.ts`, re-exported here so `check` and `security`
+ * cannot render, journal or exit differently for no reason anyone intended.
  *
  * TARGET RESOLUTION lives in `scope.ts` — one resolver for `check` and
  * `security` both, so the two cannot disagree about what a `--file` argument
@@ -14,39 +12,32 @@
  * assembles the pipeline. See that module for the three modes, for why a
  * changed configuration file promotes an incremental run to a full one, and
  * for why git failing to answer is exit 3 and not an empty file list.
+ *
+ * PACKAGE RUNS. `--package` hands the whole invocation to `packages.ts`,
+ * which assembles this same pipeline once per selected workspace member —
+ * each with the member's own root, policy, tsconfig, compiler and program —
+ * through {@link assembleCheck}. A root run in a workspace says on stderr
+ * which members it did NOT check; it never checks them by accident, and it
+ * never omits them in silence.
  */
 
 import { buildCheckGates } from "../catalog.ts";
-import { runGates, type GateSpec } from "../engine/gate.ts";
-import { appendRun } from "../engine/journal.ts";
 import {
   buildReport,
   renderJson,
-  renderText,
   reportExitCode,
   utcNow,
   EXIT_OK,
 } from "../engine/report.ts";
-import { toPayload } from "../engine/reportPayload.ts";
-import { resolveProjectEnvironment } from "../environment/project.ts";
-import { gitDirty, gitSha } from "../git/changes.ts";
+import { resolveProjectEnvironment, type ProjectEnvironment } from "../environment/project.ts";
+import { gitSha } from "../git/changes.ts";
 import { loadPolicy, type KraggPolicy } from "../policy/policy.ts";
-import { resolveScope } from "./scope.ts";
+import { runPackages, uncheckedPackagesNotice } from "./packages.ts";
+import { runPipeline, type PipelineRun, type ReportFlags } from "./pipeline.ts";
+import { resolveScope, type Scope } from "./scope.ts";
 
-/** How a run should be reported, shared by `check` and `security`. */
-export interface ReportFlags {
-  readonly root: string;
-  /** `--file`, repeatable. Empty means "the whole project". */
-  readonly targets: readonly string[];
-  readonly format: "text" | "json";
-  /** `--max-violations`; falls back to `max_violations_per_gate`. */
-  readonly maxViolations: number | undefined;
-  /** False for `--no-journal`. */
-  readonly journal: boolean;
-  readonly failFast: boolean;
-  /** `--all`: run the SLOW gates even after a fast gate failed. */
-  readonly all: boolean;
-}
+export type { PipelineRun, ReportFlags } from "./pipeline.ts";
+export { executePipeline, runPipeline } from "./pipeline.ts";
 
 /** Everything `check` accepts on top of the shared reporting flags. */
 export interface CheckFlags extends ReportFlags {
@@ -54,36 +45,93 @@ export interface CheckFlags extends ReportFlags {
   readonly since: string | null;
 }
 
+/**
+ * A resolved scope and the pipeline it calls for, or the exit it earned.
+ *
+ * `run` is a THUNK: assembling the gates creates the run context, which
+ * resolves (and loads) the project's compiler and creates `.kragg/`. A
+ * `--changed` run with nothing to check must do neither, so the caller looks
+ * at `scope` first and builds only when there is something to run.
+ */
+export type Assembly =
+  | { readonly ok: true; readonly scope: Scope; readonly run: () => PipelineRun }
+  | { readonly ok: false; readonly exit: number; readonly message: string };
+
 /** Run the full check pipeline and return the process exit code. */
 export async function runCheck(flags: CheckFlags): Promise<number> {
+  if (flags.packages.length > 0) {
+    // `--changed`/`--since`/`--file` are rejected alongside `--package` by
+    // the CLI, so a member run is always the member's full scope.
+    return runPackages(flags, (memberFlags, policy, env) =>
+      assembleCheck({ ...memberFlags, changed: false, since: null }, policy, env),
+    );
+  }
   const policy = loadPolicy(flags.root);
+  const env = resolveProjectEnvironment(flags.root);
+  const assembled = await assembleCheck(flags, policy, env);
+  if (!assembled.ok) {
+    process.stderr.write(`kragg: ${assembled.message}\n`);
+    return assembled.exit;
+  }
+  const { scope } = assembled;
+  // stderr, not stdout: `--format json` promises one parseable document on
+  // stdout, and neither explanation is part of the wire format.
+  if (scope.note !== undefined) {
+    process.stderr.write(`kragg: ${scope.note}\n`);
+  }
+  const unchecked = uncheckedPackagesNotice(env, "check");
+  if (unchecked !== undefined) {
+    process.stderr.write(`kragg: ${unchecked}\n`);
+  }
+  if (scope.mode !== "full" && scope.targets.length === 0) {
+    return await emptySelection(flags, policy, scope.mode);
+  }
+  return runPipeline(assembled.run());
+}
+
+/**
+ * Resolve the scope and describe the pipeline for ONE root — the project, or
+ * one workspace member.
+ *
+ * Everything that can be a usage error happens here, before any gate runs:
+ * an unresolvable selection, a policy `tsconfig` that does not exist. For a
+ * package run that is what lets `packages.ts` refuse the whole invocation
+ * with exit 2 when any member's configuration is wrong, instead of running
+ * the others and reporting the broken one as a finding.
+ */
+export async function assembleCheck(
+  flags: CheckFlags,
+  policy: KraggPolicy,
+  env: ProjectEnvironment,
+): Promise<Assembly> {
   const resolved = await resolveScope(
     { root: flags.root, targets: flags.targets, changed: flags.changed, since: flags.since },
     policy,
   );
   if (!resolved.ok) {
-    process.stderr.write(`kragg: ${resolved.message}\n`);
-    return resolved.exit;
+    return resolved;
   }
   const { scope } = resolved;
-  if (scope.note !== undefined) {
-    // stderr, not stdout: `--format json` promises one parseable document on
-    // stdout, and an explanation is not part of the wire format.
-    process.stderr.write(`kragg: ${scope.note}\n`);
-  }
-  if (scope.mode !== "full" && scope.targets.length === 0) {
-    return await emptySelection(flags, policy, scope.mode);
-  }
-  const specs = buildCheckGates({
-    root: flags.root,
-    policy,
-    env: resolveProjectEnvironment(flags.root),
-    targets: scope.targets,
-    paths: scope.paths,
-    incremental: scope.mode !== "full",
-    since: flags.since,
-  });
-  return runPipeline({ command: "check", mode: scope.mode, policy, specs, flags, targets: scope.targets });
+  return {
+    ok: true,
+    scope,
+    run: (): PipelineRun => ({
+      command: "check",
+      mode: scope.mode,
+      policy,
+      specs: buildCheckGates({
+        root: flags.root,
+        policy,
+        env,
+        targets: scope.targets,
+        paths: scope.paths,
+        incremental: scope.mode !== "full",
+        since: flags.since,
+      }),
+      targets: scope.targets,
+      flags,
+    }),
+  };
 }
 
 /**
@@ -128,47 +176,5 @@ async function emptySelection(
     gitSha: await gitSha(flags.root),
   });
   process.stdout.write(`${renderJson(report)}\n`);
-  return reportExitCode(report);
-}
-
-/** Everything `runPipeline` needs that is not already in the flags. */
-export interface PipelineRun {
-  /** `"check"` or `"security"` — recorded in the report and the journal. */
-  readonly command: string;
-  readonly mode: string;
-  readonly policy: KraggPolicy;
-  readonly specs: readonly GateSpec[];
-  readonly targets: readonly string[];
-  readonly flags: ReportFlags;
-}
-
-/**
- * Run gates, render, journal, and return the exit code.
- *
- * The journal write is last and cannot change the outcome: telemetry must
- * never fail a check (see `journal.ts`), so a read-only checkout degrades
- * `kragg status` and nothing else.
- */
-export async function runPipeline(run: PipelineRun): Promise<number> {
-  const { flags } = run;
-  const startedAt = utcNow();
-  const results = await runGates(run.specs, {
-    failFast: flags.failFast,
-    forceSlow: flags.all,
-  });
-  const report = buildReport({
-    command: run.command,
-    mode: run.mode,
-    targets: run.targets,
-    results,
-    maxViolations: flags.maxViolations ?? run.policy.maxViolationsPerGate,
-    startedAt,
-    gitSha: await gitSha(flags.root),
-  });
-  const rendered = flags.format === "json" ? renderJson(report) : renderText(report);
-  process.stdout.write(`${rendered}\n`);
-  if (flags.journal) {
-    appendRun(flags.root, toPayload(report), { gitDirty: await gitDirty(flags.root) });
-  }
   return reportExitCode(report);
 }

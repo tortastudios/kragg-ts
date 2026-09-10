@@ -36,10 +36,18 @@
  *
  *  - `model.ts`          — the resolved-environment data types,
  *  - `packageManager.ts` — which manager owns the repo, and how to install,
- *  - `workspaces.ts`     — workspace declarations, read but not expanded,
+ *  - `workspaces.ts`     — workspace declarations, expanded to members (or
+ *                          an honest note about why they could not be),
  *  - `bin.ts`            — finding a binary inside the project,
  *  - `missing.ts`        — "not installed" versus "ran and failed",
  *  - `manifest.ts`       — defensive `package.json` reads.
+ *
+ * It also holds {@link projectTsconfig}, THE ONE RESOLVER of which tsconfig a
+ * run reads. Every consumer — the shared program, the `tsc` gate, the
+ * `typing-strictness` audit, the alias table, the freshness stamp — goes
+ * through it with the policy's `tsconfig` setting, so there is exactly one
+ * answer per run and no consumer can quietly fall back to `<root>/tsconfig.json`
+ * while the others read `tsconfig.app.json`.
  */
 
 import { resolve } from "node:path";
@@ -58,10 +66,31 @@ export {
   PACKAGE_MANAGER_ENV_VAR,
   remediation,
 } from "./packageManager.ts";
+// `selectWorkspacePackage` and `WorkspacePackage` are NOT re-exported: this
+// facade is at its symbol budget, and their one caller (`commands/packages.ts`)
+// is the member-run machinery, which reads `workspaces.ts` directly.
 export { detectWorkspaces } from "./workspaces.ts";
 export type { BinLookupOptions } from "./bin.ts";
 export { resolveBin, toolCommand } from "./bin.ts";
 export { missingTool, missingToolMessage } from "./missing.ts";
+
+/**
+ * `tsc -p`'s own default project file, and the policy's `tsconfig` default.
+ * `test/policy.test.ts` pins the two spellings to each other.
+ */
+export const DEFAULT_TSCONFIG = "tsconfig.json";
+
+/**
+ * The absolute path of the tsconfig a run analyzes and type-checks with.
+ *
+ * `configured` is the policy's `tsconfig` setting, relative to `root`. This
+ * is a one-line function on purpose: its value is that it is the only place
+ * that spells the rule, so `grep projectTsconfig` lists every consumer and a
+ * consumer that does not appear there is the bug.
+ */
+export function projectTsconfig(root: string, configured: string = DEFAULT_TSCONFIG): string {
+  return resolve(root, configured);
+}
 
 /**
  * Resolve the full project environment.

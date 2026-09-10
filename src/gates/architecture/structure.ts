@@ -25,6 +25,7 @@ import { resolve } from "node:path";
 import { parsedSources, resolveTypeScript } from "../../analysis/sourceFile.ts";
 import type { ParsedSource, TypeScriptApi } from "../../analysis/sourceFile.ts";
 import type { Violation } from "../../engine/models.ts";
+import { projectTsconfig } from "../../environment/project.ts";
 import { matchesAny } from "../../util/globs.ts";
 import { loadAliases } from "./aliases.ts";
 import type { ResolveContext } from "./resolve.ts";
@@ -45,10 +46,11 @@ export function checkStructure(
   maxFileLines: number,
   maxPublicSymbols: number,
   exclude: readonly string[] = [],
+  tsconfig?: string,
 ): readonly Violation[] {
   const absoluteRoot = resolve(root);
   const api = resolveTypeScript(absoluteRoot).api;
-  const context = starContext(absoluteRoot, api);
+  const context = starContext(absoluteRoot, api, projectTsconfig(absoluteRoot, tsconfig));
   const violations: Violation[] = [];
 
   for (const source of parsedSources(absoluteRoot, sourcePaths, { api })) {
@@ -85,14 +87,14 @@ export function checkStructure(
  * `resolveTarget` only for the specifier-to-file arithmetic, which is why the
  * `paths`/`baseUrl` table is loaded: a barrel written as
  * `export * from "@/util"` must be countable too. One context per run, so its
- * parse cache spans the whole walk.
+ * parse cache spans the whole walk. The table is the SELECTED tsconfig's.
  */
-function starContext(root: string, api: TypeScriptApi): ResolveContext {
+function starContext(root: string, api: TypeScriptApi, tsconfig: string): ResolveContext {
   return {
     root,
     api,
     layers: [],
-    aliases: loadAliases(root, api),
+    aliases: loadAliases(tsconfig, api),
     parsed: new Map(),
     seen: new Set(),
   };
