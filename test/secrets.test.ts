@@ -35,7 +35,15 @@ import {
   type SecretsOutcome,
 } from "../src/gates/secrets.ts";
 import * as gitleaks from "../src/gates/secrets/gitleaks.ts";
-import { isRecord, MAX_TEXT_LENGTH, plainText } from "../src/gates/secrets/types.ts";
+import {
+  broken as brokenOutcome,
+  isRecord,
+  MAX_TEXT_LENGTH,
+  own as ownProperty,
+  plainText,
+  scanned as scannedOutcome,
+  skipped as skippedOutcome,
+} from "../src/gates/secrets/types.ts";
 import * as secretlint from "../src/gates/secrets/secretlint.ts";
 
 /**
@@ -556,5 +564,53 @@ describe("plainText / isRecord", () => {
     assert.equal(isRecord(null), false);
     assert.equal(isRecord("{}"), false);
     assert.equal(isRecord(undefined), false);
+  });
+});
+
+/**
+ * The three outcome constructors, and the own-property reader every parsed
+ * scanner report goes through. The arms are what `catalog/results.ts` maps
+ * onto pass / skip / error, so their shapes are the contract.
+ */
+describe("secrets outcome constructors", () => {
+  it("scanned carries the scanner, a copy of the argv and the findings", () => {
+    const argv = ["gitleaks", "detect"];
+    const outcome = scannedOutcome("gitleaks", argv, []);
+    assert.deepEqual(outcome, {
+      ok: true,
+      scanner: "gitleaks",
+      command: ["gitleaks", "detect"],
+      violations: [],
+    });
+    argv.push("--no-banner");
+    assert.equal(outcome.ok && outcome.command.length, 2, "the argv is copied, not shared");
+  });
+
+  it("skipped is a visible skip that keeps its reason", () => {
+    assert.deepEqual(skippedOutcome("disabled by policy"), {
+      ok: false,
+      skipped: true,
+      reason: "disabled by policy",
+    });
+  });
+
+  it("broken omits the command key when nothing was spawned", () => {
+    assert.deepEqual(brokenOutcome(undefined, "gitleaks crashed"), {
+      ok: false,
+      skipped: false,
+      message: "gitleaks crashed",
+    });
+    assert.deepEqual(brokenOutcome(["gitleaks", "detect"], "exit 2"), {
+      ok: false,
+      skipped: false,
+      command: ["gitleaks", "detect"],
+      message: "exit 2",
+    });
+  });
+
+  it("own reads own properties of a report record only", () => {
+    assert.equal(ownProperty({ RuleID: "aws-key" }, "RuleID"), "aws-key");
+    assert.equal(ownProperty({}, "constructor"), undefined);
+    assert.equal(ownProperty({}, "toString"), undefined);
   });
 });

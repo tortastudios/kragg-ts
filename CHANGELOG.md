@@ -20,6 +20,39 @@ a previously green run red — see [Gate additions](#gate-additions) below.
 
 ### Added
 
+- **TOR-1373** — the evidence linking a critical change to a test is a
+  checker-bound reference, and the limits of the static signals are stated.
+  `critical-tests` passed on ANY changed file under a test path, so a
+  whitespace edit in an unrelated `test/other.test.ts` vouched for a rewrite
+  of the authorization entry point; `test-quality`'s `critical-untested` was
+  a substring search over the test text, satisfied by `// TODO
+  verifyPassword`, the title `it("verifyPassword works")`, or an unrelated
+  `send` on another class. Both gates now resolve test code through the run's
+  one shared `ts.Program` (`src/gates/testDepth/references.ts`): a reference
+  is an identifier in a test-tree file, outside any `it.skip`/`test.todo`/
+  `describe.skip`, whose symbol — imports, `as` aliases, `export ... from`
+  re-exports and shared helpers followed by `getAliasedSymbol` — declares a
+  function the criticality graph registered, named by the same registration
+  pass that named the sidecar's nodes. No direct call is required:
+  `expectAuth(verifyPassword)`, a `describe`-level fixture and a helper in
+  `test/helpers.ts` all count, so valid indirect tests are not rejected.
+  `critical-tests` accepts a changed test only when it (or a test-tree module
+  it imports) binds the changed function **or its module**; otherwise the
+  violation says which changed test files were examined and why each did not
+  qualify (no bound reference, bound only inside a skipped test, or outside
+  the `tsconfig.json` program). `test-quality` reports a function whose only
+  references sit in skipped tests as such, names test files the program does
+  not contain rather than text-matching them, and its fix hint no longer
+  demands a direct call. A program that will not build makes either gate
+  `error: true` (exit 3), never a pass; the program is loaded only once there
+  is something to bind. README, `KNOWN_LIMITATIONS.md` and the `spec`
+  property section now state what a bound reference or an assertion-shaped
+  call proves — that a test *exercises* the function — and does not (any
+  behavioural coverage), and that `spec`'s property summary is a word-bounded
+  name occurrence in a property test's text, not a call. **No wire key,
+  code or threshold changes.** The stricter rule found 16 critical helpers in
+  this repository that no test bound (their names had matched English words
+  in test titles); each gained a direct unit test.
 - **TOR-1377** — a reviewed adoption path for legacy debt, and suppression
   accountability. `kragg.json#baseline` names a git-tracked baseline file
   (conventionally `.kragg/baseline.json`; `null`/absent means none) that only

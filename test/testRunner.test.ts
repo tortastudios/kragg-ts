@@ -42,6 +42,7 @@ import { fromReport } from "../src/catalog/results.ts";
 import { buildReport, EXIT_ENVIRONMENT, reportExitCode } from "../src/engine/report.ts";
 import {
   relativeToRoot as reportRelativeToRoot,
+  condense,
   stackLocation,
 } from "../src/adapters/support/testReport.ts";
 import { resolveProjectEnvironment } from "../src/environment/project.ts";
@@ -955,4 +956,13 @@ test("relativeToRoot shortens a path inside the root and leaves the rest alone",
   // Outside the root: an absolute path reads better than a `../../..` chain.
   assert.equal(reportRelativeToRoot("/elsewhere/a.test.ts", root), "/elsewhere/a.test.ts");
   assert.equal(reportRelativeToRoot(root, root), root);
+});
+
+test("condense keeps the first non-blank line, trimmed and capped", () => {
+  assert.equal(
+    condense("\n\n  Expected 1 to be 2  \n    at fn (test/x.test.ts:3:9)"),
+    "Expected 1 to be 2",
+  );
+  assert.equal(condense("x".repeat(200), 10), `${"x".repeat(9)}…`);
+  assert.equal(condense("   \n  "), "");
 });

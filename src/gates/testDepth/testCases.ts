@@ -240,6 +240,24 @@ function literalText(
   return quoted && text.length >= 2 ? text.slice(1, -1) : null;
 }
 
+/**
+ * Whether a call is a test or a suite that does not run — `it.skip`,
+ * `test.todo`, `describe.skip`, or the node:test options-object forms.
+ *
+ * Everything inside such a call is a placeholder rather than evidence, which
+ * is what `references.ts` needs to know about a name it finds there.
+ */
+export function isSkippedTestCall(
+  node: bundledTs.CallExpression,
+  api: TypeScriptApi,
+): boolean {
+  const chain = calleeChain(node.expression, api);
+  if (chain === null || !(TEST_HEADS.has(chain.head) || SUITE_HEADS.has(chain.head))) {
+    return false;
+  }
+  return isSkipCall(chain, node, api);
+}
+
 /** A `.skip`/`.todo` modifier, or an options object asking for the same. */
 function isSkipCall(
   chain: CalleeChain,

@@ -101,7 +101,7 @@ failed task, not a judgement call.
 
 ## Project Map
 
-178 modules under `src/`, listed top-down in the order `kragg.json`'s
+179 modules under `src/`, listed top-down in the order `kragg.json`'s
 `layers` declares — a module may import its own layer or a lower one, never a
 higher one, and the `boundaries` gate enforces that on this repo.
 
@@ -148,7 +148,8 @@ higher one, and the `boundaries` gate enforces that on this repo.
   (scan, resolver, symbols, rules, declarationPath), `halstead/` (walk,
   partition, metrics, blocks, report), `nullableDefault/`, `secretDefault/`,
   `secrets/` (gitleaks, secretlint, lookup), `testDepth/` (shared by the
-  three test-depth gates), `typingStrictness/` (config, hatches, included,
+  three test-depth gates; `references.ts` binds test code to critical
+  functions through the checker), `typingStrictness/` (config, hatches, included,
   chain, codes). Single-file gates: `criticalCoverage.ts`, `criticalTests.ts`,
   `testQuality.ts`, `typeComplexity.ts`. Each directory has a same-named `.ts`
   beside it that is the public entry point and re-exports the parts.
