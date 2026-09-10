@@ -92,6 +92,78 @@ jobs:
       - name: Test
         run: pnpm run test
 
+  # ---------------------------------------------------------------------
+  # THE RELEASE GATE. Two questions `check` does not ask.
+  #
+  # `check` builds and runs the unit suite against `src/`. That suite was
+  # 1,090 tests green while the engine, the adapters, the policy and the CLI
+  # were reporting false green between them — every one of those defects
+  # lived at a seam a unit test does not cross. So this job asks, of the
+  # BUILT artifact and nothing else:
+  #
+  #   1. Do the reviewed regressions still hold END TO END? One real fixture
+  #      project per closed defect, driven through `dist/cli.js`, asserting
+  #      exit status, JSON payload fields and files on disk — never a
+  #      snapshot. See `test/regressions.test.ts`.
+  #   2. Does kragg's own `check --all` produce TRUTHFUL evidence? Not
+  #      "did the summary say green": every gate that did not run is
+  #      enumerated with its reason, and each one must match a reviewed
+  #      entry in `scripts/selfcheck/expectations.ts`. A gate that could not
+  #      run fails the build; a NEW skip fails the build. See
+  #      `scripts/selfcheck.ts`.
+  #
+  # Separate from `check` for the same reason `conformance` is: a red release
+  # gate beside a green `check` is a meaningful state — it says the shipped
+  # binary behaves differently from the sources, or that a check quietly
+  # stopped happening — and merging the jobs would hide it.
+  #
+  # Both steps run exactly the commands a maintainer runs by hand:
+  #   pnpm run build && pnpm run regressions && pnpm run selfcheck
+  # ---------------------------------------------------------------------
+  release-gate:
+    name: end-to-end regressions / self-check evidence
+    runs-on: ubuntu-latest
+    timeout-minutes: 20
+
+    env:
+      npm_config_ignore_scripts: "true"
+
+    steps:
+      # EVERY `uses:` HERE IS PINNED TO A FULL COMMIT SHA, for the reasons
+      # spelled out at the top of the `check` job. Do not replace one with a
+      # tag.
+      - name: Checkout
+        uses: actions/checkout@fbc6f3992d24b796d5a048ff273f7fcc4a7b6c09 # v5.1.0
+        with:
+          persist-credentials: false
+
+      - name: Enable corepack
+        run: corepack enable
+
+      - name: Setup Node
+        uses: actions/setup-node@a0853c24544627f65ddf259abe73b1d18a591444 # v5.0.0
+        with:
+          node-version-file: .node-version
+          cache: pnpm
+
+      - name: Install dependencies
+        run: pnpm install --frozen-lockfile --ignore-scripts
+
+      # `dist/cli.js` is what both steps below exercise. Nothing here reads
+      # `src/` at run time; a release gate that tests the sources has never
+      # seen what ships.
+      - name: Build
+        run: pnpm run build
+
+      - name: End-to-end regressions against the built CLI
+        run: pnpm run regressions
+
+      # Prints every check that did not run, with its reason, whether it
+      # passes or fails. Do not replace this with `kragg check --all`: the
+      # summary line is exactly the evidence this job exists to reject.
+      - name: Full self-check evidence
+        run: pnpm run selfcheck
+
   # The executable half of docs/spec-conformance.md. This replaces the
   # `TODO(spec)` that stood here while `tortastudios/crag` had no `spec/`
   # directory: it grew one in release 0.9.0 (SPEC.md, a stdlib-only runner,

@@ -1,0 +1,16 @@
+{
+  "name": "fixture-init-existing-project",
+  "version": "0.1.0",
+  "private": true,
+  "main": "lib/index.js",
+  "kragg": {
+    "source_paths": ["lib"],
+    "test_paths": ["spec"],
+    "max_file_lines": 120,
+    "secret_scanner": "off",
+    "test_runner": "off",
+    "forbidden_calls": {
+      "node:child_process": "spawn through the approved runner"
+    }
+  }
+}

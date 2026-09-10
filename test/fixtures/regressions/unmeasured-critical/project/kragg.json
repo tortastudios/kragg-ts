@@ -1,0 +1,7 @@
+{
+  "source_paths": ["src"],
+  "test_paths": ["test/**/*.suite.js"],
+  "secret_scanner": "off",
+  "test_runner": "node",
+  "coverage_fail_under": 1
+}

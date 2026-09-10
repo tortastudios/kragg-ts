@@ -1,0 +1,6 @@
+{
+  "source_paths": ["src"],
+  "test_paths": ["tests"],
+  "secret_scanner": "off",
+  "test_runner": "node"
+}
