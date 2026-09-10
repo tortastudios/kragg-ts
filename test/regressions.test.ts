@@ -716,3 +716,57 @@ describe("TOR-1414: a compiler diagnostic is a finding, not a missing compiler",
     assert.equal(report.exitCode, 3);
   });
 });
+
+// ---------------------------------------------------------------------------
+// TOR-1419. The runner kragg drives can enforce coverage thresholds of its
+// own, on dimensions kragg does not compute. kragg read only the runner's
+// report — which is written BEFORE the runner checks its thresholds — and
+// reported a pass over a run the tool itself had already failed.
+//
+// The fixture asks `node --test` for its own `--test-coverage-lines=90` and
+// sets kragg's `coverage_fail_under` to 50, so the suite passes, kragg's own
+// floor is met, and the ONLY failing signal in the run is the runner's.
+// ---------------------------------------------------------------------------
+
+const runnerThreshold = scenario(async (): Promise<ReportView> => {
+  const root = await materialize({ fixture: "runner-native-threshold", typescript: true });
+  return reportOf(await runCli(root, ["check", "--no-journal", "--format", "json"]));
+});
+
+describe("TOR-1419: a runner-native coverage threshold is not absorbed into a pass", () => {
+  it("really ran the suite, and every test in it passed", async () => {
+    const report = await runnerThreshold();
+    const view = gate(report, "test-coverage");
+    assert.equal(ran(view), true, `test-coverage did not run: ${JSON.stringify(view)}`);
+    // The runner's verdict is a FINDING, not missing evidence: exit 1, not 3.
+    assert.equal(view.error, false);
+    assert.equal(view.passed, false);
+  });
+
+  it("reports the runner's own threshold under its own code, attributed to the runner", async () => {
+    const report = await runnerThreshold();
+    const view = gate(report, "test-coverage");
+    assert.deepEqual(violationCodes(view), ["runner-reported-failure"]);
+    const message = view.violations[0]?.message ?? "";
+    assert.match(message, /with all 2 tests passing/u);
+    assert.match(message, /runner's OWN configured coverage threshold/u);
+    assert.match(message, /not by kragg's line-coverage floor/u);
+    // What the runner itself computed, quoted rather than re-derived.
+    assert.match(message, /line coverage does not meet threshold of 90%/u);
+  });
+
+  it("keeps kragg's own floor a separate, unfired signal", async () => {
+    const report = await runnerThreshold();
+    // 50% was met, so `coverage-below-threshold` is absent — the two checks
+    // are never merged into one number.
+    assert.ok(!violationCodes(gate(report, "test-coverage")).includes("coverage-below-threshold"));
+    // And the coverage evidence still reached the gate that consumes it.
+    assert.equal(gate(report, "critical-coverage").skipped, false);
+  });
+
+  it("exits 1: the whole run fails, as the runner's own run does", async () => {
+    const report = await runnerThreshold();
+    assert.equal(report.exitCode, 1);
+    assert.equal(report.passed, false);
+  });
+});

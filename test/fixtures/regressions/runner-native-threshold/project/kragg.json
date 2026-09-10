@@ -1,0 +1,8 @@
+{
+  "source_paths": ["src"],
+  "test_paths": ["test/**/*.suite.js"],
+  "secret_scanner": "off",
+  "test_runner": "node",
+  "test_command": ["node", "--test-coverage-lines=90"],
+  "coverage_fail_under": 50
+}

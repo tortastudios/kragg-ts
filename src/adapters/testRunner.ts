@@ -58,6 +58,16 @@
  * own violation with its own code, and it can be reported alongside green
  * tests.
  *
+ * ── …AND WHY THE RUNNER'S OWN THRESHOLD IS STILL REPORTED ──────────────────
+ * Passing no threshold is not the same as there being none: `--coverage` leaves
+ * the project's own `vitest.config.ts` in force, so vitest checks its own
+ * `coverage.thresholds` over its own dimensions and signals a miss with that
+ * same exit code — while the json report, written first, still says `success:
+ * true`. Reading the report alone turned a failure the tool had already
+ * computed into a kragg pass. `runnerReportedFailure`
+ * (`support/testEvidence.ts`) reads it back off the exit code as a violation of
+ * its own, beside kragg's line-coverage floor and never merged into it.
+ *
  * THE NUMBER IS THE PROJECT'S, NOT THE REPORT'S. Every runner reports only
  * the files the run loaded, so a percentage over the report alone is a
  * percentage over whichever files happened to load. `projectTotals`
@@ -119,6 +129,7 @@ import {
   crashMessage,
   killedMessage,
   noTestsMessage,
+  runnerReportedFailure,
 } from "./support/testEvidence.ts";
 import { invocationNote, resolveInvocation, runnerMissing } from "./support/testInvocation.ts";
 import type { Invocation } from "./support/testInvocation.ts";
@@ -127,7 +138,7 @@ import type { Invocation } from "./support/testInvocation.ts";
 export const TEST_GATE = "test-coverage";
 
 /** `code` for the coverage threshold, distinct from any test failure. */
-export { COVERAGE_BELOW_THRESHOLD } from "./support/testEvidence.ts";
+export { COVERAGE_BELOW_THRESHOLD, RUNNER_REPORTED_FAILURE } from "./support/testEvidence.ts";
 
 /**
  * Everything one invocation of the suite needs.
@@ -284,7 +295,11 @@ async function runInto(
 
   const coverage = withCoverage ? readCoverage(runner, layout, options) : null;
   const published = coverage?.ok === true ? publishCoverage(layout, runner) : undefined;
-  return assemble({ invocation, command, report, coverage, published, options });
+  // The runner's own verdict, which its report does not carry: see
+  // `runnerReportedFailure`. kragg asked for no threshold, but the runner still
+  // read the project's own configuration and may have failed the run on it.
+  const runnerFailure = runnerReportedFailure(runner, result, report, coverage?.ok === true);
+  return assemble({ invocation, command, report, coverage, published, runnerFailure, options });
 }
 
 /** Parse whichever format the runner produced. `undefined` means unreadable. */
@@ -385,16 +400,28 @@ interface Assembly {
   readonly report: TestReport;
   readonly coverage: CoverageOutcome | null;
   readonly published: string | undefined;
+  /** The runner failed the run on a threshold of its own. Usually `undefined`. */
+  readonly runnerFailure: Violation | undefined;
   readonly options: TestRunnerOptions;
 }
 
-/** Combine test failures and coverage into one outcome. */
+/**
+ * Combine test failures, kragg's coverage floor and the runner's own verdict.
+ *
+ * The three stay SEPARATE VIOLATIONS with separate codes, in that order: a
+ * reader has to be able to tell "your tests fail" from "kragg's line-coverage
+ * floor was missed" from "the runner you drive failed its own thresholds",
+ * because the three need different work. The last one can only exist when the
+ * first two produced nothing (see `runnerReportedFailure`), so it is never
+ * pushed out of a capped list.
+ */
 function assemble(parts: Assembly): TestRunFindings {
   const { invocation, report, coverage, options } = parts;
   const coverageViolation = coverage?.ok === true ? coverage.violation : undefined;
   const violations = [
     ...report.violations,
     ...(coverageViolation === undefined ? [] : [coverageViolation]),
+    ...(parts.runnerFailure === undefined ? [] : [parts.runnerFailure]),
   ];
   // A coverage artifact kragg could not read is NOT a pass: the gate was asked
   // to enforce a floor and could not, which is the "reports green without

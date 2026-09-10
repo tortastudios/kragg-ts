@@ -34,9 +34,22 @@ import { testRunnerPatterns } from "../../util/testPaths.ts";
 import type { ProjectTotals } from "./coverage.ts";
 import type { TestRunnerName } from "./detect.ts";
 import type { Artifacts } from "./testCommands.ts";
+import type { TestReport } from "./testReport.ts";
 
 /** `code` for the coverage threshold, distinct from any test failure. */
 export const COVERAGE_BELOW_THRESHOLD = "coverage-below-threshold";
+
+/**
+ * `code` for a failure the RUNNER decided, which its own report does not carry.
+ *
+ * Deliberately its own code, never merged into `COVERAGE_BELOW_THRESHOLD`: one
+ * is kragg's line-coverage floor (`coverage_fail_under`, computed here from the
+ * coverage artifact) and the other is a verdict the tool being driven reached
+ * on its own configuration, over dimensions kragg does not compute. Reporting
+ * them as one number would say a single, ambiguous thing about two independent
+ * checks.
+ */
+export const RUNNER_REPORTED_FAILURE = "runner-reported-failure";
 
 /** How each runner is made to write its coverage artifact, for the error arm. */
 export const COVERAGE_ADVICE: Readonly<Record<TestRunnerName, string>> = {
@@ -67,6 +80,100 @@ export function belowThreshold(totals: ProjectTotals, failUnder: number): Violat
     code: COVERAGE_BELOW_THRESHOLD,
     fixHint: "run `kragg coverage` for the uncovered lines of the highest-fan-in functions",
   };
+}
+
+/** A line where a runner announces its own coverage-threshold verdict. */
+const THRESHOLD_LINE = /coverage.*threshold/iu;
+
+/** How many of the runner's own lines the violation quotes. */
+const THRESHOLD_PREVIEW = 4;
+
+/**
+ * The runner FAILED THE RUN for a reason its own report does not record.
+ *
+ * kragg passes no coverage threshold to any runner (see `testCommands.ts`), but
+ * it does not run the runner in a vacuum: `vitest run --coverage` still reads
+ * the project's own `vitest.config.ts`, so a `coverage.thresholds` block there
+ * is checked by vitest, on vitest's own dimensions, and signalled the only way
+ * vitest has — `process.exitCode = 1`. The json report is written BEFORE that
+ * check and still says `success: true`, so reading the report alone turns a
+ * genuine, already-computed failure into a kragg pass. That is precisely the
+ * signal this project must never swallow, so the exit code is consulted too.
+ *
+ * The trigger is STRUCTURAL, not textual: the runner's own report says the run
+ * passed, every test in it passed, a complete coverage artifact came back — and
+ * the process still exited non-zero. Nothing kragg asked for can produce that
+ * combination, so the verdict is the runner's own. The runner's threshold lines
+ * are quoted when it printed any, because that is where the dimension and the
+ * numbers are; a wording change in a future release costs the detail, never the
+ * signal.
+ *
+ * Scope is deliberately narrow, so a project with no runner-native thresholds
+ * behaves exactly as before:
+ *
+ *  - only when coverage was asked for AND a complete artifact was read. Without
+ *    `--coverage` no runner checks a coverage threshold, and an unreadable
+ *    artifact is already an ERROR with its own message;
+ *  - only when the runner's own report is a PASS with no violations parsed. A
+ *    failing suite, a suite that would not import and a run that matched no
+ *    files each exit non-zero already and are each reported as themselves;
+ *  - never when the report is empty of tests — that is the "discovered nothing"
+ *    error, and it must not be re-labelled as a threshold miss.
+ */
+export function runnerReportedFailure(
+  runner: TestRunnerName,
+  result: CompletedCommand,
+  report: TestReport,
+  coverageComplete: boolean,
+): Violation | undefined {
+  if (!coverageComplete || result.returncode === 0) {
+    return undefined;
+  }
+  if (!report.success || report.violations.length > 0 || report.summary.total === 0) {
+    return undefined;
+  }
+  const quoted = thresholdLines(result);
+  const ran = `${runner} exited ${result.returncode} with all ${report.summary.total} tests passing`;
+  return {
+    message:
+      quoted === undefined
+        ? `${ran} and a complete coverage report, so the run was failed by the runner ` +
+          "itself. kragg passes no threshold to any runner and enforces only its own " +
+          "line-coverage floor (`coverage_fail_under`), which this run met — the usual " +
+          "cause is a coverage threshold in the runner's own configuration, on a " +
+          "dimension kragg does not compute."
+        : `${ran}: the run was failed by the runner's OWN configured coverage threshold, ` +
+          `not by kragg's line-coverage floor. ${runner} reported: ${quoted}`,
+    code: RUNNER_REPORTED_FAILURE,
+    fixHint:
+      "this is the runner's own threshold on its own coverage dimensions, not " +
+      "`coverage_fail_under` — run the project's own coverage command (or this gate's " +
+      `command: ${result.command.join(" ")}) to see which dimension failed`,
+  };
+}
+
+/**
+ * The runner's own threshold lines, on one line, or `undefined` for none.
+ *
+ * stderr first — vitest prints `ERROR: Coverage for branches (60%) does not
+ * meet global threshold (80%)` there — then stdout, where `node --test` puts
+ * its `# Error: 66.67% line coverage does not meet threshold of 90%.` as a TAP
+ * diagnostic. Matching on "coverage … threshold" rather than on one tool's
+ * exact sentence covers both without kragg having to know which ran, and a
+ * leading TAP `#` is dropped so the quote reads as the sentence it is. This is
+ * DETAIL attached to a signal that already stands on the exit code: a wording
+ * change in some future release loses the numbers, never the finding.
+ */
+function thresholdLines(result: CompletedCommand): string | undefined {
+  const seen = new Set<string>();
+  for (const line of `${result.stderr}\n${result.stdout}`.split("\n")) {
+    const trimmed = line.trim().replace(/^#\s*/u, "");
+    if (trimmed !== "" && THRESHOLD_LINE.test(trimmed)) {
+      seen.add(trimmed);
+    }
+  }
+  const lines = [...seen].slice(0, THRESHOLD_PREVIEW);
+  return lines.length === 0 ? undefined : lines.map((line) => `"${line}"`).join("; ");
 }
 
 /** The files in the denominator that no test loaded, by name. */

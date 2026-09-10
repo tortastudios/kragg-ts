@@ -328,7 +328,9 @@ mostly-deterministic signals:
   `criticality.json` spells a name, so `Reader.close` and `Writer.close` each
   answer for their own lines. This is **line** coverage: `if (broken) fix();`
   on one line counts as covered once the `if` ran; no branch verdict is
-  implied anywhere.
+  implied anywhere — but a branch threshold the RUNNER enforces from its own
+  config still fails the run, reported as the runner's (see "The runner's own
+  coverage thresholds are reported, not absorbed" below).
   Both gates believe only **this invocation's** evidence: the runner writes
   into a private `.kragg/runs/` directory that did not exist before the run,
   so a runner that crashes, times out or leaves a partial report is an error
@@ -628,6 +630,21 @@ the runner whose report format it produces. Whatever ran, the gate's output
 states the argv and where it came from, so kragg's reconstruction is never
 mistaken for the project's own script.
 
+**The runner's own coverage thresholds are reported, not absorbed.** kragg
+passes no threshold to any runner and enforces only its own **line**-coverage
+floor — but `--coverage` leaves the project's own configuration in force, so
+`coverage.thresholds` in a `vitest.config.ts` (or `--test-coverage-lines` in a
+`test_command`) is still checked by the runner, over dimensions kragg does not
+compute, and signalled with the same exit code a failing test uses. When the
+runner's own report says every test passed, a complete coverage artifact came
+back, and the process still exited non-zero, kragg reports that as its own
+violation — `runner-reported-failure`, quoting the runner's own threshold line
+— and `kragg check` fails with it. It is deliberately a **second** finding
+beside `coverage-below-threshold` rather than the same one: kragg's floor and
+the runner's thresholds are independent checks, and merging them would produce
+one ambiguous number. A project with no runner-native thresholds sees no
+change: the runner exits 0 and nothing is reported.
+
 **A run that discovered no tests is an error, not a pass.** Zero failures out
 of zero tests is arithmetic, not evidence, so `test-coverage` reports
 `error: true` and exit 3, naming the argv, the patterns it searched and the
@@ -701,6 +718,7 @@ Deliberate, and documented at each site:
 | a zero-test run | `error: true` and exit 3, naming the argv and the settings that change it: a completed run that discovered nothing verifies nothing. Python passes `--cov-fail-under` to pytest and reads its exit code, so the case is not distinguished as its own outcome. |
 | test evidence | Python reads `.kragg/coverage.json` from a fixed path. kragg-ts gives every invocation its own `.kragg/runs/` directory, refuses anything incomplete, and hands `critical-coverage` the coverage in memory. Same gates, same wire format; only the provenance rule differs. |
 | unmeasured critical functions | Python's `critical-coverage` passes a critical function the report never mentions (`measured=False`), reasoning that a missing entry is a measurement-key mismatch. kragg-ts hands the gate the document its own run wrote, so a missing file was never loaded: the function fails under the additive code `critical-unmeasured`, with the cause in the message. |
+| the runner's own thresholds | Python passes `--cov-fail-under` to pytest, so pytest's exit code IS kragg's floor and there is no second threshold to lose. The JavaScript runners are given no threshold but still read the project's own config, so kragg-ts reports a non-zero exit over a passing report with complete coverage as the additive code `runner-reported-failure`, beside `coverage-below-threshold` and never merged with it. |
 | coverage denominator | Python's `pytest --cov=src` instruments every file under `src`, loaded or not. The JavaScript runners report only what the run loaded, so kragg-ts reconciles the number against `source_paths` itself: unloaded files count as uncovered by their statement lines, and files outside the source paths do not count. |
 | `// kragg: ignore` | Requires a reason: `// kragg: ignore -- <reason>`. A bare marker is not honoured and is reported on the finding it tried to hide. Python's `# kragg: ignore` needs none. |
 | legacy-debt baseline | `kragg.json#baseline` plus `check --update-baseline` records accepted findings of the metric, structure and test-quality gates; they become `baselined:` advisories and new findings still fail. Python has no equivalent; no wire key is added. `brief` gains `## Suppressions` and `## Baseline`. |
