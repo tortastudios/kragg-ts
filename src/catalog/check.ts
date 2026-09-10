@@ -265,6 +265,7 @@ function slowGates(ctx: CatalogContext): readonly GateSpec[] {
           coverageReportPath: policy.coverageReportPath,
           maxViolations: policy.maxViolationsPerGate,
           testPaths: policy.testPaths,
+          testCommand: policy.testCommand,
           sourcePaths: policy.sourcePaths,
           api: ctx.api,
         });

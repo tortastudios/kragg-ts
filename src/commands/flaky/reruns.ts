@@ -235,6 +235,7 @@ export async function runReruns(options: RerunOptions): Promise<RerunOutcome> {
         coverageFailUnder: 0,
         maxViolations: 0,
         testPaths: policy.testPaths,
+        testCommand: policy.testCommand,
         sourcePaths: policy.sourcePaths,
       }),
     );
@@ -272,17 +273,20 @@ function usableSample(outcome: TestRunOutcome): Sample {
   if (!outcome.ok) {
     return { ok: false, reason: `did not run the suite (${outcome.kind}):\n${outcome.message}` };
   }
-  if (outcome.error) {
-    return { ok: false, reason: `ran but left incomplete evidence:\n${outcome.output}` };
-  }
+  // Zero discovery is checked BEFORE the general `error` arm, which it now
+  // also sets: the adapter's own message names the argv, the patterns it
+  // searched and the three settings that change them, and that is strictly
+  // more useful than "incomplete evidence".
   if (outcome.summary.total === 0) {
     return {
       ok: false,
       reason:
-        `discovered no tests at all (${outcome.runner}, chosen by ${outcome.source}), ` +
-        `so it is not a sample of anything:\n  ${outcome.command.join(" ")}\n` +
-        "Check `test_paths` and `test_runner` in kragg.json.",
+        `discovered no tests at all (${outcome.runner}, from ${outcome.source}), ` +
+        `so it is not a sample of anything:\n${outcome.output}`,
     };
+  }
+  if (outcome.error) {
+    return { ok: false, reason: `ran but left incomplete evidence:\n${outcome.output}` };
   }
   if (!outcome.passed && outcome.violations.length === 0) {
     return {

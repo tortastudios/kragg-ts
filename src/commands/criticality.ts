@@ -56,6 +56,7 @@ import {
 } from "../gates/criticality.ts";
 import type { FunctionProfile } from "../gates/criticality.ts";
 import { loadPolicy, type CriticalDeclarations, type KraggPolicy } from "../policy/policy.ts";
+import { testScanDirectories } from "../util/testPaths.ts";
 
 export interface CriticalityCommandOptions {
   readonly root: string;
@@ -295,5 +296,7 @@ function errorText(error: unknown): string {
  * too many.
  */
 function scanPaths(policy: KraggPolicy): readonly string[] {
-  return [...policy.sourcePaths, ...policy.testPaths];
+  // A `test_paths` entry may be a pattern; the stamp is over DIRECTORIES, so
+  // it is the pattern's literal base that is walked (`util/testPaths.ts`).
+  return [...policy.sourcePaths, ...testScanDirectories(policy.testPaths)];
 }

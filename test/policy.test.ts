@@ -510,6 +510,7 @@ describe("policyAsDict", () => {
       "secret_baseline",
       "audit_severity",
       "coverage_report_path",
+      "test_command",
       "baseline",
     ]);
   });

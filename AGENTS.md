@@ -102,7 +102,7 @@ failed task, not a judgement call.
 
 ## Project Map
 
-180 modules under `src/`, listed top-down in the order `kragg.json`'s
+185 modules under `src/`, listed top-down in the order `kragg.json`'s
 `layers` declares — a module may import its own layer or a lower one, never a
 higher one, and the `boundaries` gate enforces that on this repo.
 
@@ -164,8 +164,10 @@ higher one, and the `boundaries` gate enforces that on this repo.
   oxlint/biome/eslint JSON parsers, `support/` the per-package-manager audit
   parsers, the per-runner test reports, lcov/istanbul readers, the
   `Unavailable` outcome kinds, the `runCommand` helpers, the per-invocation
-  artifact directory under `.kragg/runs/` (`testCommands.ts`) and the
-  messages for evidence the test gate refuses (`testEvidence.ts`).
+  artifact directory under `.kragg/runs/` (`testCommands.ts`), WHICH command
+  runs the suite and where it came from (`testInvocation.ts` — `test_command`
+  or detection, and the provenance sentence that says which) and the messages
+  for evidence the test gate refuses (`testEvidence.ts`).
 - `src/scaffold/` — `kragg new` / `init` / `gen module`: `project.ts` (the
   engine), `initPlan.ts` (what `init` would change, decided before anything is
   written, so `--dry-run` and the real run cannot disagree), `kinds.ts`,
@@ -188,12 +190,18 @@ higher one, and the `boundaries` gate enforces that on this repo.
   failed", which decides exit 3 vs. exit 1).
 - `src/git/changes.ts` — changed-file detection for `--changed` / `--since`.
 - `src/policy/` — `policy.ts` loads `kragg.json`, then `package.json#kragg`,
-  then defaults; `readers.ts` holds the narrowing readers it is built from;
-  `baseline.ts` is the reviewed legacy-debt baseline `kragg.json#baseline`
-  names — which gates may be recorded (and which never), the line-fingerprint
-  identity, and the apply/record/stale logic `check`, the hook and `brief` use.
-- `src/util/` — `globs.ts`, and `suppress.ts` for
-  `// kragg: ignore -- <reason>` (a bare marker is not honoured).
+  then defaults; `readers.ts` holds the narrowing readers it is built from,
+  `names.ts` the "did you mean" suggestion they and
+  `gates/criticality/declared.ts` share, and `serialize.ts` the `policy show`
+  key order that is a contract with Python; `baseline.ts` is the reviewed
+  legacy-debt baseline `kragg.json#baseline` names — which gates may be
+  recorded (and which never), the line-fingerprint identity, and the
+  apply/record/stale logic `check`, the hook and `brief` use.
+- `src/util/` — `globs.ts`, `suppress.ts` for
+  `// kragg: ignore -- <reason>` (a bare marker is not honoured), and
+  `testPaths.ts`, the one answer to what `test_paths` selects: the patterns the
+  runner discovers with, the directories a walk starts from, and whether one
+  file belongs to the suite.
 - `src/engine/` — the bottom layer, importable by everything:
   - `models.ts` — `Violation`, `GateResult`, `CompletedCommand`,
     `ProjectContext` as plain interfaces.

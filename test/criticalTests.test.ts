@@ -318,3 +318,51 @@ describe("critical-tests: when it cannot run", () => {
     );
   });
 });
+
+describe("critical-tests: `test_paths` may name a pattern, and it is honoured", () => {
+  /** The gate, run with a pattern entry instead of a directory. */
+  async function violationsUnder(
+    root: string,
+    testPaths: readonly string[],
+  ): Promise<readonly Violation[]> {
+    writeStamp(root, ["src", "test", "tests"]);
+    const outcome = await checkCriticalTests({
+      root,
+      sourcePaths: ["src"],
+      testPaths,
+      api: ts,
+    });
+    assert.equal(outcome.ok, true);
+    assert.equal(outcome.ok && outcome.skipped, false);
+    return outcome.ok && !outcome.skipped ? outcome.violations : [];
+  }
+
+  it("counts a file the pattern selects, even when its name is not `*.test.ts`", async (t) => {
+    if (!gitAvailable) {
+      t.skip("git is not available");
+      return;
+    }
+    // `src/__tests__/client.ts` matches no naming convention, so the ONLY
+    // reason it is a test is that `test_paths` says so. A pattern entry that
+    // was silently read as a directory would make this a false failure.
+    const root = await repo({ "src/__tests__/client.ts": "it('sends', () => {});\n" });
+    write(root, "src/client.ts", `${CLIENT}\n// edited\n`);
+    write(root, "src/__tests__/client.ts", "it('sends again', () => {});\n");
+    assert.deepEqual(await violationsUnder(root, ["src/__tests__/*.ts"]), []);
+  });
+
+  it("does not let the pattern's directory turn every source edit into a test change", async (t) => {
+    if (!gitAvailable) {
+      t.skip("git is not available");
+      return;
+    }
+    // The walk `src/__tests__/*.ts` implies starts at `src`, so a rule that
+    // used the directory instead of the pattern would treat `src/client.ts`
+    // itself as a test change and the gate would never fire again.
+    const root = await repo({ "src/__tests__/client.ts": "it('sends', () => {});\n" });
+    write(root, "src/client.ts", `${CLIENT}\n// edited\n`);
+    const violations = await violationsUnder(root, ["src/__tests__/*.ts"]);
+    assert.equal(violations.length, 1);
+    assert.equal(violations[0]?.file, "src/client.ts");
+  });
+});

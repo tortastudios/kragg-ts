@@ -85,6 +85,19 @@ export interface RunnerDetection {
    * which would send someone to install a runner they already have.
    */
   readonly unsupported?: string | undefined;
+  /**
+   * The `package.json#scripts.test` text, verbatim, when that is what decided.
+   *
+   * Carried so the report can print it NEXT TO the argv kragg built, because
+   * the two are not the same command and reading detection as if they were is
+   * the mistake this field exists to prevent: a script of
+   * `node --import tsx --test "src/**\/*.test.ts"` tells kragg "the runner is
+   * node" and nothing else — not the loader, not the setup file, not the file
+   * selection. kragg re-derives all of that from policy, and a reader has to
+   * be able to see the difference. `test_command` is how a project stops
+   * kragg re-deriving it.
+   */
+  readonly script?: string | undefined;
 }
 
 /** One recognised runner spelling, and the runner it names. */
@@ -170,13 +183,14 @@ function detectFromScript(manifest: ReturnType<typeof readJsonFile>): RunnerDete
   const best = earliestMatch(script, SCRIPT_TOKENS);
   const unsupported = earliestMatch(script, UNSUPPORTED_TOKENS);
   if (best !== undefined && (unsupported === undefined || best.index <= unsupported.index)) {
-    return { runner: best.value, source: "package.json#scripts.test" };
+    return { runner: best.value, source: "package.json#scripts.test", script };
   }
   if (unsupported !== undefined) {
     return {
       runner: undefined,
       source: "package.json#scripts.test",
       unsupported: unsupported.value,
+      script,
     };
   }
   return undefined;

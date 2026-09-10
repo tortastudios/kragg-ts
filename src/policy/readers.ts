@@ -25,6 +25,7 @@
 
 import { readFileSync } from "node:fs";
 
+import { nearestName } from "./names.ts";
 import type { CriticalDeclaration, CriticalDeclarations, ForbiddenCall } from "./policy.ts";
 
 /** A parsed JSON object. Values are `unknown` until narrowed. */
@@ -257,6 +258,45 @@ export function getStringList(
 }
 
 /**
+ * Read an ARGV ARRAY: one command-line element per item, never a shell string.
+ *
+ * Deliberately NOT {@link getStringList}, which accepts a bare string as a
+ * one-element list. That convenience is right for a list of paths and
+ * catastrophic here: `test_command: "node --import tsx --test"` would become
+ * the single program name `"node --import tsx --test"`, and kragg spawns with
+ * `shell: false` (`engine/runner.ts`), so nothing would ever split it. A
+ * string is rejected by name, with the argv form in the message, because the
+ * alternative — splitting it ourselves — would be reimplementing a shell
+ * lexer, quoting rules and all, in the one place this codebase has promised
+ * never to have one. `[]` is the honoured empty: no explicit command.
+ */
+export function getArgv(
+  source: Source,
+  key: string,
+  fallback: readonly string[],
+): readonly string[] {
+  const value = take(source, key);
+  if (value === undefined) {
+    return fallback;
+  }
+  const expected =
+    "a list of strings, one command-line argument per element " +
+    '(e.g. ["node", "--import", "tsx", "--test"]) — never a single shell ' +
+    "string, because kragg spawns without a shell and would look for a " +
+    "program with that whole name";
+  if (!Array.isArray(value)) {
+    return reject(source, key, expected, value);
+  }
+  const argv = value.map((item, index): string =>
+    typeof item === "string" ? item : reject(source, `${key}[${index}]`, "a string", item),
+  );
+  if (argv.length > 0 && argv[0]?.trim() === "") {
+    return reject(source, `${key}[0]`, "the program to run, not an empty string", argv[0]);
+  }
+  return argv;
+}
+
+/**
  * Read `[entry, hint]` pairs from an object, or a bare list of entries.
  *
  * FAIL CLOSED, and this is the single most important behaviour in the file.
@@ -403,61 +443,4 @@ export function rejectUnknownKeys(source: Source, extra: readonly string[]): voi
   if (problems.length > 0) {
     throw new PolicyError(problems.join("; "));
   }
-}
-
-/**
- * The closest known name, or `undefined` when nothing is close enough to be
- * obvious.
- *
- * Shared with `gates/criticality/declared.ts`, which asks the same question
- * about a different vocabulary: a `critical_functions` entry that names no
- * function in the analysed program is the same typo in a different place, and
- * a reader should get the same "did you mean" out of both.
- *
- * `maxDistance` is what that second vocabulary needs. A config key is a dozen
- * characters, so three edits is already a different word; a qualified function
- * name is thirty, and renaming `verifyPassword` to `verifyPasswordHash` is
- * four edits away from a name that is obviously the same function. The
- * proportional guard below (`bestDistance * 2 < key.length`) is what keeps a
- * larger budget from producing nonsense, and it applies either way.
- */
-export function nearestName(
-  key: string,
-  known: readonly string[],
-  maxDistance = 3,
-): string | undefined {
-  const flat = (name: string): string => name.toLowerCase().replaceAll(/[-_]/gu, "");
-  const sameLetters = known.find((candidate) => flat(candidate) === flat(key));
-  if (sameLetters !== undefined) {
-    return sameLetters;
-  }
-  let best: string | undefined;
-  let bestDistance = Number.POSITIVE_INFINITY;
-  for (const candidate of known) {
-    const distance = editDistance(key, candidate);
-    if (distance < bestDistance) {
-      best = candidate;
-      bestDistance = distance;
-    }
-  }
-  return bestDistance <= maxDistance && bestDistance * 2 < key.length ? best : undefined;
-}
-
-/** Levenshtein distance; the inputs are short config keys, so O(n·m) is fine. */
-function editDistance(left: string, right: string): number {
-  let row = Array.from({ length: right.length + 1 }, (_, index) => index);
-  for (const [i, char] of [...left].entries()) {
-    row = nextRow(row, i + 1, char, right);
-  }
-  return row[right.length] ?? 0;
-}
-
-/** One row of the Levenshtein table: the distances after consuming `char`. */
-function nextRow(row: readonly number[], first: number, char: string, right: string): number[] {
-  const next = [first];
-  for (const [j, other] of [...right].entries()) {
-    const substitution = (row[j] ?? 0) + (char === other ? 0 : 1);
-    next.push(Math.min((row[j + 1] ?? 0) + 1, (next[j] ?? 0) + 1, substitution));
-  }
-  return next;
 }

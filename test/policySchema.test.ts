@@ -173,6 +173,19 @@ describe("kragg.schema.json mirrors the loader", () => {
         assert.equal(shown(key, null), null);
         rejects(key, 1, new RegExp(`#${key} must be a string or null`, "u"));
       });
+    } else if (
+      property["type"] === "array" &&
+      JSON.stringify(property["items"]) === '{"type":"string"}'
+    ) {
+      it(`${key}: the loader reads an argv array, never a shell string`, () => {
+        assert.deepEqual(shown(key, []), []);
+        assert.deepEqual(shown(key, ["node", "--import", "tsx"]), ["node", "--import", "tsx"]);
+        // The whole point of the type: kragg spawns with `shell: false`, so a
+        // string would name one program with spaces in it, not a command.
+        rejects(key, "node --import tsx", new RegExp(`#${key} must be a list of strings`, "u"));
+        rejects(key, ["node", 1], new RegExp(`#${key}\\[1\\] must be a string`, "u"));
+        rejects(key, { run: "node" }, new RegExp(`#${key} must be a list of strings`, "u"));
+      });
     } else if (property["type"] === "string") {
       it(`${key}: the loader reads a string`, () => {
         assert.equal(shown(key, "distinctive"), "distinctive");

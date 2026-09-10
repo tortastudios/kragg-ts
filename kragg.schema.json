@@ -101,6 +101,11 @@
       "enum": ["auto", "vitest", "node", "bun", "off"],
       "description": "Which test runner the coverage gate drives. Default: \"auto\"."
     },
+    "test_command": {
+      "type": "array",
+      "items": { "type": "string" },
+      "description": "The exact argv that runs the suite, without file patterns — e.g. [\"node\", \"--import\", \"tsx\", \"--test\"]. One command-line argument per element; a single shell string is rejected, because kragg spawns without a shell. kragg appends its own reporter and coverage flags and the test_paths patterns. Element 0 is resolved from the project's node_modules/.bin (or is \"node\"/\"bun\" as runtimes), never from PATH; when it is not vitest/node/bun, test_runner must name the runner whose report format it produces. Empty means kragg infers the runner and builds the argv itself. Default: []."
+    },
     "secret_scanner": {
       "enum": ["auto", "gitleaks", "secretlint", "off"],
       "description": "Which secret scanner the detect-secrets gate drives. \"auto\" detects one and skips visibly if there is none; naming one makes it required, so an unavailable or broken scanner is an error (exit 3). Default: \"auto\"."

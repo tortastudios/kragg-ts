@@ -71,6 +71,7 @@ import {
   type ChangedPaths,
 } from "../git/changes.ts";
 import type { KraggPolicy } from "../policy/policy.ts";
+import { testScanDirectories } from "../util/testPaths.ts";
 
 /** What one invocation is scoped to. */
 export interface Scope {
@@ -193,7 +194,10 @@ async function incrementalScope(
   if (promotion !== undefined) {
     return { ok: true, scope: fullScope(policy, promotion) };
   }
-  const allowed = [...policy.sourcePaths, ...policy.testPaths];
+  // `selectSourceFiles` filters by DIRECTORY, so a `test_paths` entry that is
+  // a pattern contributes its literal base (`util/testPaths.ts`). A colocated
+  // `src/**/*.test.ts` is already covered by `source_paths`.
+  const allowed = [...policy.sourcePaths, ...testScanDirectories(policy.testPaths)];
   const sources = selectSourceFiles(request.root, scan.paths.present, allowed);
   return { ok: true, scope: { targets: sources, paths: sources, mode: "changed", note: undefined } };
 }
@@ -217,7 +221,7 @@ function fullRunReason(
       "every file, so this run is a full check rather than an incremental one"
     );
   }
-  const allowed = [...policy.sourcePaths, ...policy.testPaths];
+  const allowed = [...policy.sourcePaths, ...testScanDirectories(policy.testPaths)];
   if (selectSourceFiles(root, paths.present, allowed).length > 0) {
     return undefined;
   }

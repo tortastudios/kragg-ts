@@ -115,6 +115,54 @@ a previously green run red — see [Gate additions](#gate-additions) below.
 
 ### Fixed
 
+- **TOR-1372: the test gate runs a command the project can state, over files
+  it can name — and a run that discovered nothing is not a pass.** Runner
+  detection reads `package.json#scripts.test` to learn WHICH RUNNER a project
+  uses, and kragg then rebuilt the argv from policy. On a project whose script
+  is `node --import tsx --test "src/**/*.test.ts"` that reconstruction dropped
+  the loader and replaced the file selection with `test_paths`, so kragg ran
+  `node --test test/**/… tests/**/…`, discovered **zero tests**, and reported
+  `[PASS] test-coverage`. Three changes, and the gate on this repository's own
+  reproduction goes from a green 0-test run to exit 3:
+  - **`test_command`**, a new policy key: the exact argv that runs the suite,
+    without file patterns (`["node", "--import", "tsx", "--test"]`). It is an
+    ARGV ARRAY and a shell string is rejected by name (exit 2) — `runner.ts`
+    spawns with `shell: false`, so a string would be one program with spaces in
+    it, and splitting it would mean writing the shell lexer this repository
+    exists without. kragg appends the reporter and coverage flags it has to
+    parse plus the `test_paths` patterns, and does not duplicate the runner's
+    own run token. Element 0 resolves exactly like every other tool — the
+    project's `node_modules/.bin`, or `node` / `bun` as runtimes — never from
+    `PATH`, never a global install and never a path; a program kragg cannot map
+    to a report format is refused at load unless `test_runner` names one.
+    Validated by TOR-1363's readers, mirrored in `kragg.schema.json`, shown by
+    `kragg policy show`.
+  - **`test_paths` entries may be patterns**, so a colocated suite is
+    expressible (`src/**/*.test.ts`; `**` spans zero or more segments, `*` and
+    `?` stay in one, `{a,b}` alternates). `src/util/testPaths.ts` is now the
+    single answer to "what does the runner discover", "which files are the test
+    corpus" and "is this changed file a test change", so `check`'s test gate,
+    `flaky --rerun`, `test-quality`, `critical-tests` and `kragg spec` cannot
+    disagree about what the suite is. A pattern's directory is walked and the
+    pattern then narrows the result — pointing at `src/**/*.test.ts` does not
+    pull `src/` into the corpus, which would have made `test-quality`'s
+    critical-function reference check true for every function in the codebase.
+  - **A completed run that discovered no tests is `error: true` and exit 3**,
+    naming the argv, the patterns searched and the three settings that change
+    the answer. Zero failures out of zero tests is arithmetic, not evidence —
+    the rule TOR-1368 already applies to a `flaky --rerun` sample, applied to
+    the gate that produces it. `"test_runner": "off"` is still the way to say
+    the gate should not run.
+
+  The gate's output now always states which invocation ran and where it came
+  from, and says in as many words that a detected runner is not the project's
+  script: it prints the argv, the `scripts.test` text it was inferred from, and
+  that the script was not run. An unsupported runner (`jest`, `mocha`) still
+  skips visibly and never passes, and now names `test_command` as well as
+  `test_runner`. Paths with spaces survive throughout — every invocation is an
+  argv array, so nothing is ever quoted or split. No wire key is added, renamed
+  or removed; `test_command` joins the TypeScript-only tail of `policy show`.
+
 - **TOR-1370** — the Claude Code hook checks what the equivalent command
   checks, and a hook that fails is no longer silent.
   - **Scope.** `handleStop` ran the pipeline over `policy.sourcePaths[0]`

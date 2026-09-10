@@ -294,10 +294,12 @@ Same key vocabulary, snake_case, on both sides; only the carrier differs —
 `kragg.toml` / `pyproject.toml [tool.kragg]` in Python, `kragg.json` /
 `package.json` `"kragg"` here. The standalone file wins outright; there is no
 merging. kragg-ts adds tool-selection keys (`lint_tool`, `test_runner`,
-`secret_scanner`, `audit_severity`) that have no Python analogue, where `"off"`
-is a deliberate, visible disable: the gate SKIPs with a reason saying so — and
-`baseline`, the root-relative path of the legacy-debt baseline (row 31 of
-section 11), `null` by default. A malformed *value* is rejected by name
+`test_command`, `secret_scanner`, `audit_severity`) that have no Python
+analogue, where `"off"` is a deliberate, visible disable: the gate SKIPs with a
+reason saying so — and `baseline`, the root-relative path of the legacy-debt
+baseline (row 31 of section 11), `null` by default. `test_command` is an argv
+ARRAY, never a shell string, and `test_paths` entries may be patterns as well
+as directories — rows 34 and 35 below. A malformed *value* is rejected by name
 (`PolicyError`, exit 2; row 15) rather than defaulted, and a file that cannot
 be parsed at all is a usage error too (exit 2).
 
@@ -365,7 +367,7 @@ A conformance runner must not flag these; a suite that diffs the two
 implementations naively will flag every one. Rows 1–9 are this repository's
 original table, re-verified against both trees while the spec was written; rows
 10–12 were added by that verification and are also SPEC.md section 10's rows
-10–12; rows 13–33 were introduced by TOR-1358, TOR-1363, TOR-1361, TOR-1369, TOR-1375, TOR-1364, TOR-1365, TOR-1374, TOR-1377 and TOR-1370 on this branch. Fixtures that exercise a row carry a `divergences` entry naming its id.
+10–12; rows 13–36 were introduced by TOR-1358, TOR-1363, TOR-1361, TOR-1369, TOR-1375, TOR-1364, TOR-1365, TOR-1374, TOR-1377, TOR-1370 and TOR-1372 on this branch. Fixtures that exercise a row carry a `divergences` entry naming its id.
 
 | # | Divergence | Why it is intentional |
 | --- | --- | --- |
@@ -402,6 +404,9 @@ original table, re-verified against both trees while the spec was written; rows
 | 31 | the legacy-debt baseline (`kragg.json#baseline`, `check --update-baseline`) | Python has no violation baseline. kragg-ts records accepted findings of the metric, structure and test-quality gates — never security, compiler or evidence gates, errors or skips — and reports them as `baselined:` entries in the existing `advisories` list of their gate, so `passed`, `exit_code`, `violation_count` and the journal describe the post-baseline results and **no key is added** to any payload. Stale entries are advisories too. `kragg.json#baseline` is a TypeScript-only policy key (see section 8). Pinned by `test/baseline.test.ts` and `test/cli.test.ts`; the cross-language fixtures configure no baseline and are unaffected. |
 | 32 | the hook checks what the equivalent `kragg check` invocation checks, through the same resolver | Python's `_stop` runs `_run_check(root, (policy.source_paths[0],), incremental=False)`, so in a project declaring `["src", "lib"]` the Stop hook's per-file tools — the linter, the secret scanner — are pointed at `src` only, and a turn ends green over `lib` because nothing looked at it. kragg-ts's hook now states an INTENT (`full` / `file` / `changed`) and `src/commands/scope.ts` resolves it exactly as it does for `check`, `check --file` and `check --changed`, so the command and the hook cannot disagree about a project's source paths, about a `--file` that names nothing (recorded, since a hook may not exit 2) or about a configuration edit promoting an incremental run. The report and journal `mode` values are unchanged (`"changed"`/`"full"`, as Python writes), and the `hook-protocol` golden is byte-identical. |
 | 33 | hook internal failures are RECORDED: stderr, `.kragg/hook-errors.jsonl`, and a notice at the next SessionStart | Both implementations fail open — exit 0, no block — and Python leaves no trace, so a hook whose `kragg.toml` broke, whose project stopped resolving or whose pipeline crashed is indistinguishable from a hook with nothing to say, indefinitely. kragg-ts keeps the fail-open contract byte for byte on stdout and adds the trace: a stderr line (debug output at exit 0, not a `hook error` notice), an append-only record carrying a timestamp, the event name narrowed to a fixed set, and the error message — never the stdin payload — and a first line in the next SessionStart context saying how many failures were recorded since the last session. The file is kragg-ts-only, in the journal's shape; `.kragg/history.jsonl` is untouched. kragg-ts also sets `KRAGG_HOOK_ACTIVE` for the duration of a hook run, so a project whose own tooling invokes `kragg hook claude` from inside the pipeline the hook started re-enters a no-op instead of a second full run. |
+| 34 | `test_paths` entries may be PATTERNS, and one rule answers "is this a test file" everywhere | Python's `test_paths` are directories, and its pytest invocation does not pass them at all — pytest discovers by its own rootdir convention, so the setting only scopes `test_quality`. JavaScript has no such convention and half the ecosystem colocates `src/foo.test.ts`, so an entry may be a directory or a pattern (`src/**/*.test.ts`), and the runner's selection, the test-depth corpus and `critical-tests`' notion of a test change all come from the same two functions in `src/util/testPaths.ts`. No wire field changes. |
+| 35 | `test_command`: an explicit, argv-array test invocation | Python builds one `pytest` command and needs no equivalent — pytest reads Python with no loader flag. A JS suite frequently cannot be run without one (`node --import tsx --test`), and detection reading `package.json#scripts.test` concludes only WHICH RUNNER, never an equivalent command. The setting is a TypeScript-only tail key in `policy show`, exactly like `lint_tool` and `test_runner`; a shell string is rejected with exit 2, because `src/engine/runner.ts` spawns with `shell: false`. |
+| 36 | a completed run that discovered ZERO tests is `error: true` / exit 3 | "0 tests, 0 failed" parses cleanly, so it used to pass. Nothing was executed, so nothing was verified — the same rule TOR-1368 applies to a `flaky --rerun` sample, applied to the gate. Python passes `--cov-fail-under` to pytest and reads pytest's exit code, so it does not model this as its own outcome. `"test_runner": "off"` remains the way to say the gate should not run. |
 
 Four defects found in the Python implementation during the port are recorded in
 [KNOWN_LIMITATIONS.md](../KNOWN_LIMITATIONS.md#found-in-the-python-implementation-during-this-port).

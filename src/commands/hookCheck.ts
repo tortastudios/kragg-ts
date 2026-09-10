@@ -56,6 +56,7 @@ import { gitDirty, gitSha } from "../git/changes.ts";
 import type { HookCheckOutcome, HookCheckRequest, HookScope } from "../hooks/claude.ts";
 import { applyBaseline, readBaseline } from "../policy/baseline.ts";
 import { loadPolicy } from "../policy/policy.ts";
+import { testScanDirectories } from "../util/testPaths.ts";
 import { resolveScope, type ScopeRequest } from "./scope.ts";
 
 /**
@@ -175,7 +176,7 @@ export function hookCriticality(root: string): void {
   const policy = loadPolicy(root);
   criticalityCache({
     root,
-    scanPaths: [...policy.sourcePaths, ...policy.testPaths],
+    scanPaths: [...policy.sourcePaths, ...testScanDirectories(policy.testPaths)],
     analysis: analysisProgram({ root }),
   }).ensure();
 }
