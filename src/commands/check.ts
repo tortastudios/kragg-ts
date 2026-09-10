@@ -194,6 +194,16 @@ function updateRefusal(flags: CheckFlags, policy: KraggPolicy): string | null {
   if (flags.changed || flags.since !== null || flags.targets.length > 0) {
     return "--update-baseline records a full run; it cannot be combined with --file, --changed or --since";
   }
+  // The same rule one tier up (TOR-1415). `recordBaseline` REPLACES the file
+  // from this run's results, and `critical-coverage` is baselineable and SLOW,
+  // so recording a fast-only run would delete every reviewed entry for it
+  // without a word — the exact silent loss the refusal above exists to stop.
+  if (flags.fastOnly) {
+    return (
+      "--update-baseline records a full run; it cannot be combined with --fast-only, " +
+      "which never runs critical-coverage and would drop its accepted entries from the file"
+    );
+  }
   if (policy.baseline === undefined) {
     return (
       'kragg.json#baseline names no file; set it (for example ".kragg/baseline.json") ' +

@@ -72,9 +72,32 @@ interface Captured {
   readonly err: string;
 }
 
+/**
+ * Variables Node's own test runner sets on THIS process, removed before the
+ * project under test is run.
+ *
+ * `NODE_TEST_CONTEXT` is inherited all the way down — this suite, to the CLI,
+ * to the `node --test` a fixture's test gate spawns — and it switches that
+ * innermost runner to the internal reporting protocol, so it emits nothing
+ * kragg can read and the gate reports (correctly) that it has no complete
+ * report. The fixture would be fine and the measurement an artefact of the
+ * harness. `NODE_V8_COVERAGE` is removed for the same reason: it redirects a
+ * child's coverage output into the parent's directory. Same reasoning, and
+ * same two keys, as `HARNESS_ONLY_ENV` in `test/regressionHarness.ts`.
+ *
+ * `undefined` REMOVES the variable: `child_process` skips env entries whose
+ * value is undefined rather than stringifying them.
+ */
+const HARNESS_ONLY_ENV: NodeJS.ProcessEnv = {
+  NODE_TEST_CONTEXT: undefined,
+  NODE_V8_COVERAGE: undefined,
+};
+
 /** Run the CLI in a throwaway directory and capture everything it produced. */
 async function run(argv: readonly string[], root = project()): Promise<Captured> {
-  const result = await runCommand("kragg", [process.execPath, CLI, ...argv], root);
+  const result = await runCommand("kragg", [process.execPath, CLI, ...argv], root, {
+    env: HARNESS_ONLY_ENV,
+  });
   return { code: result.returncode, out: result.stdout, err: result.stderr };
 }
 
@@ -938,6 +961,13 @@ describe("the help text and the flag table cannot drift apart", () => {
     );
     assert.deepEqual(documented.get("criticality"), ["write", "path"]);
     assert.deepEqual(allowedTable().get("mutation"), ["path", "since", "all", "update-baseline"]);
+    // TOR-1415: the tier flag is on BOTH pipelines, so both halves of the
+    // contract must carry it — named here so the coverage is deliberate
+    // rather than incidental to the walk above.
+    for (const command of ["check", "security"]) {
+      assert.ok(documented.get(command)?.includes("fast-only"), `${command} must document --fast-only`);
+      assert.ok(allowedTable().get(command)?.includes("fast-only"), `${command} must accept --fast-only`);
+    }
   });
 });
 
@@ -1098,5 +1128,190 @@ describe("legacy debt is adopted explicitly, and only what may be", () => {
     assert.equal(result.code, EXIT_ENVIRONMENT, result.out);
     assert.match(result.err, /baseline not written to \.kragg\/baseline\.json: a gate could not run \(exit 3\)/);
     assert.equal(readFileSync(join(root, ".kragg", "baseline.json"), "utf8"), before);
+  });
+});
+
+/**
+ * TOR-1415's fixture: a tree whose FAST tier is clean and whose SLOW tier
+ * fails.
+ *
+ * The failure is a genuinely failing test, reachable only by running the
+ * suite, so "the exit code reflects the fast gates alone" is something the
+ * tree can PROVE rather than something the assertions assert about each
+ * other: the same project is exit 1 with the slow tier and exit 0 without it.
+ */
+function fastTierProject(): string {
+  const root = mkdtempSync(join(tmpdir(), "kragg-fast-"));
+  roots.push(root);
+  writeProjectFile(root, "package.json", '{"name":"x","version":"0.0.0","type":"module","private":true}');
+  writeProjectFile(
+    root,
+    "kragg.json",
+    '{"source_paths":["src"],"test_paths":["test/**/*.suite.js"],"lint_tool":"off",' +
+      '"secret_scanner":"off","test_runner":"node","coverage_fail_under":0}',
+  );
+  writeProjectFile(root, "tsconfig.json", TOR1359_TSCONFIG);
+  writeProjectFile(root, "src/a.ts", "export function add(a: number, b: number): number {\n  return a + b;\n}\n");
+  // Named `.suite.js` so this repository's own `test/**/*.test.ts` discovery
+  // can never execute it, and outside the tsconfig's `src/**/*.ts` inputs so
+  // no static gate has anything to say about it.
+  writeProjectFile(
+    root,
+    "test/a.suite.js",
+    'import assert from "node:assert/strict";\nimport { test } from "node:test";\n\n' +
+      'test("fails on purpose", () => {\n  assert.equal(1, 2);\n});\n',
+  );
+  writeProjectFile(root, "node_modules/.bin/tsc", `#!${process.execPath}\nimport(${JSON.stringify(TSC_ENTRY)});\n`);
+  chmodSync(join(root, "node_modules", ".bin", "tsc"), 0o755);
+  return root;
+}
+
+/** The gate names a `--format json` run reported, in order. */
+function gateNames(result: Captured): readonly string[] {
+  const payload: ReportPayload = JSON.parse(result.out);
+  return payload.gates.map((gate) => gate.name);
+}
+
+describe("--fast-only runs the static tier and reports only it", () => {
+  // The three gates a fast-only run must not so much as assemble. `audit` is
+  // in BOTH pipelines, which is why `security` takes this flag too: it is not
+  // already fast-only, it merely has less to drop.
+  const SLOW_GATES = ["test-coverage", "critical-coverage", "audit"];
+  const JSON_RUN = ["--format", "json", "--no-journal"];
+
+  it("is not the same as a clean fast tier: a plain check runs the slow gates and fails on them", async () => {
+    // The control, and the behaviour TOR-1415 is about: every fast gate
+    // passes, so nothing stops the slow tier, and the run pays for the suite.
+    const root = fastTierProject();
+    const result = await run(["check", ...JSON_RUN], root);
+    assert.equal(result.code, EXIT_GATE_FAILURES, result.out);
+    const payload: ReportPayload = JSON.parse(result.out);
+    for (const name of SLOW_GATES) {
+      assert.ok(payload.gates.some((gate) => gate.name === name), `${name} must be in a plain run`);
+    }
+    // The test runner was really launched: it gets a per-invocation artifact
+    // directory under `.kragg/runs/`, and nothing else in the pipeline makes
+    // one. The fast-only case asserts the same directory is absent.
+    assert.equal(existsSync(join(root, ".kragg", "runs")), true);
+    const coverage = payload.gates.find((gate) => gate.name === "test-coverage");
+    // Evidence the suite actually ran, rather than the gate merely being
+    // listed: this violation can only come from executing the failing test.
+    assert.equal(coverage?.passed, false);
+    assert.equal(coverage?.skipped, false);
+    assert.equal(coverage?.violation_count, 1);
+    assert.match(coverage?.violations[0]?.message ?? "", /fails on purpose/);
+  });
+
+  it("leaves the slow gates OUT of the report rather than skipping them in it", async () => {
+    // The distinction the issue turns on. A skipped gate is still a row in
+    // `gates[]`, so a consumer counting the list, or looking for
+    // `test-coverage` in it, would see a pipeline that ran and stepped aside.
+    const root = fastTierProject();
+    const result = await run(["check", "--fast-only", ...JSON_RUN], root);
+    const names = gateNames(result);
+    for (const name of SLOW_GATES) {
+      assert.equal(names.includes(name), false, `${name} must be absent, not skipped: ${names.join(", ")}`);
+    }
+    // Absent from the report AND never invoked: no per-invocation artifact
+    // directory, where the plain run above leaves one.
+    assert.equal(existsSync(join(root, ".kragg", "runs")), false);
+    assert.deepEqual(names, [
+      "lint", "tsc", "typing-strictness", "complexity", "maintainability", "halstead",
+      "type-complexity", "boundaries", "structure", "forbidden-calls", "nullable-default",
+      "critical-tests", "test-quality", "secret-default", "detect-secrets",
+    ]);
+    const payload: ReportPayload = JSON.parse(result.out);
+    assert.equal(payload.summary.gates_total, names.length);
+    // The wire format did not move: `mode` is still about the file scope.
+    assert.equal(payload.mode, "full");
+  });
+
+  it("exits on the fast gates alone, where a full run exits on the slow ones", async () => {
+    const result = await run(["check", "--fast-only", ...JSON_RUN], fastTierProject());
+    assert.equal(result.code, EXIT_OK, result.out);
+    const payload: ReportPayload = JSON.parse(result.out);
+    assert.equal(payload.passed, true);
+    assert.equal(payload.exit_code, EXIT_OK);
+    assert.equal(payload.summary.gates_failed, 0);
+  });
+
+  it("says on stderr which gates did not run, in both formats", async () => {
+    // The wire format is frozen, so the report cannot carry a "fast only"
+    // key; a silently shorter gate list would read as an ordinary run.
+    const root = fastTierProject();
+    for (const output of ["text", "json"]) {
+      const result = await run(["check", "--fast-only", "--format", output, "--no-journal"], root);
+      assert.match(result.err, /--fast-only: this run assembled the FAST gates only/, output);
+      assert.match(result.err, /test-coverage, critical-coverage, audit/, output);
+      assert.match(result.err, /says nothing about it/, output);
+    }
+    // stdout stayed the report: `--format json` is still one parseable document.
+    const json = await run(["check", "--fast-only", ...JSON_RUN], root);
+    assert.doesNotMatch(json.out, /--fast-only/);
+    JSON.parse(json.out);
+  });
+
+  it("drops audit from the security pipeline too", async () => {
+    const root = fastTierProject();
+    assert.ok(gateNames(await run(["security", ...JSON_RUN], root)).includes("audit"));
+    const fast = await run(["security", "--fast-only", ...JSON_RUN], root);
+    assert.deepEqual(gateNames(fast), ["forbidden-calls", "secret-default", "detect-secrets"]);
+    assert.equal(fast.code, EXIT_OK, fast.out);
+    assert.match(fast.err, /the slow tier \(audit\) did not run/);
+  });
+
+  it("narrows the tier on top of a file scope, without either overriding the other", async () => {
+    // `--file` chooses the FILES, `--fast-only` chooses the TIER. They are
+    // not the same axis, so composing them is defined behaviour, not a clash.
+    const result = await run(["check", "--fast-only", "--file", "src/a.ts", ...JSON_RUN], fastTierProject());
+    assert.equal(result.code, EXIT_OK, result.out);
+    const payload: ReportPayload = JSON.parse(result.out);
+    assert.equal(payload.mode, "file");
+    assert.deepEqual(payload.targets, ["src/a.ts"]);
+    for (const name of SLOW_GATES) {
+      assert.equal(payload.gates.some((gate) => gate.name === name), false, name);
+    }
+  });
+
+  it("still halts under --fail-fast, which is a different question", async () => {
+    // `--fail-fast` means "stop at the first failure"; `--fast-only` means
+    // "the slow tier is not in this pipeline". Both hold at once.
+    const root = fastTierProject();
+    writeProjectFile(root, "src/broken.ts", 'export const n: number = "no";\n');
+    const result = await run(["check", "--fast-only", "--fail-fast", ...JSON_RUN], root);
+    assert.equal(result.code, EXIT_GATE_FAILURES, result.out);
+    const payload: ReportPayload = JSON.parse(result.out);
+    assert.equal(payload.gates.find((gate) => gate.name === "tsc")?.passed, false);
+    assert.equal(payload.gates.find((gate) => gate.name === "structure")?.skip_reason, "fail-fast");
+    for (const name of SLOW_GATES) {
+      assert.equal(payload.gates.some((gate) => gate.name === name), false, name);
+    }
+  });
+
+  it("refuses --all, which asks for the opposite pipeline", async () => {
+    // Not resolved in either direction: the two flags contradict, and the
+    // difference is invisible in the output unless someone is counting gates.
+    const result = await run(["check", "--fast-only", "--all", "--no-journal"]);
+    assert.equal(result.code, EXIT_USAGE);
+    assert.match(result.err, /--fast-only cannot be combined with --all/);
+    assert.equal(result.out.includes("[PASS]"), false);
+  });
+
+  it("refuses --update-baseline, which would drop critical-coverage's accepted debt", async () => {
+    // `recordBaseline` REPLACES the file from this run's results, and
+    // `critical-coverage` is both baselineable and slow.
+    const root = project({ "kragg.json": '{"lint_tool":"off","baseline":".kragg/baseline.json"}' });
+    const result = await run(["check", "--fast-only", "--update-baseline", "--no-journal"], root);
+    assert.equal(result.code, EXIT_USAGE);
+    assert.match(result.err, /--update-baseline records a full run; it cannot be combined with --fast-only/);
+    assert.equal(existsSync(join(root, ".kragg", "baseline.json")), false);
+  });
+
+  it("is not a flag every command quietly accepts", async () => {
+    for (const command of ["status", "map", "fix", "mutation"]) {
+      const result = await run([command, "--fast-only"]);
+      assert.equal(result.code, EXIT_USAGE, command);
+      assert.match(result.err, /does not accept --fast-only/, command);
+    }
   });
 });

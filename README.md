@@ -115,6 +115,7 @@ kragg check                    # all gates, one consolidated report
 kragg check --changed          # only files changed vs HEAD (cheap inner loop)
 kragg check --since main       # changed vs merge-base with a ref
 kragg check --file src/a.ts    # scope to specific files (repeatable)
+kragg check --fast-only        # the static tier only; never runs the slow one
 kragg check --format json      # stable machine-readable schema
 kragg check --package @app/web # one workspace member as its own run (repeatable)
 kragg security                 # the security subset, cheap enough for every push
@@ -223,6 +224,20 @@ character in a file, not reinstalling a tool.
 | `test-coverage` | the project's test suite, plus the coverage floor |
 | `critical-coverage` | public critical functions must be measured and have no uncovered lines |
 | `audit` | dependency vulnerabilities via the project's package manager |
+
+**Running the fast tier alone.** `--fast-only`, on `check` and `security`
+both, assembles the static gates and stops there — for the agent loop that
+wants to clear lint, type and metric findings without paying for the suite and
+the advisory database on every pass. The slow gates are not in the pipeline at
+all, so they are **absent** from `gates[]` rather than present with
+`skipped: true`; the exit code is the fast gates' verdict alone; and stderr
+names what did not run, because a shorter gate list on its own reads like an
+ordinary run. It selects a **tier**, never a file set, so it composes with
+`--file` / `--changed` / `--since` and with `--fail-fast`, which still halts at
+the first failure. It is refused, exit 2, with `--all` — whose whole meaning is
+"run the slow tier anyway" — and with `--update-baseline`, which records a full
+run and would otherwise drop `critical-coverage`'s accepted entries from the
+baseline file.
 
 kragg **bundles none of these tools**. Every external tool is resolved from the
 project's own `node_modules/.bin` — never a global install, never kragg's own
@@ -736,6 +751,7 @@ Deliberate, and documented at each site:
 | non-ASCII changed paths | Every git plumbing call is `-z`, so a path like `src/café.ts` survives. Python's `core.quotePath` output escapes it, the escaped name matches nothing on disk, and the file leaves the selection silently. |
 | `secret_name_suffixes` | Includes `ServiceKey`, which Python's default list lacks. |
 | pipeline halting | A **skip never halts** the slow tier or `--fail-fast`; only a gate that ran and did not pass does. Python branches on `not result.passed`, which counts a visible skip as a failure. |
+| `check`/`security --fast-only` | Runs the FAST tier alone, with the slow gates **absent** from `gates[]` rather than skipped in it. Python has no way to ask for a tier: `--fail-fast` stops at the first failure and the slow tier runs whenever the fast one is clean. No key moves — the run is simply a shorter pipeline — and the fact is stated on stderr. |
 | a gate that throws | Reported as that gate's `error: true` — the rest of the pipeline still runs and the consolidated report survives. Python lets the exception kill the process. |
 | config validation | Python degrades a mismatched value to its default and ignores unknown keys; kragg-ts rejects both with exit 2, naming the setting. Strictly narrower: every config Python accepts *and reads as written* loads identically here. |
 | criticality-dependent gates | Derived on demand when the data is missing or stale, so `critical-tests` and `test-quality` run; Python skips them visibly instead. |
