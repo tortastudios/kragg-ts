@@ -34,11 +34,11 @@
      "line": 20,
      "column": 10,
      "code": "forbidden-call",
-     "message": "forbidden call `src/unsafe.runShell` (banned: `src/unsafe`) (+1 more at src/index.ts:24:10)",
+     "message": "forbidden call `src/unsafe.runShell` (banned: `src/unsafe`)",
      "fix_hint": "call the approved runner instead"
     }
    ],
-   "truncated": false,
+   "truncated": true,
    "raw_output": null,
    "advisories": [],
    "advisory_count": 0

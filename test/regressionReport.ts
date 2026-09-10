@@ -37,6 +37,8 @@ export interface GateView {
   readonly durationMs: number;
   readonly violationCount: number;
   readonly violations: readonly ViolationView[];
+  /** Did the per-gate display cap drop entries? Never anything else. */
+  readonly truncated: boolean;
   readonly rawOutput: string | null;
 }
 
@@ -153,6 +155,7 @@ function gateOf(value: unknown, at: string): GateView {
     violations: list(raw, "violations", where).map((entry, index) =>
       violationOf(entry, `${where}.violations[${index}]`),
     ),
+    truncated: bool(raw, "truncated", where),
     rawOutput: nullableStr(raw, "raw_output", where),
   };
 }
