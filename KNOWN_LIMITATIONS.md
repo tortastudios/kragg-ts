@@ -538,6 +538,16 @@ Every external tool adapter (`lint`, `tsc`, `test-coverage`, `audit`,
   `ERR_PNPM_FETCH_404`. The compatibility job substitutes the tarball it just
   packed for that one dependency (and reports the substitution as its own
   check), so the rows prove the scaffold, not the registry.
+- **A released `kragg-ts` is younger than the generated cooldown for its
+  first month**, so the generated `pnpm-workspace.yaml` names `kragg-ts` in
+  `minimumReleaseAgeExclude`, with the reason written beside it, whenever the
+  pin above is written (a build with no released version writes neither).
+  Reproduced before the exemption existed: an exact pin six days old, under
+  the generated file, is refused with `ERR_PNPM_NO_MATURE_MATCHING_VERSION`.
+  What is **not** asserted by any CI row is that the published `kragg-ts` pin
+  resolves through that exemption — the tarball substitution above bypasses
+  the registry — only that the mechanism works, which the same file's
+  fastmcp entries exercise against the real registry on every run.
 
 ---
 
@@ -622,14 +632,18 @@ possible statement of what a green source-only suite does not know.
 
 These are bugs or gaps in **both** tools:
 
-- **git path quoting.** With `core.quotePath` on (the default), a non-ASCII
-  filename is returned escaped, fails the existence check, and is dropped, so
-  `--changed` under-reports. Fixing it means `-z` + NUL splitting in both
-  implementations at once, or they stop being conformant.
 - `changedFiles` returns paths relative to the **repo root**, not to the
   analysis root, when the root is a subdirectory of the repository.
-- **Windows** is untested. `resolveBin` returns a `.cmd` shim, which
-  `execFile` cannot spawn without a shell, and `runCommand` never uses one.
+
+Two entries that used to be here are closed on this side only, and are
+recorded as divergences in `README.md` rather than as shared limits:
+**git path quoting** (`src/git/changes.ts` runs every plumbing command with
+`-z`, so a non-ASCII changed path survives here, while Python's
+`core.quotePath` output still drops it) and **Windows** (`src/engine/runner.ts`
+reads the `.cmd` shim and spawns the script it names, and the Windows rows of
+`compat.yml` execute that branch — see [What the Windows rows do and do not
+prove](#what-the-windows-rows-do-and-do-not-prove) for exactly how far that
+assertion reaches).
 
 ## Found in the Python implementation during this port
 

@@ -102,7 +102,7 @@ failed task, not a judgement call.
 
 ## Project Map
 
-191 modules under `src/`, listed top-down in the order `kragg.json`'s
+192 modules under `src/`, listed top-down in the order `kragg.json`'s
 `layers` declares — a module may import its own layer or a lower one, never a
 higher one, and the `boundaries` gate enforces that on this repo.
 
@@ -228,7 +228,7 @@ higher one, and the `boundaries` gate enforces that on this repo.
   - `journal.ts` — `.kragg/history.jsonl`, append-only.
   - `runner.ts` — the only approved external-command wrapper, and the one
     legitimate `node:child_process` import in the repo.
-- `test/` — 58 test files using `node:test`, flat, plus `test/fixtures/`
+- `test/` — 59 test files using `node:test`, flat, plus `test/fixtures/`
   and one non-test helper, `conformanceContract.ts`. `conformance.test.ts`
   drives the versioned fixtures under `test/fixtures/conformance/` that pin
   the cross-language contract; see `docs/spec-conformance.md`.
@@ -325,7 +325,10 @@ authority; this list must match it.
 `fix --file`; `status --format --last`; `map`/`spec --path --symbol --changed
 --limit --all --format`, plus `map --write`; `brief --since --path --limit
 --all`; `criticality --write --path`; `mutation --path --since --all
---update-baseline`; `flaky --last --rerun`.
+--update-baseline`; `flaky --last --rerun`; `init --dry-run`. The scaffold
+commands parse their own argv and carry their own `--help`: `new` takes
+`--kind`, `--mcp-sdk`, `--package` and `--allow-shadowing`, and `gen module`
+takes `--root`; neither appears in the main usage text.
 
 The three inventories (`map`, `spec`, `brief`) share one filter and budget
 vocabulary in `src/commands/inventory.ts`. Its rule is that a display budget

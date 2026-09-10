@@ -41,7 +41,10 @@ pnpm add -D kragg-ts
 pnpm exec kragg check
 ```
 
-`npm` and `yarn` work the same way. From a checkout instead:
+`npm install --save-dev kragg-ts` and `yarn add --dev kragg-ts` install the
+same tarball, but only pnpm installs are exercised by CI — see
+[KNOWN_LIMITATIONS.md](KNOWN_LIMITATIONS.md#platform-and-runtime-support-is-asserted-only-where-the-matrix-runs).
+From a checkout instead:
 
 ```sh
 pnpm install --ignore-scripts
@@ -84,12 +87,18 @@ the argv it builds is right, on every host; only a Windows row proves
 `CreateProcess` accepts it.
 
 **Scaffolds.** Each `kragg new --kind` output (`cli`, `api`, and `mcp` with
-both SDKs) is generated, installed with `--ignore-scripts`, and made to pass
-its own `pnpm exec kragg check` on every push — `node scripts/compat.ts
-scaffolds` locally.
+both SDKs — `--mcp-sdk fastmcp`, the default, and `--mcp-sdk official`) is
+generated, installed with `--ignore-scripts`, and made to pass its own
+`pnpm exec kragg check` on every pull request and every push to `main` —
+`node scripts/compat.ts scaffolds` locally. The lane installs the `kragg-ts`
+the scaffold pins from the tarball it just packed, so it proves the scaffold
+and not the registry; the scaffolding section of
+[KNOWN_LIMITATIONS.md](KNOWN_LIMITATIONS.md#scaffolding) says what that
+leaves unasserted.
 
-**External tools.** kragg drives seven programs it does not ship. Which of
-them still produce output its adapters can read is checked weekly by
+**External tools.** kragg ships none of the programs it drives. Whether seven
+of them — vitest, `node --test`, bun, oxlint, biome, ESLint and secretlint —
+still produce output its adapters can read is checked weekly by
 [`.github/workflows/external-tools.yml`](.github/workflows/external-tools.yml),
 deliberately **not** as a required check — see
 [Development](#development) for why, and for how to run it.
@@ -129,7 +138,8 @@ kragg mutation                 # mutation-test critical files with Stryker
 kragg flaky                    # gates that flipped on an unchanged commit
 kragg audit                    # dead code and dependency drift
 
-kragg new my-app --kind cli    # scaffold (cli | api | mcp)
+kragg new my-app --kind cli    # scaffold (cli | api | mcp); installs nothing
+kragg new my-mcp --kind mcp --mcp-sdk official   # the reference MCP SDK, not fastmcp
 kragg gen module payments      # service/domain/test slots in the layout
 kragg init                     # add guardrails to an existing project
 kragg init --dry-run           # ...or just print what that would change
@@ -184,7 +194,9 @@ character in a file, not reinstalling a tool.
 kragg **bundles none of these tools**. Every external tool is resolved from the
 project's own `node_modules/.bin` — never a global install, never kragg's own
 tree — so a gate always runs the version the project declared. A missing tool
-is a visible skip with the exact install command, not a silent pass.
+is a visible skip with the exact install command, not a silent pass — or, when
+the policy names that tool (`lint_tool`, `test_runner`, `secret_scanner`) or
+no gate can stand in for it (`tsc`), an error and exit 3.
 
 ## Scope: what a run actually looks at
 
@@ -526,7 +538,7 @@ is written.
 
 ```json
 {
-  "$schema": "./node_modules/kragg/kragg.schema.json",
+  "$schema": "./node_modules/kragg-ts/kragg.schema.json",
   "source_paths": ["src"],
   "test_paths": ["test"],
   "tsconfig": "tsconfig.json",
@@ -700,8 +712,13 @@ Each row is pinned by a fixture or a unit test, and the full list — with the
 **One runtime dependency** (`typescript`. You cannot parse TypeScript without
 the TypeScript compiler) and **two dev dependencies** (`@types/node`, and
 `oxlint` for kragg-ts's own self-check), all pinned to exact versions. No
-bundler, no test framework: `tsc` emits and `node:test` runs. See
-[docs/dependency-policy.md](docs/dependency-policy.md) for the full reasoning.
+bundler, no test framework: `tsc` emits and `node:test` runs. The installed
+tree is larger than those three names, and the policy says exactly how much:
+`@types/node` brings `undici-types`, and `oxlint` is a prebuilt native binary
+that declares one optional package per platform, of which pnpm installs the
+host's — 23 lockfile entries, five on any one machine. See
+[docs/dependency-policy.md](docs/dependency-policy.md) for the inventory and
+the full reasoning.
 
 Installs run with dependency lifecycle scripts disabled, no package may run a
 build script, and a **30-day minimum release age** is enforced mechanically —

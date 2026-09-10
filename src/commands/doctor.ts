@@ -341,15 +341,26 @@ function reportSecretScanner(env: ProjectEnvironment, choice: SecretScannerChoic
   }
   const lookup = defaultLookup(env);
   if (choice === "auto") {
-    const found = [
-      ...(lookup.findGitleaks() === null ? [] : ["gitleaks"]),
-      ...(lookup.findSecretlint() === null ? [] : ["secretlint"]),
-    ];
+    // One line per absent scanner, carrying its install command — the shape
+    // the linter group prints. A summary saying "install gitleaks or
+    // secretlint" with neither command is the diagnostic this file's header
+    // promises never to print.
+    const found: string[] = [];
+    for (const [scanner, bin] of [
+      ["gitleaks", lookup.findGitleaks()],
+      ["secretlint", lookup.findSecretlint()],
+    ] as const) {
+      if (bin === null) {
+        process.stdout.write(`  ${scanner}: MISSING -> ${secretScannerMissing(env, scanner)}\n`);
+      } else {
+        found.push(scanner);
+      }
+    }
     process.stdout.write(
       found.length > 0
         ? `  secret scanner: ok (${found.join(", ")})\n`
-        : "  secret scanner: none installed — optional: install gitleaks or " +
-            "secretlint to enable the scan, or set `secret_scanner` to require one\n",
+        : "  secret scanner: none installed — optional: install one to enable " +
+            "the scan, or set `secret_scanner` to require one\n",
     );
     return true;
   }
