@@ -47,11 +47,21 @@
  * needs a private function gated should export it or declare the exported
  * function that reaches it.
  *
- * REMAINING GAP, stated plainly: a `private method()` on an exported class is
- * indistinguishable from a public one here, because `criticality.json` records
- * only names and the TypeScript `private` keyword leaves no trace in one.
- * Such a method is treated as public and gated. The `#field` form is caught;
- * the keyword form is not.
+ * ── A TypeScript `private` MEMBER IS STILL IN THIS LIST ────────────────────
+ * A `private method()` on an exported class is indistinguishable from a public
+ * one HERE, and deliberately stays that way: `criticality.json` records only
+ * names, the TypeScript keyword leaves no trace in one, and this list is the
+ * population three gates enforce on. `critical-coverage` must still demand
+ * that such a method has no uncovered lines, and `critical-tests` must still
+ * demand a relevant test change when its file is edited — a member being
+ * runtime-private says nothing about whether its behaviour is tested.
+ *
+ * What the keyword does change is what counts as EVIDENCE for the one demand a
+ * private member cannot satisfy: `test-quality`'s direct bound reference, which
+ * a test file is not allowed to write. That question is answered from the
+ * DECLARATIONS rather than from a name, in `testDepth/restricted.ts`, and it is
+ * scoped to that gate. The `#field` form is a different case and is caught
+ * here, because its `#` is part of the recorded name.
  */
 
 import type bundledTs from "typescript";

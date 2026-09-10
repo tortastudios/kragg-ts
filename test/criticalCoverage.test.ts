@@ -156,6 +156,48 @@ describe("critical-coverage: measured gaps", () => {
     assert.equal(violation.fixHint, "add a test exercising retry (uncovered: 4)");
   });
 
+  it("still reports an unexercised TypeScript-private method as uncovered", () => {
+    // TOR-1417: `test-quality` stopped demanding that a test NAME a `private`
+    // member. This gate never asked for a name — it asks whether the lines
+    // ran — and must keep asking, or a private method could be exported from
+    // scrutiny by the keyword alone. `unlock` runs when `open` runs; `orphan`
+    // never runs, and line coverage is what says so.
+    const root = project({
+      ".kragg/criticality.json": JSON.stringify([
+        { name: "src/vault#Vault.unlock", fan_in: 1, is_critical: true },
+        { name: "src/vault#Vault.orphan", fan_in: 0, is_critical: true },
+      ]),
+      "src/vault.ts": [
+        "export class Vault {",
+        "  open(): string {",
+        "    return this.unlock();",
+        "  }",
+        "  private unlock(): string {",
+        '    return "k";',
+        "  }",
+        "  private orphan(): string {",
+        '    return "never";',
+        "  }",
+        "}",
+        "",
+      ].join("\n"),
+    });
+    const report = coverageEntry(
+      root,
+      [[3, 1], [6, 1], [9, 0]],
+      [["open", 2, 4, 1], ["unlock", 5, 7, 1], ["orphan", 8, 10, 0]],
+      "src/vault.ts",
+    );
+    const violations = violationsFor(root, report);
+    assert.equal(violations.length, 1);
+    assert.equal(
+      violations[0]?.message,
+      "critical function src/vault#Vault.orphan has 1 uncovered lines",
+    );
+    assert.equal(violations[0]?.code, CRITICAL_COVERAGE_CODE);
+    assert.equal(violations[0]?.file, "src/vault.ts");
+  });
+
   it("passes a critical function with no uncovered line", () => {
     const root = measuredProject();
     const report = coverageEntry(root, [[3, 2], [4, 1]], [["send", 3, 3, 2], ["retry", 4, 4, 1]]);

@@ -161,8 +161,11 @@ higher one, and the `boundaries` gate enforces that on this repo.
   partition, metrics, blocks, report), `nullableDefault/`, `secretDefault/`,
   `secrets/` (gitleaks, secretlint, lookup), `testDepth/` (shared by the
   three test-depth gates; `testFiles.ts` is the test corpus `test_paths`
-  selects, and `references.ts` binds test code in it to critical functions
-  through the checker), `typingStrictness/` (config, hatches, included,
+  selects, `references.ts` binds test code in it to critical functions
+  through the checker, and `restricted.ts` answers the one question a
+  `private`/`protected` member cannot answer with a name — whether the call
+  graph puts it downstream of something a running test binds),
+  `typingStrictness/` (config, hatches, included,
   chain, codes). Single-file gates: `criticalCoverage.ts`, `criticalTests.ts`,
   `testQuality.ts`, `typeComplexity.ts`. Each directory has a same-named `.ts`
   beside it that is the public entry point and re-exports the parts.

@@ -48,6 +48,34 @@ a previously green run red — see [Gate additions](#gate-additions) below.
   0.4` for an actual value of 0.4331, since `MAX_BUGS` is 0.4). This is
   display precision only — `checkSource` already compares the unrounded
   values, so the threshold decision is unchanged.
+- **TOR-1417** — `test-quality` no longer demands a direct, by-name test
+  reference to a TypeScript `private`/`protected` method on an exported class.
+  A test file cannot legally write one — the compiler rejects
+  `client.sign(...)` from outside the class — so the only two ways to satisfy
+  `critical-untested` for such a member were to export an internal helper
+  purely so a test could name it, or to write a binding that satisfies the
+  checker and tests nothing. An ECMAScript `#private` member never had the
+  problem, because `criticality.json` records its `#` and the name-shape rule
+  reads that as the visibility marker it is; the keyword form left no trace in
+  a name and so looked public.
+
+  Only the DIRECT-REFERENCE demand changes, and only for a member that is
+  demonstrably reached. `src/gates/testDepth/restricted.ts` reads the
+  `private`/`protected` modifiers off the DECLARATIONS the criticality pass
+  already registered (never off the name, never off the source text), and
+  answers the demand with a path: seeds are what running tests bind — a
+  skipped test seeds nothing — and edges are the same checker-resolved
+  `buildCallGraph` edges the criticality analysis itself is derived from, so
+  a public entry point in another module and a `protected` member reached
+  from a subclass both resolve. A member on no such path is still reported,
+  now with the cause in the message and a fix hint that does not ask for the
+  binding the compiler forbids. The graph is built only when such a member
+  would otherwise be a finding.
+
+  Nothing is exempted from scrutiny: the member stays in `criticalFunctions`,
+  so `critical-coverage` still fails it for a single uncovered line and
+  `critical-tests` still demands a relevant test change when its file is
+  edited. No gate, threshold, exclusion or wire key changed.
 - The npm package is now `@tortastudios/kragg-ts`, not the bare `kragg-ts`
   this project shipped a few commits earlier. The org owns the scope on
   npm, so the package lives there too. The command it installs is still
