@@ -52,6 +52,7 @@ import {
   type SecretScannerChoice,
 } from "../gates/secrets.ts";
 import { loadPolicy, type KraggPolicy } from "../policy/policy.ts";
+import { testScanDirectories } from "../util/testPaths.ts";
 
 /** A tool kragg drives, and the package that provides it. */
 interface Tool {
@@ -84,7 +85,11 @@ export function runDoctor(root: string): number {
   const env = resolveProjectEnvironment(root);
   let ok = true;
 
-  for (const [label, present] of layoutChecks(root, policy.sourcePaths, policy.testPaths)) {
+  for (const [label, present] of layoutChecks(
+    root,
+    policy.sourcePaths,
+    testScanDirectories(policy.testPaths),
+  )) {
     process.stdout.write(`${label}: ${present ? "ok" : "missing"}\n`);
     ok = ok && present;
   }
@@ -112,7 +117,7 @@ function reportTools(env: ProjectEnvironment, policy: KraggPolicy): boolean {
   const results = [
     ...REQUIRED_TOOLS.map((tool) => reportTool(env, tool)),
     reportLinter(env, policy.lintTool),
-    reportTestRunner(env, policy.testRunner),
+    reportTestRunner(env, policy),
     reportSecretScanner(env, policy.secretScanner),
   ];
   return results.every((result) => result);
@@ -219,7 +224,16 @@ function reportLinter(env: ProjectEnvironment, setting: LintToolSetting): boolea
  * are reported and not checked. `"vitest"` is a package, and naming it makes
  * it required — the same rule the test gate applies in `resolveRunner`.
  */
-function reportTestRunner(env: ProjectEnvironment, choice: TestRunnerChoice): boolean {
+function reportTestRunner(env: ProjectEnvironment, policy: KraggPolicy): boolean {
+  const choice: TestRunnerChoice = policy.testRunner;
+  // `test_command` names the program that will actually be spawned, so THAT
+  // is the tool to check. Reporting `ok (node — a runtime)` while the argv
+  // starts with a `tsx` this project does not have is the doctor equivalent
+  // of a green gate that never ran.
+  const program = policy.testCommand[0];
+  if (program !== undefined && choice !== "off") {
+    return reportTestCommand(env, program, policy.testCommand);
+  }
   if (choice === "auto") {
     return reportGroup(
       env,
@@ -245,6 +259,35 @@ function reportTestRunner(env: ProjectEnvironment, choice: TestRunnerChoice): bo
     "test runner",
     'test_runner = "vitest"',
     remediation(env.packageManager, "vitest"),
+  );
+}
+
+/**
+ * The line for a project that states its own invocation.
+ *
+ * The argv is printed in full: `test_command` exists because kragg's own
+ * reconstruction was not the project's command, so a diagnostic that showed
+ * only the runner name would hide the one thing worth reading.
+ */
+function reportTestCommand(
+  env: ProjectEnvironment,
+  program: string,
+  argv: readonly string[],
+): boolean {
+  const label = `test runner (test_command: ${argv.join(" ")})`;
+  if (program === "node" || program === "bun") {
+    process.stdout.write(`  ${label}: ok (${program} — a runtime, not an installed package)\n`);
+    return true;
+  }
+  const bin = resolveBin(env, program);
+  if (bin !== null) {
+    process.stdout.write(`  ${label}: ok (${program} at ${bin})\n`);
+    return true;
+  }
+  return reportRequired(
+    label,
+    `test_command[0] = ${JSON.stringify(program)}`,
+    remediation(env.packageManager, program),
   );
 }
 

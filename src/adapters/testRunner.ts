@@ -92,8 +92,7 @@ import type { TypeScriptApi } from "../analysis/sourceFile.ts";
 import { sourceInventory } from "../coverage/inventory.ts";
 import { projectTotals, readCoverageReport } from "./support/coverage.ts";
 import type { ProjectTotals } from "./support/coverage.ts";
-import { detectTestRunner } from "./support/detect.ts";
-import type { RunnerDetection, TestRunnerChoice, TestRunnerName } from "./support/detect.ts";
+import type { TestRunnerChoice, TestRunnerName } from "./support/detect.ts";
 import type { JsonObject } from "./support/json.ts";
 import { readLcov } from "./support/lcov.ts";
 import { parseBunTest } from "./support/bunTestReport.ts";
@@ -102,7 +101,7 @@ import { parseVitestJson } from "./support/vitestReport.ts";
 import { readTextFile } from "./support/manifest.ts";
 import { EMPTY_SUMMARY } from "./support/testReport.ts";
 import type { TestReport, TestSummary } from "./support/testReport.ts";
-import { capped, crashed, notConfigured } from "./support/outcome.ts";
+import { capped, crashed } from "./support/outcome.ts";
 import type { Unavailable } from "./support/outcome.ts";
 import { runOptions } from "./support/run.ts";
 import {
@@ -111,7 +110,6 @@ import {
   createRunDir,
   discardRunDir,
   publishCoverage,
-  resolveRunner,
 } from "./support/testCommands.ts";
 import type { Artifacts } from "./support/testCommands.ts";
 import {
@@ -120,9 +118,10 @@ import {
   coverageLine,
   crashMessage,
   killedMessage,
-  runnerMissing,
-  skipReason,
+  noTestsMessage,
 } from "./support/testEvidence.ts";
+import { invocationNote, resolveInvocation, runnerMissing } from "./support/testInvocation.ts";
+import type { Invocation } from "./support/testInvocation.ts";
 
 /** Gate name, matching the Python gate this replaces. */
 export const TEST_GATE = "test-coverage";
@@ -152,11 +151,18 @@ export interface TestRunnerOptions {
   /** `max_violations_per_gate`. */
   readonly maxViolations: number;
   /**
-   * `test_paths` policy setting, as directories. Expanded to globs for
-   * `node --test` by `support/testCommands.ts`; the other runners discover
-   * their own files and ignore it.
+   * `test_paths` policy setting. Each entry is a directory or a pattern;
+   * `util/testPaths.ts` turns both into what `node --test` discovers with,
+   * and the other runners discover their own files and ignore it.
    */
   readonly testPaths: readonly string[];
+  /**
+   * `test_command`: the argv this project's suite is actually run with,
+   * without file patterns. Empty (the default) means kragg infers the runner
+   * and builds the argv itself — see `support/testInvocation.ts` for why the
+   * two are not the same thing.
+   */
+  readonly testCommand?: readonly string[] | undefined;
   readonly timeoutMs?: number | undefined;
   /**
    * Policy `source_paths`: the files the coverage number is reconciled
@@ -194,7 +200,7 @@ export type CoverageOutcome =
 export interface TestRunFindings {
   readonly ok: true;
   readonly runner: TestRunnerName;
-  /** What decided the runner, from `detectTestRunner`. */
+  /** What decided the invocation: `test_command`, or what detection read. */
   readonly source: string;
   readonly command: readonly string[];
   readonly summary: TestSummary;
@@ -205,10 +211,15 @@ export interface TestRunFindings {
   readonly coverage: CoverageOutcome | null;
   readonly passed: boolean;
   /**
-   * The tests ran and their verdict stands, but the evidence is incomplete:
-   * coverage was asked for and no usable artifact came back. Exit 3, with any
-   * test failures still listed. `passed: false` alone would say "coverage is
-   * below the floor" about a number that was never measured.
+   * The runner ran, but what came back is not evidence. Exit 3, with any test
+   * failures still listed. Two causes:
+   *
+   *  - coverage was asked for and no usable artifact came back. `passed:
+   *    false` alone would say "coverage is below the floor" about a number
+   *    that was never measured;
+   *  - the run discovered NO TESTS. `passed: true` there is the false green
+   *    this gate exists to prevent — nothing was executed, so nothing was
+   *    verified, and "0 failed" is arithmetic rather than evidence.
    */
   readonly error: boolean;
   readonly output: string;
@@ -219,13 +230,13 @@ export type TestRunOutcome = TestRunFindings | Unavailable;
 /** Detect, run, parse. See the module docs for every judgement call. */
 export async function runTests(options: TestRunnerOptions): Promise<TestRunOutcome> {
   const { env } = options;
-  const detection = detectTestRunner(env.root, options.choice);
-  if (detection.runner === undefined) {
-    return notConfigured(skipReason(detection, env));
-  }
-  const resolved = resolveRunner(env, detection.runner);
-  if (!resolved.ok) {
-    return resolved;
+  const invocation = resolveInvocation({
+    env,
+    choice: options.choice,
+    testCommand: options.testCommand ?? [],
+  });
+  if (!invocation.ok) {
+    return invocation;
   }
   const runDir = createRunDir(env.root);
   if (!runDir.ok) {
@@ -233,7 +244,7 @@ export async function runTests(options: TestRunnerOptions): Promise<TestRunOutco
   }
   const layout = artifacts(env.root, options.coverageReportPath, runDir.dir);
   try {
-    return await runInto(layout, detection, detection.runner, resolved.bin, options);
+    return await runInto(layout, invocation, options);
   } finally {
     discardRunDir(layout);
   }
@@ -242,19 +253,24 @@ export async function runTests(options: TestRunnerOptions): Promise<TestRunOutco
 /** Spawn the runner into `layout.runDir` and read back only what it wrote there. */
 async function runInto(
   layout: Artifacts,
-  detection: RunnerDetection,
-  runner: TestRunnerName,
-  bin: string,
+  invocation: Invocation,
   options: TestRunnerOptions,
 ): Promise<TestRunOutcome> {
+  const { runner } = invocation;
   const withCoverage = options.coverageFailUnder > 0;
   if (withCoverage) {
     mkdirIgnoringErrors(layout.coverageDir);
   }
-  const command = buildCommand(bin, runner, layout, withCoverage, options.testPaths);
+  const command = buildCommand(
+    invocation.prefix,
+    runner,
+    layout,
+    withCoverage,
+    options.testPaths,
+  );
   const result = await runCommand(TEST_GATE, command, layout.root, runOptions(options.timeoutMs));
 
-  const environmentFailure = runnerMissing(TEST_GATE, options.env, runner, result.stdout, result.stderr);
+  const environmentFailure = runnerMissing(options.env, TEST_GATE, runner, result);
   if (environmentFailure !== undefined) {
     return environmentFailure;
   }
@@ -268,7 +284,7 @@ async function runInto(
 
   const coverage = withCoverage ? readCoverage(runner, layout, options) : null;
   const published = coverage?.ok === true ? publishCoverage(layout, runner) : undefined;
-  return assemble(detection, runner, command, report, coverage, published, options.maxViolations);
+  return assemble({ invocation, command, report, coverage, published, options });
 }
 
 /** Parse whichever format the runner produced. `undefined` means unreadable. */
@@ -362,16 +378,19 @@ function readCoverage(
   };
 }
 
+/** Everything one completed run produced, before it becomes an outcome. */
+interface Assembly {
+  readonly invocation: Invocation;
+  readonly command: readonly string[];
+  readonly report: TestReport;
+  readonly coverage: CoverageOutcome | null;
+  readonly published: string | undefined;
+  readonly options: TestRunnerOptions;
+}
+
 /** Combine test failures and coverage into one outcome. */
-function assemble(
-  detection: RunnerDetection,
-  runner: TestRunnerName,
-  command: readonly string[],
-  report: TestReport,
-  coverage: CoverageOutcome | null,
-  published: string | undefined,
-  maxViolations: number,
-): TestRunFindings {
+function assemble(parts: Assembly): TestRunFindings {
+  const { invocation, report, coverage, options } = parts;
   const coverageViolation = coverage?.ok === true ? coverage.violation : undefined;
   const violations = [
     ...report.violations,
@@ -384,35 +403,45 @@ function assemble(
   // someone to raise a coverage number that was never measured. It is an
   // ERROR with the test results kept: see `TestRunFindings.error`.
   const coverageUsable = coverage === null || coverage.ok;
+  // The same rule, applied to the suite itself: a run that discovered nothing
+  // executed nothing, so its "0 failed" is not a finding about the code.
+  const discoveredNothing = report.summary.total === 0;
+  const note = invocationNote(invocation, parts.command);
   return {
     ok: true,
-    runner,
-    source: detection.source,
-    command,
+    runner: invocation.runner,
+    source: invocation.source,
+    command: parts.command,
     summary: report.summary,
-    violations: capped(violations, maxViolations),
+    violations: capped(violations, options.maxViolations),
     violationCount: violations.length,
     coverage,
-    passed: report.success && violations.length === 0 && coverageUsable,
-    error: !coverageUsable,
-    output: describe(report.summary, coverage, published),
+    passed: report.success && violations.length === 0 && coverageUsable && !discoveredNothing,
+    error: !coverageUsable || discoveredNothing,
+    output: describe(parts, note, discoveredNothing),
   };
 }
 
 /**
- * The headline: counts, then the coverage number, then any publishing note.
+ * The headline: what ran, the counts, the coverage number, any publishing note.
  *
- * The unavailable branch keeps the coverage message WHOLE. That branch is an
- * ERROR, and an error's remediation reaches the reader only through this
- * output — the message says which file was expected, what was found instead,
- * and what to do about it.
+ * THE INVOCATION COMES FIRST and is never omitted. It is the difference
+ * between "your tests fail" and "the command kragg assembled is not the
+ * command your project runs", and a reader who cannot see the argv has no way
+ * to tell those apart — see `support/testInvocation.ts`.
+ *
+ * The unavailable branches keep their messages WHOLE. Those branches are
+ * ERRORS, and an error's remediation reaches the reader only through this
+ * output.
  */
-function describe(
-  summary: TestSummary,
-  coverage: CoverageOutcome | null,
-  published: string | undefined,
-): string {
+function describe(assembly: Assembly, note: string, discoveredNothing: boolean): string {
+  const { report, coverage, published } = assembly;
+  if (discoveredNothing) {
+    return noTestsMessage(assembly.invocation.runner, note, assembly.options.testPaths);
+  }
+  const summary: TestSummary = report.summary;
   const parts = [
+    note,
     `${summary.total} tests: ${summary.passed} passed, ${summary.failed} failed` +
       (summary.skipped > 0 ? `, ${summary.skipped} skipped` : "") +
       (summary.todo > 0 ? `, ${summary.todo} todo` : ""),

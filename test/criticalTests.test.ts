@@ -603,3 +603,73 @@ describe("critical-tests: when it cannot run", () => {
     );
   });
 });
+
+describe("critical-tests: `test_paths` may name a pattern, and it is honoured", () => {
+  /** The gate, run with a pattern entry instead of a directory. */
+  async function violationsUnder(
+    root: string,
+    testPaths: readonly string[],
+  ): Promise<readonly Violation[]> {
+    writeStamp(root, ["src", "test", "tests"]);
+    const outcome = await checkCriticalTests({
+      root,
+      sourcePaths: ["src"],
+      testPaths,
+      program: analysisProgram({ root, api: ts }),
+      api: ts,
+    });
+    assert.equal(outcome.ok, true, outcome.ok ? "" : outcome.message);
+    assert.equal(outcome.ok && outcome.skipped, false);
+    return outcome.ok && !outcome.skipped ? outcome.violations : [];
+  }
+
+  it("examines a file the pattern selects, even when its name is not `*.test.ts`", async (t) => {
+    if (!gitAvailable) {
+      t.skip("git is not available");
+      return;
+    }
+    // `src/__tests__/client.ts` matches no naming convention, so the ONLY
+    // reason it is a test is that `test_paths` says so. A pattern entry that
+    // was silently read as a directory would never look at it, and the bound
+    // reference it carries — the evidence rule's half of the answer — would
+    // go unseen.
+    const colocated =
+      'import { Client } from "../client.ts";\n' +
+      'it("sends", () => { new Client().send(); });\n';
+    const root = await repo({ "src/__tests__/client.ts": colocated });
+    write(root, "src/client.ts", `${CLIENT}\n// edited\n`);
+    write(root, "src/__tests__/client.ts", `${colocated}// again\n`);
+    assert.deepEqual(await violationsUnder(root, ["src/__tests__/*.ts"]), []);
+  });
+
+  it("still asks for a BOUND reference in the file the pattern selected", async (t) => {
+    if (!gitAvailable) {
+      t.skip("git is not available");
+      return;
+    }
+    // Selected by the pattern, changed, and about something else entirely:
+    // being a test file is what earns it a look, never what passes the gate.
+    const root = await repo({ "src/__tests__/client.ts": UNRELATED_TEST });
+    write(root, "src/client.ts", `${CLIENT}\n// edited\n`);
+    write(root, "src/__tests__/client.ts", `${UNRELATED_TEST}// again\n`);
+    const violations = await violationsUnder(root, ["src/__tests__/*.ts"]);
+    assert.equal(violations.length, 1);
+    assert.match(violations[0]?.message ?? "", /examined src\/__tests__\/client\.ts/u);
+  });
+
+  it("does not let the pattern's directory turn every source edit into a test change", async (t) => {
+    if (!gitAvailable) {
+      t.skip("git is not available");
+      return;
+    }
+    // The walk `src/__tests__/*.ts` implies starts at `src`, so a rule that
+    // used the directory instead of the pattern would treat `src/client.ts`
+    // itself as a test change — and, worse, would then find `Client.send`
+    // bound by its own definition and call that evidence.
+    const root = await repo({ "src/__tests__/client.ts": "it('sends', () => {});\n" });
+    write(root, "src/client.ts", `${CLIENT}\n// edited\n`);
+    const violations = await violationsUnder(root, ["src/__tests__/*.ts"]);
+    assert.equal(violations.length, 1);
+    assert.equal(violations[0]?.file, "src/client.ts");
+  });
+});

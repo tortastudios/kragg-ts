@@ -40,6 +40,7 @@ export const COMMON_PACKAGES: ReadonlySet<string> = new Set<string>([
   "fastmcp",
   "hono",
   "kragg",
+  "kragg-ts",
   "lodash",
   "next",
   "node",

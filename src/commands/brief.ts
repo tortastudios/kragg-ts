@@ -74,6 +74,7 @@ import { baselineSection, suppressionSection } from "./brief/exemptions.ts";
 import { criticalFunctions } from "../gates/testDepth/criticalFunctions.ts";
 import type { TypeScriptApi } from "../analysis/sourceFile.ts";
 import { loadPolicy, PolicyError, type KraggPolicy } from "../policy/policy.ts";
+import { isTestPath, testScanDirectories } from "../util/testPaths.ts";
 import {
   applyBudget,
   DEFAULT_LIMIT,
@@ -175,7 +176,7 @@ export async function buildBrief(options: BuildBriefOptions): Promise<string | n
   const { policy } = options;
   const changed = await changedFiles(options.root, options.since, [
     ...policy.sourcePaths,
-    ...policy.testPaths,
+    ...testScanDirectories(policy.testPaths),
     ".",
   ]);
   const base = changed === null ? null : await diffBase(options.root, options.since);
@@ -260,7 +261,7 @@ function groupedSections(
  * section a reviewer checks first.
  */
 function area(name: string, policy: KraggPolicy): string {
-  if (underAnyPath(name, policy.testPaths) || /\.(?:test|spec)\.[cm]?[jt]sx?$/.test(name)) {
+  if (isTestPath(name, policy.testPaths) || /\.(?:test|spec)\.[cm]?[jt]sx?$/.test(name)) {
     return "Tests";
   }
   return underAnyPath(name, policy.sourcePaths) ? "Source" : "Other";

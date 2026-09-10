@@ -148,6 +148,98 @@ a previously green run red — see [Gate additions](#gate-additions) below.
 
 ### Fixed
 
+- **TOR-1372: the test gate runs a command the project can state, over files
+  it can name — and a run that discovered nothing is not a pass.** Runner
+  detection reads `package.json#scripts.test` to learn WHICH RUNNER a project
+  uses, and kragg then rebuilt the argv from policy. On a project whose script
+  is `node --import tsx --test "src/**/*.test.ts"` that reconstruction dropped
+  the loader and replaced the file selection with `test_paths`, so kragg ran
+  `node --test test/**/… tests/**/…`, discovered **zero tests**, and reported
+  `[PASS] test-coverage`. Three changes, and the gate on this repository's own
+  reproduction goes from a green 0-test run to exit 3:
+  - **`test_command`**, a new policy key: the exact argv that runs the suite,
+    without file patterns (`["node", "--import", "tsx", "--test"]`). It is an
+    ARGV ARRAY and a shell string is rejected by name (exit 2) — `runner.ts`
+    spawns with `shell: false`, so a string would be one program with spaces in
+    it, and splitting it would mean writing the shell lexer this repository
+    exists without. kragg appends the reporter and coverage flags it has to
+    parse plus the `test_paths` patterns, and does not duplicate the runner's
+    own run token. Element 0 resolves exactly like every other tool — the
+    project's `node_modules/.bin`, or `node` / `bun` as runtimes — never from
+    `PATH`, never a global install and never a path; a program kragg cannot map
+    to a report format is refused at load unless `test_runner` names one.
+    Validated by TOR-1363's readers, mirrored in `kragg.schema.json`, shown by
+    `kragg policy show`.
+  - **`test_paths` entries may be patterns**, so a colocated suite is
+    expressible (`src/**/*.test.ts`; `**` spans zero or more segments, `*` and
+    `?` stay in one, `{a,b}` alternates). `src/util/testPaths.ts` is now the
+    single answer to "what does the runner discover", "which files are the test
+    corpus" and "is this changed file a test change", so `check`'s test gate,
+    `flaky --rerun`, `test-quality`, `critical-tests` and `kragg spec` cannot
+    disagree about what the suite is. A pattern's directory is walked and the
+    pattern then narrows the result — pointing at `src/**/*.test.ts` does not
+    pull `src/` into the corpus, which would have made `test-quality`'s
+    critical-function reference check true for every function in the codebase.
+  - **A completed run that discovered no tests is `error: true` and exit 3**,
+    naming the argv, the patterns searched and the three settings that change
+    the answer. Zero failures out of zero tests is arithmetic, not evidence —
+    the rule TOR-1368 already applies to a `flaky --rerun` sample, applied to
+    the gate that produces it. `"test_runner": "off"` is still the way to say
+    the gate should not run.
+
+  The gate's output now always states which invocation ran and where it came
+  from, and says in as many words that a detected runner is not the project's
+  script: it prints the argv, the `scripts.test` text it was inferred from, and
+  that the script was not run. An unsupported runner (`jest`, `mocha`) still
+  skips visibly and never passes, and now names `test_command` as well as
+  `test_runner`. Paths with spaces survive throughout — every invocation is an
+  argv array, so nothing is ever quoted or split. No wire key is added, renamed
+  or removed; `test_command` joins the TypeScript-only tail of `policy show`.
+
+- **TOR-1370** — the Claude Code hook checks what the equivalent command
+  checks, and a hook that fails is no longer silent.
+  - **Scope.** `handleStop` ran the pipeline over `policy.sourcePaths[0]`
+    (inherited from Python's `_stop`), so in a project declaring
+    `source_paths: ["src", "lib"]` the hook's per-file tools — the linter, the
+    secret scanner — were pointed at `src` alone: `kragg check` reported a
+    `no-debugger` violation in `lib/` and exited 1, while the Stop hook on the
+    same tree emitted nothing, let the turn end, and journalled `passed: true`.
+    The hook now states an INTENT (`full`, `file`, `changed`) that
+    `src/commands/scope.ts` — the one resolver `check` and `security` use —
+    expands, so a Stop is `kragg check`, a post-edit is `check --file <path>`,
+    and a tool that edited no single file is `check --changed`, including the
+    rules the hook must not reimplement (a configuration edit promoting an
+    incremental run, deletions, an edited file outside the source paths). The
+    hook loads no policy and derives no file list of its own any more.
+  - **Observability.** Failing open is the deliberate exception and it is
+    unchanged — exit 0, nothing blocked, valid protocol JSON or no output at
+    all — but every internal failure is now RECORDED: a line on stderr (debug
+    output at exit 0, never a `hook error` notice), an append-only entry in
+    `.kragg/hook-errors.jsonl` carrying a timestamp, the event name narrowed to
+    a fixed set and the error message, and a first line in the next
+    `SessionStart` context: `N kragg hook failures recorded since the last
+    session`. The record NEVER contains the stdin payload — a `tool_input` is a
+    tool's own arguments, which for `Bash` is a command line. The injected
+    check seam answers `report` / `nothing` / `failed` instead of
+    `CheckReport | null`, because that `null` meant both "nothing to check" and
+    "could not run at all" and both read as a pass.
+  - **Recursion.** `stop_hook_active` is unchanged and still pinned. Alongside
+    it, `KRAGG_HOOK_ACTIVE` is set for the duration of a hook run and inherited
+    by everything the pipeline spawns, so a project whose test command or
+    wrapper script invokes `kragg hook claude` re-enters a no-op instead of
+    starting another full pipeline inside the one already running.
+  - **Truncation** is unchanged at 9000 characters with the in-band marker, and
+    is now pinned on both emitting paths (a block `reason` and a SessionStart
+    `additionalContext`) with the assertion that the cut is applied to the text
+    and never to the JSON envelope, so `decision` always survives.
+
+  No wire format moves: `.kragg/history.jsonl` keeps its keys and its
+  `"changed"`/`"full"` mode values, the report payload is untouched, and the
+  `hook-protocol` conformance golden is byte-identical.
+  `.kragg/hook-errors.jsonl` is a new kragg-ts-only file in the journal's
+  shape, rotated at 200 lines, that no gate and no Python reader consults.
+  `src/hooks/session.ts` and `src/hooks/diagnostics.ts` split the SessionStart
+  and diagnostics halves out of `claude.ts`.
 - **TOR-1366** — criticality freshness and compiler state are now invalidated
   by everything the analysis actually reads. Three separate ways a run could
   believe pre-edit state:
@@ -489,6 +581,19 @@ a previously green run red — see [Gate additions](#gate-additions) below.
   src/a.ts`, `kragg status 20`) is exit 2 instead of being dropped, and `--file`
   together with `--changed`/`--since` is exit 2 instead of being discarded in
   favour of git's file set.
+
+### Changed
+
+- The npm package is now published as `kragg-ts`, not `kragg`. The command
+  it installs is still `kragg`. The Python sibling already owns the name
+  `kragg` on PyPI, and the two are different packages, so `kragg` on npm
+  would have been misleading either way. A project scaffolded by `kragg new`
+  now pins `kragg-ts` as its dev dependency once this build is a released
+  version.
+- `oxlint` is now an approved dev dependency, not an unreviewed one.
+  kragg-ts runs its own `lint` gate against its own source with it, the way
+  any project using kragg would. It ships to nobody who installs the
+  package.
 
 ## [0.0.0] — unreleased
 

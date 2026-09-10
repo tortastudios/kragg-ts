@@ -50,8 +50,9 @@ failed task, not a judgement call.
 
 - **Do not add any dependency** — runtime or dev — without explicit written
   human approval. Read `docs/dependency-policy.md` first. There is exactly
-  **one** runtime dependency (`typescript`) and **one** dev dependency
-  (`@types/node`). That is a standing constraint, not a starting point.
+  **one** runtime dependency (`typescript`) and **two** dev dependencies
+  (`@types/node`, `oxlint`). That is a standing constraint, not a starting
+  point.
 - **Do not run dependency lifecycle scripts.** Never `pnpm approve-builds`,
   never add to `allowBuilds`, never set `dangerouslyAllowAllBuilds`. Install
   with `pnpm install --ignore-scripts`.
@@ -101,7 +102,7 @@ failed task, not a judgement call.
 
 ## Project Map
 
-179 modules under `src/`, listed top-down in the order `kragg.json`'s
+186 modules under `src/`, listed top-down in the order `kragg.json`'s
 `layers` declares — a module may import its own layer or a lower one, never a
 higher one, and the `boundaries` gate enforces that on this repo.
 
@@ -117,7 +118,9 @@ higher one, and the `boundaries` gate enforces that on this repo.
 - `src/commands/` — one module per command: `check`, `security`, `fix`,
   `map`, `spec`, `brief`, `status`, `policyShow`, `doctor`, `coverage`,
   `criticality`, `mutation`, `flaky`, `audit`, `new`, `gen`, `init`, `hook`,
-  plus `hookCheck.ts` (the `RunCheck` injected into the hook), `scope.ts`
+  plus `hookCheck.ts` (the `RunCheck` injected into the hook, which resolves
+  the hook's scope through `scope.ts` so the hook and the command check the
+  same files), `scope.ts`
   (the one resolver for `full`/`changed`/`file`, shared by `check` and
   `security`: what the external tools are invoked on, what the path-aware
   gates narrow to, when a configuration change makes an incremental run a
@@ -130,8 +133,12 @@ higher one, and the `boundaries` gate enforces that on this repo.
   completed run of the intended suite counts as a sample), `brief/`
   (`exemptions` — the `## Suppressions` and `## Baseline` sections).
 - `src/hooks/` — `claude.ts` (event dispatch; the deliberate fail-**open**
-  exception to everything else here) and `protocol.ts` (narrowing untrusted
-  stdin, building the stdout JSON the harness reads).
+  exception to everything else here, and the module that says which of the
+  CLI's scopes an event means, never which files), `protocol.ts` (narrowing
+  untrusted stdin, building the stdout JSON the harness reads), `session.ts`
+  (the SessionStart context: last run, critical functions, recorded hook
+  failures) and `diagnostics.ts` (`.kragg/hook-errors.jsonl` — failing open is
+  not failing invisibly; never write the stdin payload there).
 - `src/catalog.ts` + `src/catalog/` — the only place that knows which gates
   exist, in what order, in which tier. `check.ts` is the `check` pipeline,
   `security.ts` the gates shared by both pipelines, `context.ts` the per-run
@@ -148,8 +155,9 @@ higher one, and the `boundaries` gate enforces that on this repo.
   (scan, resolver, symbols, rules, declarationPath), `halstead/` (walk,
   partition, metrics, blocks, report), `nullableDefault/`, `secretDefault/`,
   `secrets/` (gitleaks, secretlint, lookup), `testDepth/` (shared by the
-  three test-depth gates; `references.ts` binds test code to critical
-  functions through the checker), `typingStrictness/` (config, hatches, included,
+  three test-depth gates; `testFiles.ts` is the test corpus `test_paths`
+  selects, and `references.ts` binds test code in it to critical functions
+  through the checker), `typingStrictness/` (config, hatches, included,
   chain, codes). Single-file gates: `criticalCoverage.ts`, `criticalTests.ts`,
   `testQuality.ts`, `typeComplexity.ts`. Each directory has a same-named `.ts`
   beside it that is the public entry point and re-exports the parts.
@@ -158,8 +166,10 @@ higher one, and the `boundaries` gate enforces that on this repo.
   oxlint/biome/eslint JSON parsers, `support/` the per-package-manager audit
   parsers, the per-runner test reports, lcov/istanbul readers, the
   `Unavailable` outcome kinds, the `runCommand` helpers, the per-invocation
-  artifact directory under `.kragg/runs/` (`testCommands.ts`) and the
-  messages for evidence the test gate refuses (`testEvidence.ts`).
+  artifact directory under `.kragg/runs/` (`testCommands.ts`), WHICH command
+  runs the suite and where it came from (`testInvocation.ts` — `test_command`
+  or detection, and the provenance sentence that says which) and the messages
+  for evidence the test gate refuses (`testEvidence.ts`).
 - `src/scaffold/` — `kragg new` / `init` / `gen module`: `project.ts` (the
   engine), `initPlan.ts` (what `init` would change, decided before anything is
   written, so `--dry-run` and the real run cannot disagree), `kinds.ts`,
@@ -182,12 +192,18 @@ higher one, and the `boundaries` gate enforces that on this repo.
   failed", which decides exit 3 vs. exit 1).
 - `src/git/changes.ts` — changed-file detection for `--changed` / `--since`.
 - `src/policy/` — `policy.ts` loads `kragg.json`, then `package.json#kragg`,
-  then defaults; `readers.ts` holds the narrowing readers it is built from;
-  `baseline.ts` is the reviewed legacy-debt baseline `kragg.json#baseline`
-  names — which gates may be recorded (and which never), the line-fingerprint
-  identity, and the apply/record/stale logic `check`, the hook and `brief` use.
-- `src/util/` — `globs.ts`, and `suppress.ts` for
-  `// kragg: ignore -- <reason>` (a bare marker is not honoured).
+  then defaults; `readers.ts` holds the narrowing readers it is built from,
+  `names.ts` the "did you mean" suggestion they and
+  `gates/criticality/declared.ts` share, and `serialize.ts` the `policy show`
+  key order that is a contract with Python; `baseline.ts` is the reviewed
+  legacy-debt baseline `kragg.json#baseline` names — which gates may be
+  recorded (and which never), the line-fingerprint identity, and the
+  apply/record/stale logic `check`, the hook and `brief` use.
+- `src/util/` — `globs.ts`, `suppress.ts` for
+  `// kragg: ignore -- <reason>` (a bare marker is not honoured), and
+  `testPaths.ts`, the one answer to what `test_paths` selects: the patterns the
+  runner discovers with, the directories a walk starts from, and whether one
+  file belongs to the suite.
 - `src/engine/` — the bottom layer, importable by everything:
   - `models.ts` — `Violation`, `GateResult`, `CompletedCommand`,
     `ProjectContext` as plain interfaces.

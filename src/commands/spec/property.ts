@@ -66,13 +66,10 @@ import { join } from "node:path";
 
 import type bundledTs from "typescript";
 
-import {
-  parsedSources,
-  resolveTypeScript,
-  type TypeScriptApi,
-} from "../../analysis/sourceFile.ts";
+import { resolveTypeScript, type TypeScriptApi } from "../../analysis/sourceFile.ts";
 import { criticalFunctions } from "../../gates/testDepth/criticalFunctions.ts";
 import { calleeChain } from "../../gates/testDepth/testCases.ts";
+import { parsedTestSources } from "../../gates/testDepth/testFiles.ts";
 
 /** Package names that mean the project has adopted fast-check. */
 export const FAST_CHECK_PACKAGES: readonly string[] = [
@@ -177,7 +174,7 @@ export function usesFastCheck(
     return true;
   }
   const compiler = api ?? resolveTypeScript(root).api;
-  for (const source of parsedSources(root, testPaths, { api: compiler })) {
+  for (const source of parsedTestSources(root, testPaths, compiler)) {
     for (const specifier of source.imports.values()) {
       if (FAST_CHECK_PACKAGES.some((name) => specifier.startsWith(`${name}#`))) {
         return true;
@@ -202,7 +199,7 @@ function propertyCorpus(
   api: TypeScriptApi,
 ): string {
   const chunks: string[] = [];
-  for (const source of parsedSources(root, testPaths, { api })) {
+  for (const source of parsedTestSources(root, testPaths, api)) {
     chunks.push(...propertyChunks(source.sourceFile, api));
   }
   return chunks.join("\n");

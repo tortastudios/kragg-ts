@@ -1,6 +1,6 @@
 {
-  "name": "kragg",
-  "version": "0.0.0",
+  "name": "kragg-ts",
+  "version": "0.1.0",
   "description": "Opinionated guardrails framework and CLI for AI-assisted TypeScript projects.",
   "keywords": [
     "guardrails",

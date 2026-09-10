@@ -44,6 +44,7 @@
 import { join } from "node:path";
 
 import {
+  getArgv,
   getCriticalDeclarations,
   getEnum,
   getInt,
@@ -73,7 +74,13 @@ export { PolicyError } from "./readers.ts";
  * directory: `gates/criticality/declared.ts`, which asks the same question of
  * a `critical_functions` entry that names no function in the program.
  */
-export { nearestName } from "./readers.ts";
+export { nearestName } from "./names.ts";
+
+/**
+ * Serialize a policy for `kragg policy show`. Lives in `serialize.ts`; kept on
+ * this module's surface because the policy is what a caller has in hand.
+ */
+export { policyAsDict } from "./serialize.ts";
 
 /** One `[callExpression, whyItIsBannedAndWhatToUseInstead]` entry. */
 export type ForbiddenCall = readonly [entry: string, fixHint: string];
@@ -166,6 +173,16 @@ export interface KraggPolicy {
   readonly lintTool: LintToolSetting;
   /** Which test runner the coverage gate drives. */
   readonly testRunner: TestRunnerSetting;
+  /**
+   * The exact argv that runs this project's suite, WITHOUT file patterns —
+   * `["node", "--import", "tsx", "--test"]`. Empty (the default) means kragg
+   * infers the runner and builds the argv itself, which cannot carry a loader
+   * or setup flag it was never told about. kragg appends its own reporter and
+   * coverage flags and the `test_paths` patterns; element 0 is resolved like
+   * every other tool (the project's `node_modules/.bin`, or `node` / `bun` as
+   * runtimes) and is never looked up on `PATH`.
+   */
+  readonly testCommand: readonly string[];
   /** Which secret scanner the `detect-secrets` gate drives. */
   readonly secretScanner: SecretScannerSetting;
   /**
@@ -260,6 +277,7 @@ export const DEFAULT_POLICY: KraggPolicy = {
   ],
   lintTool: "auto",
   testRunner: "auto",
+  testCommand: [],
   secretScanner: "auto",
   secretBaseline: undefined,
   baseline: undefined,
@@ -290,7 +308,38 @@ export function loadPolicy(root: string): KraggPolicy {
     ...readTools(source),
   };
   rejectUnknownKeys(source, NON_SETTING_KEYS);
+  requireKnownRunner(source, policy);
   return policy;
+}
+
+/** Programs whose report format kragg recognises from the program name alone. */
+const RUNNER_PROGRAMS: readonly string[] = ["vitest", "node", "bun"];
+
+/**
+ * A `test_command` kragg could run but could not READ is rejected at load.
+ *
+ * kragg does not just spawn the suite, it parses the suite's report, and the
+ * three runners produce three unrelated formats. When `test_runner` is
+ * `"auto"` the only evidence of which format to expect is the program name,
+ * so a `test_command` starting with anything else — `tsx`, a wrapper script —
+ * has to say so with `test_runner`. Rejecting here, at exit 2 before any gate
+ * runs, rather than at gate time: the project can fix a config error it is
+ * told about immediately, and there is no run for the mistake to hide in.
+ */
+function requireKnownRunner(source: Source, policy: KraggPolicy): void {
+  const program = policy.testCommand[0];
+  if (program === undefined || policy.testRunner !== "auto") {
+    return;
+  }
+  const name = program.replaceAll("\\", "/").split("/").at(-1) ?? program;
+  if (RUNNER_PROGRAMS.includes(name)) {
+    return;
+  }
+  throw new PolicyError(
+    `${source.label}test_command runs ${JSON.stringify(program)}, and kragg cannot tell ` +
+      "which runner's report format that produces. Set `test_runner` to the runner it " +
+      `drives (${RUNNER_PROGRAMS.join(", ")}), or start the command with one of them.`,
+  );
 }
 
 /** The settings naming WHERE kragg looks: paths, layers and glob scopes. */
@@ -326,7 +375,7 @@ type PolicyRules = Pick<
 /** Which external tool each gate drives, and how strict it is. */
 type PolicyTools = Pick<
   KraggPolicy,
-  "lintTool" | "testRunner" | "secretScanner" | "auditSeverity"
+  "lintTool" | "testRunner" | "testCommand" | "secretScanner" | "auditSeverity"
 >;
 
 function readScopes(source: Source): PolicyScopes {
@@ -393,56 +442,9 @@ function readTools(source: Source): PolicyTools {
   return {
     lintTool: getEnum(source, "lint_tool", LINT_TOOLS, base.lintTool),
     testRunner: getEnum(source, "test_runner", TEST_RUNNERS, base.testRunner),
+    testCommand: getArgv(source, "test_command", base.testCommand),
     secretScanner: getEnum(source, "secret_scanner", SCANNERS, base.secretScanner),
     auditSeverity: getEnum(source, "audit_severity", SEVERITIES, base.auditSeverity),
-  };
-}
-
-/**
- * Serialize a policy for `kragg policy show`.
- *
- * The Python analogue is `KraggPolicy.as_dict()`. Keys are snake_case and the
- * order matches the Python dataclass field order, so the two implementations
- * produce byte-identical JSON for an identical policy and a conformance test
- * can diff them directly. Pairs serialize as two-element arrays, which is
- * what `dataclasses.asdict` yields for a tuple of tuples.
- *
- * Arrays are copied rather than aliased so a caller cannot mutate the frozen
- * `DEFAULT_POLICY` through the returned object.
- */
-export function policyAsDict(policy: KraggPolicy): Record<string, unknown> {
-  return {
-    profile: policy.profile,
-    source_paths: [...policy.sourcePaths],
-    test_paths: [...policy.testPaths],
-    coverage_fail_under: policy.coverageFailUnder,
-    type_max_nesting_depth: policy.typeMaxNestingDepth,
-    type_max_length: policy.typeMaxLength,
-    max_violations_per_gate: policy.maxViolationsPerGate,
-    layers: [...policy.layers],
-    max_file_lines: policy.maxFileLines,
-    max_public_symbols: policy.maxPublicSymbols,
-    structure_exclude: [...policy.structureExclude],
-    mutation_include: [...policy.mutationInclude],
-    mutation_exclude: [...policy.mutationExclude],
-    forbidden_calls: policy.forbiddenCalls.map(([entry, hint]) => [entry, hint]),
-    secret_name_suffixes: [...policy.secretNameSuffixes],
-    // TypeScript-only tail: these settings have no Python counterpart (they
-    // name JavaScript tools, or a rule Python does not have), so they sort
-    // AFTER every shared field. A conformance diff can therefore compare the
-    // common prefix key-for-key.
-    //
-    // An OBJECT, not the pair list `forbidden_calls` serializes to: there is
-    // no Python `asdict` to match here, and printing it in the shape it is
-    // written in is what makes `policy show` answer "what did I declare".
-    critical_functions: Object.fromEntries(policy.criticalFunctions),
-    lint_tool: policy.lintTool,
-    test_runner: policy.testRunner,
-    secret_scanner: policy.secretScanner,
-    secret_baseline: policy.secretBaseline ?? null,
-    audit_severity: policy.auditSeverity,
-    coverage_report_path: policy.coverageReportPath,
-    baseline: policy.baseline ?? null,
   };
 }
 

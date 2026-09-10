@@ -12,8 +12,8 @@
  *
  * ── THE RULE, EXACTLY ──────────────────────────────────────────────────────
  *  1. the change set is the WORKING TREE against `HEAD` (Python passes
- *     `since=None`), narrowed to `sourcePaths + testPaths`, untracked files
- *     included;
+ *     `since=None`), narrowed to `sourcePaths` plus the directories
+ *     `testPaths` implies, untracked files included;
  *  2. an empty change set passes — nothing was touched;
  *  3. every PUBLIC critical function defined in a changed file is a
  *     candidate. Private ones are exempt, as in Python. No candidate: pass;
@@ -48,8 +48,10 @@
  * alone (`tests/`). Half the TypeScript ecosystem writes `src/foo.test.ts`
  * next to `src/foo.ts`, where a prefix rule sees a source change and no test
  * change — a systematic false positive on every such repo. So a changed file
- * is a test change if it sits under a test path OR its name matches the
- * `*.test.*` / `*.spec.*` convention.
+ * is examined as a test if `test_paths` selects it — `util/testPaths.ts`'s
+ * one answer, so a directory entry and a pattern entry (`src/**\/*.test.ts`)
+ * both work, and the gate agrees with the file set the runner executes — OR
+ * its name matches the `*.test.*` / `*.spec.*` convention.
  *
  * OUTSIDE A GIT REPOSITORY IT SKIPS, IT DOES NOT PASS. Python returns no
  * violations when `changed_python_files` comes back empty, and `changedFiles`
@@ -70,12 +72,12 @@ import type { Violation } from "../engine/models.ts";
 import type { AnalysisProgram } from "../analysis/program.ts";
 import {
   absolutePath,
-  parsedSources,
   parseSourceFile,
   resolveTypeScript,
   type ParsedSource,
   type TypeScriptApi,
 } from "../analysis/sourceFile.ts";
+import { isTestPath, testScanDirectories } from "../util/testPaths.ts";
 import {
   criticalFunctions,
   declarationProblem,
@@ -91,7 +93,6 @@ import {
 } from "./testDepth/outcome.ts";
 import {
   fileEvidence,
-  isUnderAny,
   mergeReferences,
   normalizePath,
   OUTSIDE_PROGRAM_NOTE,
@@ -99,6 +100,7 @@ import {
   type BoundReferences,
   type ReferenceResolver,
 } from "./testDepth/references.ts";
+import { parsedTestSources } from "./testDepth/testFiles.ts";
 
 /** `Violation.code` for every finding this gate produces. */
 export const CRITICAL_TESTS_CODE = "critical-tests";
@@ -148,9 +150,12 @@ export async function checkCriticalTests(
   if (stale !== null) {
     return failed(stale);
   }
+  // `testScanDirectories`, not `testPaths`: the change-set filter matches by
+  // path prefix, and a pattern entry (`src/**/*.test.ts`) is not a prefix of
+  // anything. Its directory is, and `isTestChange` applies the pattern.
   const changed = await changedFiles(options.root, options.since ?? null, [
     ...options.sourcePaths,
-    ...options.testPaths,
+    ...testScanDirectories(options.testPaths),
   ]);
   if (changed === null) {
     return skipped(NOT_A_REPOSITORY_REASON);
@@ -191,8 +196,11 @@ function evidenceOutcome(
     return failed(loaded.message);
   }
   const api = options.api ?? resolveTypeScript(options.root).api;
+  // The helper index is the corpus `test-quality` scans, not a raw walk: with
+  // a pattern entry (`src/**/*.test.ts`) the walk it implies is the whole of
+  // `src`, and indexing that would let a SOURCE module pose as a test helper.
   const testModules = new Map<string, ParsedSource>();
-  for (const source of parsedSources(options.root, options.testPaths, { api })) {
+  for (const source of parsedTestSources(options.root, options.testPaths, api)) {
     testModules.set(source.module, source);
   }
   const examined = changedTests.map((file) =>
@@ -322,12 +330,24 @@ function disqualification(test: ExaminedTest, critical: CriticalFunction): strin
 }
 
 /**
- * Whether a changed path counts as a test change.
+ * Whether a changed path is a test file at all — the first of the two rules.
  *
- * Prefix matching is segment-aware — `test` matches `test/a.ts` but not
- * `testing/a.ts` — mirroring `isAllowed` in `git/changes.ts`, which is what
- * produced this list in the first place.
+ * This decides which changed files are CANDIDATE evidence; whether one of them
+ * actually vouches for a given critical function is `evidenceOutcome`'s
+ * checker-bound question and never a path one.
+ *
+ * `isTestPath` is the shared answer to the first half — the same one the
+ * runner's file selection and `test-quality`'s corpus are built from, so a
+ * project cannot have a file that is a test for one of them and not for the
+ * others. Directory entries match by path SEGMENT (`test` matches `test/a.ts`
+ * but not `testing/a.ts`), pattern entries match the pattern.
+ *
+ * The naming convention is kept as an ADDITIONAL, wider rule, and this is the
+ * documented divergence from Python: `src/foo.test.ts` is examined as a test
+ * file even when `test_paths` never mentions `src/`, because a repo that
+ * colocates its tests without telling kragg should still have those tests
+ * looked at. It no longer passes the gate on its own — it only earns a look.
  */
 function isTestChange(file: string, testPaths: readonly string[]): boolean {
-  return TEST_FILE_PATTERN.test(normalizePath(file)) || isUnderAny(file, testPaths);
+  return TEST_FILE_PATTERN.test(normalizePath(file)) || isTestPath(file, testPaths);
 }

@@ -107,11 +107,11 @@ export function packageJson(identity: ProjectIdentity): Record<string, unknown> 
 }
 
 /**
- * Dev dependencies, with `kragg` itself pinned only when this build IS a
+ * Dev dependencies, with `kragg-ts` itself pinned only when this build IS a
  * released version.
  *
  * A generated `package.json` that depends on an unpublished version produces a
- * project whose very first `pnpm install` fails — a scaffold that cannot be
+ * project whose very first `pnpm install` fails. A scaffold that cannot be
  * installed is worse than one that needs a documented extra step. So the pin
  * appears once there is something real to pin to, and not before.
  */
@@ -119,7 +119,7 @@ function devDependencies(): Record<string, string> {
   const dependencies: Record<string, string> = { ...BASE_DEV_DEPENDENCIES };
   const version = kraggVersion();
   if (/^\d+\.\d+\.\d+/.test(version) && !version.startsWith("0.0.0")) {
-    dependencies["kragg"] = version;
+    dependencies["kragg-ts"] = version;
   }
   return dependencies;
 }
