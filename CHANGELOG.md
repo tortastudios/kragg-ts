@@ -18,6 +18,27 @@ a previously green run red — see [Gate additions](#gate-additions) below.
 
 ## [Unreleased]
 
+### Fixed
+
+- **TOR-1414** — a compiler diagnostic is no longer mistaken for a missing
+  compiler. `missingTool()` decides exit 3 ("the tool is not installed")
+  against exit 1 ("the tool ran and found problems") by reading a completed
+  command's output, and two of its patterns matched the bare words `Cannot
+  find module 'x'` / `Cannot find package 'x'` anywhere in that output. Those
+  are Node's wording for a failed `require` — and *also* TypeScript's wording
+  for TS2307, `Cannot find module 'node:fs' or its corresponding type
+  declarations`, which a compiler that ran perfectly writes to its stdout about
+  the project's own code. A single TS2307 therefore turned the whole type-check
+  gate into `[ERROR] tsc — tsc is not installed in this project`, exit 3, with
+  the compiler's real findings never shown. The two patterns now key off the
+  *structure* of a genuine Node module-resolution failure — an uncaught
+  `Error: Cannot find module …` header **together with** a
+  `node:internal/modules/` stack frame under it — rather than on the words, so
+  no tool's report about the code it is analysing can satisfy them. A tool
+  whose own entry point does not resolve, or that is not installed at all, is
+  still exit 3, unchanged, for every adapter that asks (`tsc`, lint, the test
+  runner, the secret scanners, the auditor, knip, Stryker).
+
 ### Changed
 
 - The npm package is now `@tortastudios/kragg-ts`, not the bare `kragg-ts`

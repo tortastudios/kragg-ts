@@ -492,9 +492,15 @@ backwards reports a crashed scanner as a clean repo.
   `--exit-code` so the two become disjoint: that code means findings, `0` means
   clean, anything else means the scanner broke.
 - **Absence of the binary itself** is detected textually, not by exit code, in
-  `src/environment/missing.ts` — `spawn X ENOENT`, `command not found`,
-  `Cannot find module` and the Windows and shell variants — because that
-  distinction decides exit 3 versus exit 1.
+  `src/environment/missing.ts` — `spawn X ENOENT`, `command not found`, and the
+  Windows and shell variants — because that distinction decides exit 3 versus
+  exit 1. Every one of those is a shape only a *failed launch* produces. The
+  unresolved-entry-point case is the one that had to be re-derived: `Cannot
+  find module 'x'` is Node's wording for a failed `require` *and* TypeScript's
+  wording for TS2307, which a compiler that ran perfectly writes to its stdout
+  about the project's own code. So it is matched structurally — Node's uncaught
+  error header **plus** a `node:internal/modules/` stack frame under it — and
+  never on the words alone (TOR-1414).
 
 `src/adapters/support/outcome.ts` is where the four "could not run" kinds live,
 and it is worth reading in full: `not-configured` → visible skip,

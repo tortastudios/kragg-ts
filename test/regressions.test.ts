@@ -30,6 +30,7 @@
  */
 
 import assert from "node:assert/strict";
+import { join } from "node:path";
 import { after, describe, it } from "node:test";
 
 import {
@@ -40,6 +41,7 @@ import {
   hasArtifact,
   journalEntries,
   materialize,
+  remove,
   runCli,
   type CliRun,
 } from "./regressionHarness.ts";
@@ -640,5 +642,77 @@ describe("TOR-1368: a rerun that discovers no tests is not a stability report", 
     const run = await flakyZeroTests();
     assert.match(run.stderr, /invocation: /u);
     assert.match(run.stderr, /searched: tests\/\*\*/u);
+  });
+});
+
+// ---------------------------------------------------------------------------
+// TOR-1414. `Cannot find module 'x'` is Node's wording for a failed require —
+// and also TypeScript's wording for TS2307, which a compiler that ran
+// perfectly well writes to its stdout. Matching those words anywhere in a
+// completed command's output reported the whole type-check gate as "tsc is
+// not installed": exit 3, `date-helpers` named as the missing tool, and not
+// one of the compiler's actual findings shown.
+// ---------------------------------------------------------------------------
+
+/** The bad import, introduced at run time. Line 3 is the `import`. */
+const BAD_IMPORT =
+  "/** Imports a package that is not installed: the compiler's TS2307. */\n" +
+  "\n" +
+  'import { formatDate } from "date-helpers";\n' +
+  "\n" +
+  "export function stamp(when: Date): string {\n" +
+  "  return formatDate(when);\n" +
+  "}\n";
+
+const tscDiagnostic = scenario(async (): Promise<ReportView> => {
+  const root = await materialize({ fixture: "tsc-diagnostic-not-missing", typescript: true });
+  edit(root, { "src/index.ts": BAD_IMPORT });
+  return reportOf(await runCli(root, ["check", "--no-journal", "--format", "json"]));
+});
+
+const tscEntryPointGone = scenario(async (): Promise<ReportView> => {
+  const root = await materialize({ fixture: "tsc-diagnostic-not-missing", typescript: true });
+  edit(root, { "src/index.ts": BAD_IMPORT });
+  // The half-installed shape, and the other half of this case: the `.bin/tsc`
+  // shim still resolves, and the entry point it requires is gone. Node's own
+  // uncaught MODULE_NOT_FOUND is what the adapter reads then — and THAT is a
+  // missing tool, which the fix must not have taken away.
+  remove(root, join("node_modules", "typescript", "lib", "tsc.js"));
+  return reportOf(await runCli(root, ["check", "--no-journal", "--format", "json"]));
+});
+
+describe("TOR-1414: a compiler diagnostic is a finding, not a missing compiler", () => {
+  it("reports the tsc gate as RUN and failed, never as an environment error", async () => {
+    const report = await tscDiagnostic();
+    const tsc = gate(report, "tsc");
+    assert.equal(ran(tsc), true, "the compiler ran; reporting it absent hid its findings");
+    assert.equal(tsc.error, false);
+    assert.equal(tsc.skipped, false);
+    assert.equal(tsc.passed, false);
+  });
+
+  it("lists the TS2307 diagnostic at an actionable location", async () => {
+    const report = await tscDiagnostic();
+    const tsc = gate(report, "tsc");
+    assert.deepEqual([...violationCodes(tsc)], ["TS2307"]);
+    const found = tsc.violations[0];
+    assert.equal(found?.file, "src/index.ts");
+    assert.equal(found?.line, 3);
+    assert.match(found?.message ?? "", /Cannot find module 'date-helpers'/u);
+  });
+
+  it("exits 1 (findings), not 3 (environment)", async () => {
+    const report = await tscDiagnostic();
+    assert.equal(report.exitCode, 1);
+  });
+
+  it("still calls a compiler whose own entry point is gone MISSING, at exit 3", async () => {
+    const report = await tscEntryPointGone();
+    const tsc = gate(report, "tsc");
+    assert.equal(tsc.error, true);
+    assert.equal(tsc.passed, false);
+    assert.equal(tsc.skipped, false);
+    assert.match(tsc.rawOutput ?? "", /tsc is not installed in this project/u);
+    assert.equal(report.exitCode, 3);
   });
 });
