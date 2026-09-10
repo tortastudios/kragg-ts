@@ -148,6 +148,37 @@ kragg init --dry-run           # ...or just print what that would change
 kragg hook claude              # harness hook adapter (reads hook JSON on stdin)
 ```
 
+### `kragg fix` runs two passes, not one
+
+Linting and formatting are two independent tool choices in this ecosystem, so
+`kragg fix` makes two independent detections and runs whichever halves the
+project actually has:
+
+| Half | What runs | Chosen when |
+| --- | --- | --- |
+| lint fix | `oxlint --fix`, `eslint --fix`, or biome's combined `check --write` | the same `lint_tool` detection the `lint` gate uses |
+| format | `prettier --write`, or `biome format --write` | the project both **installed** the formatter and **configured** it |
+
+biome is the one tool that covers both roles: when it is the project's linter,
+`check --write` has already formatted and no second formatter is detected.
+Everywhere else the two are unrelated — oxlint for lint plus Prettier for
+format is an ordinary pairing, and it is the pairing this repository would use
+if it formatted at all.
+
+**A formatter is never imposed.** Prettier arrives as a transitive dependency
+of plenty of toolchains, and a formatter run with no config rewrites every file
+it is pointed at to its own defaults — on disk, in one command. So a merely
+installed formatter is not enough: kragg looks for `.prettierrc*`,
+`prettier.config.*`, `package.json#prettier` or `biome.json` in the project
+root, and when it finds none it says so and formats nothing. There is no
+`format_tool` policy key; the config file *is* the declaration.
+
+Both halves are resolved from the project's own `node_modules/.bin`, and either
+one being absent is a visible skip naming the exact install command — the
+`note: … does not format` line is printed exactly when the run really did not
+format. A `lint_tool` that names a linter the project has not installed is
+still exit 3, and then nothing runs at all, formatter included.
+
 ### Exit codes
 
 Branchable without parsing a single line of prose.

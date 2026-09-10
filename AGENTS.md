@@ -102,7 +102,7 @@ failed task, not a judgement call.
 
 ## Project Map
 
-192 modules under `src/`, listed top-down in the order `kragg.json`'s
+193 modules under `src/`, listed top-down in the order `kragg.json`'s
 `layers` declares — a module may import its own layer or a lower one, never a
 higher one, and the `boundaries` gate enforces that on this repo.
 
@@ -167,7 +167,12 @@ higher one, and the `boundaries` gate enforces that on this repo.
   `testQuality.ts`, `typeComplexity.ts`. Each directory has a same-named `.ts`
   beside it that is the public entry point and re-exports the parts.
 - `src/adapters/` — external tools turned into violations: `lint.ts`,
-  `tsc.ts`, `testRunner.ts`, `audit.ts`, `deadcode.ts`; `linters/` holds the
+  `tsc.ts`, `testRunner.ts`, `audit.ts`, `deadcode.ts`; plus `format.ts`,
+  which is not a gate at all — it is the formatter detection `kragg fix`
+  drives, kept apart from `lint.ts` because formatting and linting are
+  independent tool choices in this ecosystem, and stricter than it because a
+  formatter with no config rewrites every file it is given (it therefore
+  requires a config file, never merely a `node_modules` entry); `linters/` holds the
   oxlint/biome/eslint JSON parsers, `support/` the per-package-manager audit
   parsers, the per-runner test reports, lcov/istanbul readers, the
   `Unavailable` outcome kinds, the `runCommand` helpers, the per-invocation

@@ -28,6 +28,40 @@ a previously green run red — see [Gate additions](#gate-additions) below.
 
 ### Added
 
+- **TOR-1420** — `kragg fix` now formats. It has always been documented as
+  "format and safely fix lint findings", but only biome ever formatted
+  anything: its `check --write` is a combined pass, while oxlint and eslint fix
+  lint findings and printed `note: X fixes lint findings only; it does not
+  format.` A project on oxlint — the faster choice, and the one this repository
+  dogfoods — therefore got no formatting at all. Formatting is now detected
+  INDEPENDENTLY of the lint tool, because the two are independent choices in
+  this ecosystem (oxlint-for-lint plus Prettier-for-format is an ordinary
+  pairing). `src/adapters/format.ts` resolves `prettier` (then `biome`) from
+  the project's own `node_modules/.bin`, exactly as every other external tool
+  kragg drives is resolved — never `PATH`, never a global install, never
+  kragg's own tree — and `kragg fix` runs `prettier --write` (or
+  `biome format --write`) after the lint fix pass, dropping the "does not
+  format" note for that project. When biome is the LINTER nothing changes:
+  `check --write` has already formatted, and no second formatter is detected or
+  run.
+
+  Detection is deliberately STRICTER than `detectLintTool`, which has a
+  fallback stage that accepts a merely-installed linter. A formatter with no
+  configuration rewrites every file it is pointed at to its own defaults, on
+  disk, in one command, and Prettier arrives transitively in plenty of
+  dependency trees — so a formatter is chosen only when the project both
+  installed **and** configured it (`.prettierrc*`, `prettier.config.*`,
+  `package.json#prettier`, `biome.json`). Installed-but-unconfigured is a
+  visible skip that names the config file to add; configured-but-uninstalled is
+  a visible skip that names the install command; neither is a silent no-op. A
+  `lint_tool` naming a linter the project has not installed is still `error`
+  and exit 3, and now nothing runs at all in that case — formatter included.
+
+  No dependency was added (kragg still bundles nothing), no gate was added, no
+  policy key was added, and no wire key, exit code or threshold changed. There
+  is deliberately no `check`-time `format` gate: reporting drift would mean a
+  new gate name in the report's gate list, which the Python conformance runner
+  diffs byte-exact, and the `fix` command is where writing to disk belongs.
 - **TOR-1378** — releases are gated on end-to-end regressions and on truthful
   self-check evidence, both against the BUILT `dist/cli.js`. 1,090 passing
   unit tests did not catch false-green behaviour between the engine, the
