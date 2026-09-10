@@ -14,22 +14,23 @@
  * the policy's `source_paths` really contain, and report the difference.
  *
  * ── THE FILE LIST IS THE COMPILER'S, NOT OURS ──────────────────────────────
- * `parseJsonConfigFileContent` is handed a REAL `readDirectory` here (the rest
- * of this gate stubs it out, because it only wants `compilerOptions`), so
- * `fileNames` is literally the list `tsc` would compile: `files`, `include`,
- * `exclude`, the implicit recursive default when no `include` is given,
- * extension rules and all. Re-implementing that globbing would guarantee
- * disagreeing with the compiler on some edge, and a config gate that cries
- * wolf gets switched off.
+ * The list arrives as a `ProjectConfig` from `analysis/program.ts`, which
+ * hands `parseJsonConfigFileContent` a REAL `readDirectory` (the flag audit
+ * stubs it out, because it only wants `compilerOptions`), so `fileNames` is
+ * literally the list `tsc` would compile: `files`, `include`, `exclude`, the
+ * implicit recursive default when no `include` is given, extension rules and
+ * all. Re-implementing that globbing would guarantee disagreeing with the
+ * compiler on some edge, and a config gate that cries wolf gets switched off.
+ * It is the same resolution the shared program is built from, so the two
+ * cannot disagree about which files the config reaches.
  *
  * ── WHERE IT REFUSES TO GUESS ──────────────────────────────────────────────
- * A root config carrying `references` is a SOLUTION-STYLE build: it typically
- * lists no inputs of its own and delegates every file to the referenced
- * projects, whose configs this tier does not walk. Auditing it would report
- * every source file in the repo as unchecked, which is both wrong and the
- * loudest possible way to be wrong. Those projects get a visible advisory
- * naming the reason instead — a stated non-audit is honest; a false alarm is
- * not.
+ * A config carrying `references` AND inputs of its own is a hybrid: its own
+ * inputs are audited, but the referenced projects' configs are not walked, and
+ * a visible advisory says so. (A config with references and NO inputs — the
+ * solution-style shape — never reaches this module: `config.ts` refuses it as
+ * a gate error, since its flags are not what type-checks anything.) A stated
+ * non-audit is honest; a false alarm is not.
  *
  * ── THERE IS DELIBERATELY NO PER-GATE OPT-OUT ──────────────────────────────
  * `structureExclude` exists because a barrel legitimately exceeds a symbol
@@ -49,23 +50,19 @@
  * which is the state this module exists to make visible.
  *
  * ── SCOPE, STATED ──────────────────────────────────────────────────────────
- *  - only `<root>/tsconfig.json`, like the rest of the gate. A project whose
- *    real config is `tsconfig.app.json` is unaudited here;
+ *  - one tsconfig — the selected one — like the rest of the gate;
  *  - `.d.ts` files are not walked, matching `parsedSources`;
  *  - the audit is over the WHOLE tree even under `--changed`, for the same
  *    reason the flag audit is: the config governs every file, and a directory
  *    dropped out of `include` must not hide behind an unrelated commit.
  */
 
-import { dirname, relative, resolve } from "node:path";
-
-import type ts from "typescript";
+import { relative, resolve } from "node:path";
 
 import { toPosix } from "../../analysis/modulePath.ts";
-import type { TypeScriptApi } from "../../analysis/sourceFile.ts";
+import type { ProjectConfig } from "../../analysis/program.ts";
 import { DEFAULT_EXTENSIONS, walkFiles } from "../../analysis/walk.ts";
 import type { Violation } from "../../engine/models.ts";
-import { TSCONFIG_NAME, type Table } from "./chain.ts";
 import { TYPING_STRICTNESS_CODES as CODE } from "./codes.ts";
 
 /** Findings split by whether they fail the gate, as `ConfigAudit` is. */
@@ -86,65 +83,29 @@ const NAMED_LIMIT = 20;
 const EMPTY: IncludeAudit = { violations: [], advisories: [] };
 
 /**
- * Report source files no `tsconfig.json` input covers.
+ * Report source files no input of the config covers.
  *
- * `config` is the PARSED tsconfig JSON — the same object the flag audit hands
- * to `parseJsonConfigFileContent` — so the file is read once for both halves.
+ * `name` is the config's root-relative path, for the messages. `config` is
+ * the compiler's resolution of it. An unusable config is not re-reported —
+ * the flag audit has already turned it into a `tsconfig-invalid` violation, or
+ * the gate has refused it outright — EXCEPT the one that simply matches
+ * nothing (`kind: "empty"`), whose honest file list is empty and whose every
+ * source file is therefore unchecked.
  */
 export function auditIncludedSources(
   root: string,
-  config: unknown,
+  name: string,
+  config: ProjectConfig,
   sourcePaths: readonly string[],
-  api: TypeScriptApi,
 ): IncludeAudit {
-  const solution = referenceCount(config);
-  if (solution > 0) {
-    return { violations: [], advisories: [unaudited(solution)] };
+  if (!config.ok) {
+    return config.kind === "empty" ? report(unchecked(root, sourcePaths, new Set()), name) : EMPTY;
   }
-  const checked = resolvedFiles(root, config, api);
-  if (checked === null) {
-    return EMPTY;
+  if (config.references.length > 0) {
+    return { violations: [], advisories: [unaudited(name, config.references.length)] };
   }
-  return report(unchecked(root, sourcePaths, checked));
-}
-
-/**
- * The files the compiler resolves for this config, or `null` when it could
- * not be asked.
- *
- * `null` is not "everything is unchecked": the flag audit has already turned
- * an unparseable config into a `tsconfig-invalid` violation, and reporting
- * every source file a second time would only add noise to a config the project
- * already has to fix.
- */
-function resolvedFiles(
-  root: string,
-  config: unknown,
-  api: TypeScriptApi,
-): ReadonlySet<string> | null {
-  const configPath = resolve(root, TSCONFIG_NAME);
-  const host: ts.ParseConfigHost = {
-    useCaseSensitiveFileNames: api.sys.useCaseSensitiveFileNames,
-    // The real one, unlike everywhere else in this gate: the file LIST is the
-    // entire question here.
-    readDirectory: (base, extensions, excludes, includes, depth) =>
-      api.sys.readDirectory(base, extensions, excludes, includes, depth),
-    fileExists: (file: string) => api.sys.fileExists(file),
-    readFile: (file: string) => api.sys.readFile(file),
-  };
-  let command: ts.ParsedCommandLine;
-  try {
-    command = api.parseJsonConfigFileContent(
-      config,
-      host,
-      dirname(configPath),
-      undefined,
-      configPath,
-    );
-  } catch {
-    return null;
-  }
-  return new Set(command.fileNames.map((file) => resolve(file)));
+  const checked = new Set(config.parsed.fileNames.map((file) => resolve(file)));
+  return report(unchecked(root, sourcePaths, checked), name);
 }
 
 /** Source files under the policy's paths that the compiler's list omits. */
@@ -173,21 +134,23 @@ function unchecked(
 }
 
 /** One violation per named file, then a single count for the tail. */
-function report(missing: readonly string[]): IncludeAudit {
+function report(missing: readonly string[], name: string): IncludeAudit {
   if (missing.length === 0) {
     return EMPTY;
   }
-  const violations: Violation[] = missing.slice(0, NAMED_LIMIT).map(fileViolation);
+  const violations: Violation[] = missing
+    .slice(0, NAMED_LIMIT)
+    .map((file) => fileViolation(file, name));
   const hidden = missing.length - violations.length;
   if (hidden > 0) {
     violations.push({
       message:
-        `${hidden} further source files are outside \`${TSCONFIG_NAME}\` — ` +
+        `${hidden} further source files are outside \`${name}\` — ` +
         "the type checker never opens them either",
-      file: TSCONFIG_NAME,
+      file: name,
       code: CODE.uncheckedSource,
       fixHint:
-        `widen \`include\` in \`${TSCONFIG_NAME}\` to cover the source paths, ` +
+        `widen \`include\` in \`${name}\` to cover the source paths, ` +
         "or drop the directory from `source_paths` in kragg.json if it is " +
         "deliberately not type-checked",
     });
@@ -195,54 +158,40 @@ function report(missing: readonly string[]): IncludeAudit {
   return { violations, advisories: [] };
 }
 
-function fileViolation(file: string): Violation {
+function fileViolation(file: string, name: string): Violation {
   return {
     message:
       `${file} is not type-checked — no \`files\`/\`include\` entry in ` +
-      `\`${TSCONFIG_NAME}\` covers it, so tsc never reads it`,
+      `\`${name}\` covers it, so tsc never reads it`,
     file,
     code: CODE.uncheckedSource,
     fixHint:
-      `add \`${file}\` to \`include\` in \`${TSCONFIG_NAME}\` (or drop its ` +
+      `add \`${file}\` to \`include\` in \`${name}\` (or drop its ` +
       "directory from `source_paths` in kragg.json if it is deliberately not " +
       "type-checked — an unchecked directory should not be gated as source)",
   };
 }
 
 /**
- * The visible skip for a solution-style build.
+ * The visible skip for a config that mixes its own inputs with references.
  *
  * ADVISORY, not a violation: the project is not doing anything wrong, and this
  * tier simply cannot follow it. It rides in the advisory bucket so it is
  * recorded and reported rather than silently absent — see the caveat on
  * `fromTypingStrictness` about when advisories reach the printed report.
  */
-function unaudited(references: number): Violation {
+function unaudited(name: string, references: number): Violation {
   return {
     message:
-      `include/exclude coverage was NOT audited: \`${TSCONFIG_NAME}\` declares ` +
-      `${references} project ${references === 1 ? "reference" : "references"}, ` +
-      "so it is a solution-style build whose inputs live in the referenced " +
-      "configs — this tier reads only the root config and would report every " +
-      "source file as unchecked",
-    file: TSCONFIG_NAME,
+      `include/exclude coverage was NOT audited: \`${name}\` declares ` +
+      `${references} project ${references === 1 ? "reference" : "references"} ` +
+      "beside its own inputs, and this tier reads one config per run — the " +
+      "referenced projects' coverage of the source paths is unknown here",
+    file: name,
     code: CODE.uncheckedSourceUnaudited,
     fixHint:
-      "no action required; run kragg inside each referenced project to have " +
+      "no action required; point `tsconfig` in kragg.json at each referenced " +
+      "project in turn, or run kragg inside each referenced package, to have " +
       "its own tsconfig audited",
   };
-}
-
-/** How many `references` entries the root config declares. */
-function referenceCount(config: unknown): number {
-  if (!isTable(config)) {
-    return 0;
-  }
-  const references: unknown = config["references"];
-  return Array.isArray(references) ? references.length : 0;
-}
-
-/** True for a non-null, non-array object — a tsconfig document's shape. */
-function isTable(value: unknown): value is Table {
-  return typeof value === "object" && value !== null && !Array.isArray(value);
 }

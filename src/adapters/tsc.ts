@@ -28,6 +28,8 @@
 import { existsSync } from "node:fs";
 import { isAbsolute, join, relative } from "node:path";
 
+import { readProjectConfig } from "../analysis/program.ts";
+import { resolveTypeScript } from "../analysis/sourceFile.ts";
 import { commandOutput, type CompletedCommand, type Violation } from "../engine/models.ts";
 import { runCommand } from "../engine/runner.ts";
 import {
@@ -206,6 +208,12 @@ function normalize(path: string, root: string): string {
  *  1. No tsconfig -> error, checked on disk BEFORE spawning anything. `tsc`
  *     would report this itself as TS5058, but checking first produces a
  *     message that names the file we looked for instead of a compiler code.
+ *     A SOLUTION-STYLE tsconfig (project `references`, no inputs of its own)
+ *     is the other pre-flight refusal: `tsc -p` on one prints nothing and
+ *     EXITS 0 — verified against the compiler — so without this check the
+ *     gate would report `[PASS] tsc` over a project it never opened. The
+ *     check is `readProjectConfig`, the same one the shared program uses, so
+ *     the two refuse identical files with identical words.
  *  2. `tsc` not installed -> error with the install command, from
  *     `missingToolMessage`. Never a fall back to kragg's own compiler.
  *  3. Type errors found -> violations, gate failure, exit 1.
@@ -259,13 +267,34 @@ function resolveCompiler(env: ProjectEnvironment, project: string): CompilerLook
         "kragg type-checks through the project's own tsconfig; without one there " +
         "is no configuration to check against, and checking with defaults would " +
         "report against rules this project never chose.\n" +
-        `Fix: create ${project}, or point the gate at the right one.`,
+        `Fix: create ${project}, or set \`tsconfig\` in kragg.json to the right one.`,
     };
+  }
+  const solution = solutionStyle(env.root, projectPath);
+  if (solution !== null) {
+    return { ok: false, message: solution };
   }
   const bin = resolveBin(env, TSC_BIN);
   return bin === null
     ? { ok: false, message: missingToolMessage(env, TSC_BIN, TSC_PACKAGE) }
     : { ok: true, bin };
+}
+
+/**
+ * The refusal for a tsconfig that configures nothing to check, or `null`.
+ *
+ * Only the solution-style shape is decided here, because it is the one `tsc`
+ * itself accepts silently. Every other unusable config — unreadable, an
+ * unknown option, an `include` that matches nothing — is left to the compiler,
+ * whose diagnostics `unusableProject` already turns into an error with the
+ * compiler's own codes attached.
+ */
+function solutionStyle(root: string, projectPath: string): string | null {
+  const config = readProjectConfig(resolveTypeScript(root).api, projectPath);
+  if (config.ok || config.kind !== "solution") {
+    return null;
+  }
+  return `${config.message}\nThe type-check gate did not run.`;
 }
 
 /** One completed `tsc` invocation, with everything needed to judge it. */

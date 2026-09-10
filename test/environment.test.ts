@@ -18,6 +18,7 @@ import { join } from "node:path";
 import { after, describe, it } from "node:test";
 
 import type { CompletedCommand } from "../src/engine/models.ts";
+import { readJsonObject } from "../src/environment/manifest.ts";
 import {
   describe as describeEnvironment,
   detectPackageManager,
@@ -347,6 +348,23 @@ describe("missingTool", () => {
   });
 });
 
+describe("readJsonObject", () => {
+  // Three callers in `workspaces.ts` made this the member-recognition rule,
+  // so every way it answers `null` is pinned: each one is a directory that is
+  // NOT a member, and a throw here would abort a whole workspace expansion.
+  it("returns the object, and null for a missing, malformed or non-object file", () => {
+    const root = project({
+      "ok.json": '{"name":"a"}',
+      "bad.json": "{ not json",
+      "list.json": "[1]",
+    });
+    assert.deepEqual(readJsonObject(join(root, "ok.json")), { name: "a" });
+    assert.equal(readJsonObject(join(root, "missing.json")), null);
+    assert.equal(readJsonObject(join(root, "bad.json")), null);
+    assert.equal(readJsonObject(join(root, "list.json")), null);
+  });
+});
+
 describe("detectWorkspaces", () => {
   it("reports a single-package repo as a successful detection", () => {
     const info = detectWorkspaces(project({ "package.json": "{}" }));
@@ -354,13 +372,74 @@ describe("detectWorkspaces", () => {
     assert.equal(info.note, null);
   });
 
-  it("detects pnpm-workspace.yaml without pretending to parse it", () => {
-    const root = project({ "pnpm-workspace.yaml": "packages:\n  - packages/*\n" });
+  it("reads pnpm-workspace.yaml#packages and expands it to the members on disk", () => {
+    const root = project({
+      "pnpm-workspace.yaml": "packages:\n  - 'packages/*'\n  - \"apps/**\"\n  - '!packages/legacy'\n",
+      "packages/a/package.json": '{"name":"@ws/a"}',
+      "packages/b/package.json": "{}",
+      "packages/legacy/package.json": '{"name":"@ws/legacy"}',
+      "packages/README/notes.txt": "not a package: no manifest",
+      "apps/site/deep/tool/package.json": '{"name":"tool"}',
+      "node_modules/dep/package.json": '{"name":"dep"}',
+    });
     const info = detectWorkspaces(root);
     assert.equal(info.kind, "pnpm");
     assert.equal(info.configPath, join(root, "pnpm-workspace.yaml"));
-    assert.deepEqual(info.patterns, []);
-    assert.match(info.note ?? "", /not parsed/);
+    assert.deepEqual(info.patterns, ["packages/*", "apps/**", "!packages/legacy"]);
+    assert.equal(info.note, null);
+    assert.deepEqual(
+      info.packages.map((member) => [member.path, member.name]),
+      [
+        ["apps/site/deep/tool", "tool"],
+        ["packages/a", "@ws/a"],
+        ["packages/b", null],
+      ],
+    );
+    assert.equal(info.packages[1]?.root, join(root, "packages", "a"));
+  });
+
+  it("treats a pnpm-workspace.yaml with no `packages` key as the root alone", () => {
+    // kragg's own file: settings only. Not a note, not an error — a fact.
+    const info = detectWorkspaces(project({ "pnpm-workspace.yaml": "ignoreScripts: true\n" }));
+    assert.equal(info.kind, "pnpm");
+    assert.deepEqual(info.packages, []);
+    assert.equal(info.note, null);
+  });
+
+  it("REFUSES a pnpm-workspace.yaml it cannot read in full, naming the line", () => {
+    // A member dropped by a lenient reader is one no root run would mention.
+    // The list is complete or empty; never partial.
+    for (const [text, reason] of [
+      ["packages: [a, b]\n", /line 1 .*block sequence/],
+      ["packages:\n  - packages/*\n  - *anchor\n", /line 3 .*not a plain or quoted/],
+      ["packages:\n  - packages/*\n  nested: true\n", /line 3/],
+      ["packages:\n  - |\n    packages/*\n", /line 2/],
+    ] as const) {
+      const info = detectWorkspaces(project({ "pnpm-workspace.yaml": text }));
+      assert.equal(info.kind, "pnpm", text);
+      assert.deepEqual(info.packages, [], text);
+      assert.match(info.note ?? "", reason, text);
+    }
+  });
+
+  it("expands package.json workspaces the same way, and refuses unknown glob syntax", () => {
+    const root = project({
+      "package.json": JSON.stringify({ workspaces: ["packages/*"] }),
+      "packages/a/package.json": '{"name":"a"}',
+      "packages/a/nested/package.json": '{"name":"nested"}',
+    });
+    const info = detectWorkspaces(root);
+    assert.deepEqual(info.packages.map((member) => member.path), ["packages/a"]);
+    assert.equal(info.note, null);
+
+    const braces = detectWorkspaces(
+      project({
+        "package.json": JSON.stringify({ workspaces: ["packages/{a,b}"] }),
+        "packages/a/package.json": "{}",
+      }),
+    );
+    assert.deepEqual(braces.packages, []);
+    assert.match(braces.note ?? "", /packages\/\{a,b\}.*does not expand/);
   });
 
   it("reads package.json workspaces in both shapes", () => {

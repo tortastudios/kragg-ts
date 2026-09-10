@@ -57,6 +57,7 @@ kragg check --changed          # only files changed vs HEAD (cheap inner loop)
 kragg check --since main       # changed vs merge-base with a ref
 kragg check --file src/a.ts    # scope to specific files (repeatable)
 kragg check --format json      # stable machine-readable schema
+kragg check --package @app/web # one workspace member as its own run (repeatable)
 kragg security                 # the security subset, cheap enough for every push
 kragg fix                      # format and safely auto-fix lint findings
 
@@ -171,6 +172,65 @@ Git being *unable to answer* — not a repository, an unknown `--since` ref, no
 commit to diff against — is exit 3 carrying git's own message, never an empty
 file list. A `--file` that names a path which is not there is exit 2 naming it.
 
+### Which tsconfig, and which package
+
+**One tsconfig per run, named by the policy.** Every type-aware surface — the
+shared `ts.Program`, the `tsc` gate's `--project`, the `typing-strictness`
+audit, the `boundaries`/`structure` alias table and the criticality freshness
+stamp — reads the file the `tsconfig` setting names (default `tsconfig.json`),
+resolved once by `projectTsconfig` in `src/environment/project.ts`. A project
+configured by `tsconfig.base.json` + `tsconfig.app.json` sets
+`"tsconfig": "tsconfig.app.json"` and is checked where it is configured. A
+configured file that does not exist is exit **2** naming it; a missing
+*default* `tsconfig.json` is what the gates report (`tsconfig-missing`, a `tsc`
+error), because nobody wrote that setting wrongly.
+
+**A solution-style tsconfig is refused, not passed over.** `tsc -p` on a file
+that has `references` and no inputs of its own — the Vite template's root
+`tsconfig.json` — prints nothing and exits 0, and a program built from it holds
+no files. Before this, the `tsc` gate reported `[PASS]` over such a project
+while `typing-strictness` judged the solution file's empty `compilerOptions`
+as four violations. Now `tsc`, `typing-strictness` and every program-backed
+gate are `error: true` (exit 3) with one message naming the referenced
+projects and the fix: point `tsconfig` at the project that has inputs. The
+references are deliberately not expanded into N runs over one source tree — a
+run analyzes one project, and says which.
+
+**A workspace member is its own run.** `check --package <name-or-path>` and
+`security --package …` (repeatable) check a member instead of the root, with
+the member's root, its own policy (`kragg.json` / `package.json#kragg` if it
+has one, else the **root's** policy, never the defaults), its own `tsconfig`
+setting, its own compiler (`resolveTypeScript` from the member — a workspace
+mixing TypeScript 5.9 and 6.0 uses each where it is installed, and the report
+says which), exactly one lazy program, and its own `.kragg/history.jsonl`.
+Members are never merged into one report: text output has one section per
+member plus a `== workspace: … ==` summary; `--format json` prints an **array**
+of ordinary per-member payloads (each the unchanged schema, with its own
+`targets`); the exit code is the worst member's (3 over 1 over 0). An unknown
+`--package`, a member whose configured tsconfig is missing, or a malformed
+member policy is exit **2** *before any gate runs* — no member runs half a
+workspace. `--package` cannot be combined with `--file`, `--changed` or
+`--since` (a member run is the whole member). The **legacy-debt baseline** is
+the member's too: a member run reads — and, under `--update-baseline`, writes —
+the file its effective policy names, at its *own* root, so a member that
+inherits the workspace's `"baseline": ".kragg/baseline.json"` keeps its
+accepted debt in `packages/a/.kragg/baseline.json` and can never absorb another
+package's findings. A member whose effective policy names no baseline refuses
+`--update-baseline` with exit **2** before any gate runs anywhere, exactly as a
+single-package project does.
+
+**A root run says what it did not check.** In a workspace root, `check` and
+`security` without `--package` check the root package and print on stderr
+which members were not checked — or why the member list could not be read.
+Members come from `pnpm-workspace.yaml#packages` (pnpm) or
+`package.json#workspaces` (npm/yarn/bun), expanded against the directories
+that hold a `package.json`. Both readers are deliberately small and
+**fail-closed**: a YAML shape beyond a block sequence of scalars, or a glob
+beyond literal segments, `*` within a segment, `**` and a leading `!`, empties
+the list and names the line or pattern — never a partial list that a root run
+would then report as complete. A directory path still works as `--package`
+when names cannot be resolved.
+
 ### Which scope each gate honours
 
 Narrowing a gate that reasons about the whole program would make it lie, so
@@ -180,7 +240,7 @@ several deliberately ignore the selection. That is documented, not accidental:
 | --- | --- | --- |
 | `lint` | the targets, verbatim | per-file, and the linter takes directories |
 | `tsc` | **whole project, always** | the selection only orders diagnostics; the error a change causes is usually in a file that did not change |
-| `typing-strictness` | the file list, for the source scan | the `tsconfig.json` audit always runs — a loosened floor must not ride in on an unrelated commit |
+| `typing-strictness` | the file list, for the source scan | the audit of the selected tsconfig always runs — a loosened floor must not ride in on an unrelated commit |
 | `complexity`, `maintainability`, `halstead`, `structure` | **whole project** | per-file budgets, but cheap enough to keep whole so a run cannot report a budget it never measured |
 | `type-complexity` | the file list | per-file annotation budgets |
 | `boundaries` | **whole project** | a layering violation is a property of the import graph, not of one file |
@@ -421,6 +481,7 @@ is written.
   "$schema": "./node_modules/kragg/kragg.schema.json",
   "source_paths": ["src"],
   "test_paths": ["test"],
+  "tsconfig": "tsconfig.json",
   "layers": ["src/cli", "src/commands", "src/gates", "src/engine"],
   "max_file_lines": 500,
   "max_public_symbols": 20,
@@ -437,6 +498,13 @@ is written.
   }
 }
 ```
+
+`tsconfig` names the ONE project file every type-aware surface reads, relative
+to the root (default `tsconfig.json`); see [Which tsconfig, and which
+package](#which-tsconfig-and-which-package). It is TypeScript-only — Python has
+no equivalent knob — and it is a path, so `""` is rejected like any other
+malformed value. In a workspace, a member with its own `kragg.json` reads its
+own `tsconfig`; a member without one inherits the root policy's.
 
 **Reviewed critical functions.** Centrality finds what other code leans on; it
 says nothing about *consequence*. An authorization check called from one route
@@ -544,7 +612,9 @@ Deliberate, and documented at each site:
 | `structure` | Counts real `export` declarations, and enumerates `export *`, rather than Python's leading-underscore convention. |
 | `detect-secrets` | Bundles no scanner. Under `secret_scanner: "auto"`: gitleaks, else secretlint, else a visible skip. A scanner named in the policy is *required* — unavailable, or installed and crashing, is `error: true` and exit 3, never a skip. |
 | `audit` | knip, which covers both vulture (dead code) and deptry (dependency hygiene). |
-| criticality | Fingerprinted by a sidecar stamp — a content hash of the analyzed sources plus `kragg.json`, `package.json#kragg`, `tsconfig.json` and the resolved compiler — so stale call-graph data is re-derived rather than trusted. `criticality.json` itself stays byte-compatible with Python's reader. |
+| criticality | Fingerprinted by a sidecar stamp — a content hash of the analyzed sources plus `kragg.json`, `package.json#kragg`, the selected tsconfig and the resolved compiler — so stale call-graph data is re-derived rather than trusted. `criticality.json` itself stays byte-compatible with Python's reader. |
+| `tsconfig` setting | TypeScript-only. Names the one project file every type-aware surface reads; a solution-style file (references, no inputs) is refused as a gate error rather than type-checked vacuously. Python has one `pyproject.toml` and no equivalent. |
+| `--package` | TypeScript-only. A workspace member checked as its own run — own root, policy, tsconfig, compiler, program and journal — with one report per member and, in JSON, an array of them. Python has no workspace notion. |
 | criticality (top-20) | Python's `top_n=20` truncates the analysis, so its `criticality.json` — the input the criticality gates enforce on — never names more than twenty functions. Here twenty is a *display* limit on `CRITICALITY.md` and the terminal table only; the sidecar carries every ranked function, so the gates enforce on the whole eligible population. Same record shape, same ranking, more rows. |
 | `criticality --path` | Scopes the printed table only. Combined with `--write` it is a usage error, where Python persists the scoped result — a partial `criticality.json` reads downstream as "everything else is uncritical". |
 | `critical_functions` | Reviewed declarations make a low-fan-in function critical in *addition* to the graph's own selection. Python has no such setting; the sidecar keeps its six-key record shape either way, and the reason is re-derived from the policy rather than stored. |

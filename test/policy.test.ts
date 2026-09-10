@@ -513,6 +513,7 @@ describe("policyAsDict", () => {
       "coverage_report_path",
       "test_command",
       "baseline",
+      "tsconfig",
     ]);
   });
 

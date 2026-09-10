@@ -296,8 +296,9 @@ Same key vocabulary, snake_case, on both sides; only the carrier differs —
 merging. kragg-ts adds tool-selection keys (`lint_tool`, `test_runner`,
 `test_command`, `secret_scanner`, `audit_severity`) that have no Python
 analogue, where `"off"` is a deliberate, visible disable: the gate SKIPs with a
-reason saying so — and `baseline`, the root-relative path of the legacy-debt
-baseline (row 31 of section 11), `null` by default. `test_command` is an argv
+reason saying so — `baseline`, the root-relative path of the legacy-debt
+baseline (row 31 of section 11), `null` by default — and `tsconfig`, the one
+project file every type-aware surface reads (row 38). `test_command` is an argv
 ARRAY, never a shell string, and `test_paths` entries may be patterns as well
 as directories — rows 34 and 35 below. A malformed *value* is rejected by name
 (`PolicyError`, exit 2; row 15) rather than defaulted, and a file that cannot
@@ -367,7 +368,7 @@ A conformance runner must not flag these; a suite that diffs the two
 implementations naively will flag every one. Rows 1–9 are this repository's
 original table, re-verified against both trees while the spec was written; rows
 10–12 were added by that verification and are also SPEC.md section 10's rows
-10–12; rows 13–37 were introduced by TOR-1358, TOR-1363, TOR-1361, TOR-1369, TOR-1375, TOR-1364, TOR-1365, TOR-1374, TOR-1377, TOR-1370, TOR-1372 and TOR-1373 on this branch. Fixtures that exercise a row carry a `divergences` entry naming its id.
+10–12; rows 13–39 were introduced by TOR-1358, TOR-1363, TOR-1361, TOR-1369, TOR-1375, TOR-1364, TOR-1365, TOR-1374, TOR-1377, TOR-1370, TOR-1372, TOR-1373 and TOR-1371 on this branch. Fixtures that exercise a row carry a `divergences` entry naming its id.
 
 | # | Divergence | Why it is intentional |
 | --- | --- | --- |
@@ -408,6 +409,8 @@ original table, re-verified against both trees while the spec was written; rows
 | 35 | `test_command`: an explicit, argv-array test invocation | Python builds one `pytest` command and needs no equivalent — pytest reads Python with no loader flag. A JS suite frequently cannot be run without one (`node --import tsx --test`), and detection reading `package.json#scripts.test` concludes only WHICH RUNNER, never an equivalent command. The setting is a TypeScript-only tail key in `policy show`, exactly like `lint_tool` and `test_runner`; a shell string is rejected with exit 2, because `src/engine/runner.ts` spawns with `shell: false`. |
 | 36 | a completed run that discovered ZERO tests is `error: true` / exit 3 | "0 tests, 0 failed" parses cleanly, so it used to pass. Nothing was executed, so nothing was verified — the same rule TOR-1368 applies to a `flaky --rerun` sample, applied to the gate. Python passes `--cov-fail-under` to pytest and reads pytest's exit code, so it does not model this as its own outcome. `"test_runner": "off"` remains the way to say the gate should not run. |
 | 37 | test evidence for critical functions is checker-bound | Python's `critical-tests` passes when ANY changed file is under `tests/`, and its `test-quality` `critical-untested` is `simple_name in corpus` over the test text. kragg-ts's `critical-tests` accepts a changed test only when the checker binds an identifier in it (or in a test-tree module it imports) to the changed function or its module, outside a skipped test, and names the examined files when none qualifies; `test-quality` requires an identifier bound to the function outside a skipped test. Both are `error: true` when the program cannot be built, and a test file outside the `tsconfig.json` program is reported as unresolvable rather than text-matched. Same gate names, same violation codes, same message shape for the no-test-change case; the `spec` property summary keeps the ported text signal and documents it. Pinned by `test/criticalTests.test.ts` and `test/testQuality.test.ts`; `check-missing-tsc`'s test binds both of its functions, so its golden is unaffected. |
+| 38 | a `tsconfig` policy setting selects the ONE project file every type-aware surface reads; a solution-style file is a gate ERROR | TypeScript-only, like the tool-selection keys in §8: Python has one `pyproject.toml`. The shared program, `tsc --project`, the `typing-strictness` audit, the alias table and the freshness stamp all read the file the setting names, so a `tsconfig.app.json` project is checked where it is configured. A file with `references` and no inputs makes `tsc -p` exit 0 having checked nothing; kragg-ts refuses it as `error: true` (SPEC §4.3's "could not run") naming the referenced projects, rather than reporting a `[PASS] tsc` over an unchecked tree. A configured file that does not exist is exit 2. No key is added to the report or the stamp — the selected file is folded into the existing `inputs_digest`. |
+| 39 | `check --package` / `security --package` run a workspace member as its own run; a root run names the members it did not check | TypeScript-only: Python has no workspace notion. Each member is a complete run (own root, policy, tsconfig, compiler, program, journal) and produces the ordinary payload with the unchanged schema; several members are an **array** of payloads on stdout, never one merged report. The exit code is the worst member's; every usage error refuses the invocation before a gate runs. No fixture covers `--package`, so no golden moves. |
 
 Four defects found in the Python implementation during the port are recorded in
 [KNOWN_LIMITATIONS.md](../KNOWN_LIMITATIONS.md#found-in-the-python-implementation-during-this-port).

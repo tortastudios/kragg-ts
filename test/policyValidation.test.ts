@@ -20,7 +20,14 @@ import { join } from "node:path";
 import { fileURLToPath } from "node:url";
 import { after, describe, it } from "node:test";
 
-import { DEFAULT_POLICY, loadPolicy, policyAsDict, PolicyError } from "../src/policy/policy.ts";
+import {
+  DEFAULT_POLICY,
+  declaresPolicy,
+  loadPolicy,
+  policyAsDict,
+  PolicyError,
+} from "../src/policy/policy.ts";
+import { readTable } from "../src/policy/readers.ts";
 import { kraggConfig } from "../src/scaffold/guardrails.ts";
 
 const REPO = fileURLToPath(new URL("..", import.meta.url));
@@ -275,5 +282,53 @@ describe("loadPolicy: test_command is an argv array kragg can read the output of
         .testCommand,
       ["tsx", "--test"],
     );
+  });
+});
+
+describe("readTable: absent is the ONLY silent outcome", () => {
+  // The one file-reading primitive under every policy source, and the one
+  // place "the project did not configure kragg" is distinguished from "the
+  // project configured kragg and I could not read it". `declaresPolicy` and
+  // `loadSource` both lean on that distinction — a workspace member whose
+  // malformed `kragg.json` read as `null` would silently inherit the root's
+  // rules — so it is asserted directly rather than through a loader.
+
+  it("returns null for a file that is not there, and the parsed object when it is", () => {
+    const root = project({ "kragg.json": '{"profile":"strict"}' });
+    assert.equal(readTable(join(root, "nope.json")), null);
+    // ENOTDIR, not ENOENT: a path THROUGH a file is still "not there".
+    assert.equal(readTable(join(root, "kragg.json", "deeper.json")), null);
+    assert.deepEqual(readTable(join(root, "kragg.json")), { profile: "strict" });
+  });
+
+  it("throws PolicyError for invalid JSON and for a non-object top level", () => {
+    const broken = project({ "kragg.json": "{not json" });
+    assert.throws(
+      () => readTable(join(broken, "kragg.json")),
+      (error: unknown) => {
+        assert.ok(error instanceof PolicyError);
+        assert.match(error.message, /kragg\.json is not valid JSON/u);
+        return true;
+      },
+    );
+    const array = project({ "kragg.json": "[1, 2]" });
+    assert.throws(
+      () => readTable(join(array, "kragg.json")),
+      (error: unknown) => {
+        assert.ok(error instanceof PolicyError);
+        assert.match(error.message, /must contain a JSON object at the top level/u);
+        return true;
+      },
+    );
+  });
+
+  it("is what declaresPolicy asks, so a member's own config is never missed", () => {
+    // TOR-1371 + TOR-1372: `--package` inherits the root's policy only when
+    // the member declares NONE. Both spellings count, and neither is read
+    // through a defaulting path.
+    assert.equal(declaresPolicy(project({ "kragg.json": "{}" })), true);
+    assert.equal(declaresPolicy(project({ "package.json": '{"kragg":{}}' })), true);
+    assert.equal(declaresPolicy(project({ "package.json": '{"name":"m"}' })), false);
+    assert.equal(declaresPolicy(project({})), false);
   });
 });

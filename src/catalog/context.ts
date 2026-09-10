@@ -27,6 +27,13 @@
  * the identical compiler the type-aware ones use. Mixing two compilers across
  * one run means two different `SyntaxKind` numberings applied to one file set;
  * see the COMPILER IDENTITY note in `analysis/program.ts`.
+ *
+ * THE TSCONFIG IS THE POLICY'S. `program.tsconfigPath` is
+ * `projectTsconfig(root, policy.tsconfig)`, and every gate that reads a
+ * tsconfig — `tsc`, `typing-strictness`, `boundaries`/`structure` for their
+ * alias table — is handed that same path by `catalog/check.ts`. A run reads
+ * one project file, by construction. A package-level run (`--package`) is a
+ * whole separate context with its own root, policy, compiler and program.
  */
 
 import { mkdirSync } from "node:fs";
@@ -36,7 +43,7 @@ import type { TestRunOutcome } from "../adapters/testRunner.ts";
 import { analysisProgram, type AnalysisProgram } from "../analysis/program.ts";
 import type { TypeScriptApi } from "../analysis/sourceFile.ts";
 import { JOURNAL_DIR } from "../engine/journal.ts";
-import type { ProjectEnvironment } from "../environment/project.ts";
+import { projectTsconfig, type ProjectEnvironment } from "../environment/project.ts";
 import { criticalityFreshness, STALE_CRITICALITY_REASON } from "../gates/criticality.ts";
 import { NO_CRITICALITY_REASON } from "../gates/testDepth/outcome.ts";
 import type { KraggPolicy } from "../policy/policy.ts";
@@ -117,7 +124,10 @@ export function catalogContext(options: CatalogOptions): CatalogContext {
   } catch {
     // Deliberately swallowed: see above.
   }
-  const program = analysisProgram({ root });
+  const program = analysisProgram({
+    root,
+    tsconfigPath: projectTsconfig(root, options.policy.tsconfig),
+  });
   return {
     ...options,
     root,

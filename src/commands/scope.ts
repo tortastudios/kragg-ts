@@ -59,11 +59,12 @@
  * that names nothing checkable (exit 2, naming the path).
  */
 
-import { statSync } from "node:fs";
+import { existsSync, statSync } from "node:fs";
 import { basename, relative, resolve, sep } from "node:path";
 
 import { walkFiles } from "../analysis/walk.ts";
 import { EXIT_ENVIRONMENT, EXIT_USAGE } from "../engine/report.ts";
+import { DEFAULT_TSCONFIG, projectTsconfig } from "../environment/project.ts";
 import {
   scanChanges,
   selectSourceFiles,
@@ -168,6 +169,10 @@ export async function resolveScope(
   request: ScopeRequest,
   policy: KraggPolicy,
 ): Promise<ScopeResult> {
+  const unusable = missingConfiguredTsconfig(request.root, policy);
+  if (unusable !== undefined) {
+    return { ok: false, exit: EXIT_USAGE, message: unusable };
+  }
   if (request.changed || request.since !== null) {
     return await incrementalScope(request, policy);
   }
@@ -175,6 +180,32 @@ export async function resolveScope(
     return explicitScope(request.root, request.targets);
   }
   return { ok: true, scope: fullScope(policy, undefined) };
+}
+
+/**
+ * A `tsconfig` the policy names that is not there — a usage error, before any
+ * gate runs.
+ *
+ * The policy said which file configures the project and the file does not
+ * exist; that is the same class of mistake as `--file nope.ts`, and gets the
+ * same answer: exit 2, naming the path, and no report that could be mistaken
+ * for a verdict. The DEFAULT is deliberately not checked here: a project with
+ * no `tsconfig.json` at all is a project state the gates already report on
+ * (`typing-strictness` writes `tsconfig-missing`, `tsc` errors), not a
+ * setting anyone wrote wrongly.
+ */
+function missingConfiguredTsconfig(root: string, policy: KraggPolicy): string | undefined {
+  if (policy.tsconfig === DEFAULT_TSCONFIG) {
+    return undefined;
+  }
+  const path = projectTsconfig(root, policy.tsconfig);
+  if (existsSync(path)) {
+    return undefined;
+  }
+  return (
+    `the policy's \`tsconfig\` setting names ${policy.tsconfig}, which does not ` +
+    `exist (looked at ${path}); fix the setting, or create the file`
+  );
 }
 
 /** `--changed`/`--since`: git decides, and a config edit overrules it. */

@@ -51,7 +51,7 @@ import { appendRun } from "../engine/journal.ts";
 import { buildReport, utcNow, EXIT_ENVIRONMENT, type CheckReport } from "../engine/report.ts";
 import type { GateResult } from "../engine/models.ts";
 import { toPayload } from "../engine/reportPayload.ts";
-import { resolveProjectEnvironment } from "../environment/project.ts";
+import { projectTsconfig, resolveProjectEnvironment } from "../environment/project.ts";
 import { gitDirty, gitSha } from "../git/changes.ts";
 import type { HookCheckOutcome, HookCheckRequest, HookScope } from "../hooks/claude.ts";
 import { applyBaseline, readBaseline } from "../policy/baseline.ts";
@@ -177,6 +177,10 @@ export function hookCriticality(root: string): void {
   criticalityCache({
     root,
     scanPaths: [...policy.sourcePaths, ...testScanDirectories(policy.testPaths)],
-    analysis: analysisProgram({ root }),
+    // The ROOT's tsconfig, chosen the same way `check` chooses it. The hook
+    // is a root-scoped contract: it never runs a workspace member as its own
+    // run (per-member journals are invisible to `status` and `flaky`), so
+    // there is no member tsconfig for it to pick.
+    analysis: analysisProgram({ root, tsconfigPath: projectTsconfig(root, policy.tsconfig) }),
   }).ensure();
 }

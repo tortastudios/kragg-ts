@@ -589,7 +589,7 @@ describe("resolveTarget / layerIndex / parseCached", () => {
       root,
       api,
       layers: LAYERS,
-      aliases: loadAliases(root, api),
+      aliases: loadAliases(join(root, "tsconfig.json"), api),
       parsed: new Map(),
       seen: new Set(),
     };

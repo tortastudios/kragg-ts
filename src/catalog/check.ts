@@ -86,8 +86,13 @@ function toolGates(ctx: CatalogContext): readonly GateSpec[] {
         // so `ctx.paths` is an ORDER and never a scope. The whole project is
         // checked through its own tsconfig on every run and every diagnostic
         // is reported — the error a change causes is usually in a file that
-        // did not change. See `orderByPaths` in `adapters/tsc.ts`.
-        const outcome = await runTypeCheck({ env: ctx.env, paths: ctx.paths });
+        // did not change. See `orderByPaths` in `adapters/tsc.ts`. The
+        // tsconfig is the policy's: the same file the shared program reads.
+        const outcome = await runTypeCheck({
+          env: ctx.env,
+          project: ctx.policy.tsconfig,
+          paths: ctx.paths,
+        });
         // A project with no TypeScript compiler is a broken environment, not
         // an unconfigured gate: exit 3 and an install command, never a skip.
         return outcome.ok
@@ -103,6 +108,7 @@ function toolGates(ctx: CatalogContext): readonly GateSpec[] {
           "typing-strictness",
           checkTypingStrictness({
             root: ctx.root,
+            tsconfig: ctx.program.tsconfigPath,
             sourcePaths: ctx.policy.sourcePaths,
             api: ctx.api,
             paths: ctx.paths,
@@ -152,15 +158,26 @@ function metricGates(ctx: CatalogContext): readonly GateSpec[] {
   ];
 }
 
-/** Layering contracts and per-file structural budgets. */
+/**
+ * Layering contracts and per-file structural budgets.
+ *
+ * Both read `paths`/`baseUrl` from the SELECTED tsconfig — the program's —
+ * so an alias declared in `tsconfig.app.json` resolves here exactly as the
+ * type checker resolves it, rather than being read off a root file the
+ * project does not compile with.
+ */
 function structureGates(ctx: CatalogContext): readonly GateSpec[] {
   const { policy } = ctx;
+  const tsconfig = ctx.program.tsconfigPath;
   return [
     {
       name: "boundaries",
       tier: FAST,
       run: () =>
-        nativeGate("boundaries", checkLayers(ctx.root, policy.sourcePaths, policy.layers)),
+        nativeGate(
+          "boundaries",
+          checkLayers(ctx.root, policy.sourcePaths, policy.layers, tsconfig),
+        ),
       // Fewer than two layers cannot express a direction, so there is nothing
       // to enforce and the gate says so instead of passing.
       skipReason: unconfigured("no layers configured", policy.layers.length >= 2),
@@ -177,6 +194,7 @@ function structureGates(ctx: CatalogContext): readonly GateSpec[] {
             policy.maxFileLines,
             policy.maxPublicSymbols,
             policy.structureExclude,
+            tsconfig,
           ),
         ),
     },

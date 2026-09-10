@@ -143,6 +143,22 @@ export function getString(source: Source, key: string, fallback: string): string
   return typeof value === "string" ? value : reject(source, key, "a string", value);
 }
 
+/**
+ * A path setting: a string, and a non-empty one.
+ *
+ * `""` resolves to the root directory itself, so `tsconfig: ""` would send
+ * every type-aware surface to open a directory and report a confusing
+ * failure about it. Rejected by name instead, like every other malformed
+ * value; the schema mirrors the `minLength`.
+ */
+export function getPath(source: Source, key: string, fallback: string): string {
+  const value = getString(source, key, fallback);
+  if (value === "") {
+    throw new PolicyError(`${source.label}${key} must be a non-empty path (got "")`);
+  }
+  return value;
+}
+
 /** The accepted interval of an integer setting; `max` is unbounded when absent. */
 export interface IntRange {
   readonly min: number;

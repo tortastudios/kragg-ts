@@ -77,6 +77,15 @@ structural rather than optimizations to add later:
   creation. `kragg check --changed` over three files where no type-aware gate
   fires must not pay a millisecond of program cost, and does not.
   `handle.loaded()` exists so tests can assert exactly that.
+- **Built from the policy's `tsconfig`**, resolved by `projectTsconfig` in
+  `environment/project.ts` — the one resolver the `tsc` gate, the
+  `typing-strictness` audit, the alias table and the freshness stamp also go
+  through, so a run reads one project file by construction. `readProjectConfig`
+  classifies the file (missing / unreadable / invalid / solution / empty), and
+  the **solution** shape — `references`, no inputs, the Vite template's root —
+  is refused everywhere: `tsc -p` on it exits 0 having checked nothing, and a
+  program built from it holds no files. The refusal names the referenced
+  projects; the fix is one setting.
 
 Gates on this tier: `forbidden-calls` and `nullable-default` (which take the
 handle directly), and `criticality`, which builds the call graph from it.
@@ -280,9 +289,11 @@ be wrong while the check says "fresh". It walks the source tree with the same
 `analysis/walk.ts` the syntax tier uses (so a real `src/coverage/` is watched,
 while a repo-root `dist/` is not), **hashes the bytes** rather than trusting a
 size and an mtime, and includes the other analysis inputs: `kragg.json`,
-`package.json#kragg`, `tsconfig.json` and the resolved compiler's version and
-path. A read-only `.kragg` cannot land the artifacts, and that is reported —
-never silently converted into a fresh answer.
+`package.json#kragg`, the **selected** tsconfig (the policy's `tsconfig`,
+hashed under its root-relative name, so switching the setting between two
+untouched files is a change) and the resolved compiler's version and path. A
+read-only `.kragg` cannot land the artifacts, and that is reported — never
+silently converted into a fresh answer.
 
 ### What a run is scoped to — `src/commands/scope.ts`
 
@@ -296,6 +307,23 @@ different things and conflating them is the bug it exists to prevent:
   Internal, and therefore free to be the *expansion* of `--file src` into the
   files under it. `undefined` means "the whole project" and is **not** the same
   as `[]`, which is a run with nothing to check.
+
+Before any of that, `resolveScope` checks the one setting that decides what
+every type-aware gate will open: a policy `tsconfig` naming a file that does
+not exist is exit 2 here, naming the path, so no gate reports over a project
+file nobody can find. The default is not checked — its absence is a finding.
+
+**Package-level runs** — `src/commands/packages.ts` — are the fourth way an
+invocation is scoped, and the only one that changes the *root*. `--package`
+resolves each selector against the expanded workspace (`environment/
+workspaces.ts`), assembles one pipeline per member through the same
+`assembleCheck`/`assembleSecurity` the single-root path uses — with the
+member's root, its own policy or the root's, its own compiler and its own
+`CatalogContext` (so its own lazy program) — and only then runs them, so every
+usage error refuses the whole invocation before a gate has started. Members
+are rendered separately (a section each in text, an array of payloads in JSON)
+and never merged into one report. `pipeline.ts` holds the shared runner
+`check`, `security` and the member loop all drive.
 
 The three modes are `full` (no scoping), `changed` (`--changed`/`--since`) and
 `file` (`--file`). Two rules make an incremental run honest:
@@ -329,7 +357,7 @@ not a per-file fact.
 | --- | --- | --- |
 | `lint` | `ctx.targets` | per-file, and the linter takes directories |
 | `tsc` | `ctx.paths` as an **order**, never a scope | see section 4 |
-| `typing-strictness` | `ctx.paths` for the source scan | the `tsconfig.json` audit always runs |
+| `typing-strictness` | `ctx.paths` for the source scan | the audit of the selected tsconfig (`ctx.program.tsconfigPath`) always runs |
 | `type-complexity`, `forbidden-calls`, `nullable-default`, `secret-default` | `ctx.paths` | per-file |
 | `detect-secrets` | `ctx.paths`, else the whole project | secrets are not only in `source_paths` |
 | `complexity`, `maintainability`, `halstead`, `structure` | `policy.sourcePaths` | whole tree; the parameter is simply not plumbed, and keeping it whole cannot under-report |

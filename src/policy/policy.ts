@@ -41,24 +41,21 @@
  * narrowed explicitly. No casts, no assertions, no trusting the shape.
  */
 
-import { join } from "node:path";
-
 import {
   getArgv,
   getCriticalDeclarations,
   getEnum,
   getInt,
   getOptionalString,
+  getPath,
   getString,
   getStringList,
   getStringPairs,
-  isTable,
-  own,
   PolicyError,
-  readTable,
   rejectUnknownKeys,
   type Source,
 } from "./readers.ts";
+import { loadSource } from "./source.ts";
 
 /**
  * Raised when a config file exists but cannot be used.
@@ -81,6 +78,14 @@ export { nearestName } from "./names.ts";
  * this module's surface because the policy is what a caller has in hand.
  */
 export { policyAsDict } from "./serialize.ts";
+
+/**
+ * Whether a project declares a policy of its own — see `./source.ts`.
+ *
+ * Re-exported because `policy.ts` is the module callers import; a workspace
+ * member run asks this before deciding to inherit the root's rules.
+ */
+export { declaresPolicy } from "./source.ts";
 
 /** One `[callExpression, whyItIsBannedAndWhatToUseInstead]` entry. */
 export type ForbiddenCall = readonly [entry: string, fixHint: string];
@@ -130,6 +135,16 @@ export interface KraggPolicy {
   readonly sourcePaths: readonly string[];
   /** Directories holding tests, relative to the project root. */
   readonly testPaths: readonly string[];
+  /**
+   * The tsconfig every type-aware surface reads, relative to the project
+   * root: the shared `ts.Program`, the `tsc` gate's `--project`, the
+   * `typing-strictness` audit, the `boundaries` alias table and the
+   * criticality freshness stamp. ONE setting, so they cannot disagree about
+   * which file configures the project. A solution-style file (`references`
+   * and no inputs of its own) is refused by every one of them — see
+   * `analysis/program.ts` — and the fix is to name a concrete project here.
+   */
+  readonly tsconfig: string;
   /** Line-coverage percentage below which the coverage gate fails. */
   readonly coverageFailUnder: number;
   /** How deeply a type may nest before the type-complexity gate complains. */
@@ -225,6 +240,8 @@ export const DEFAULT_POLICY: KraggPolicy = {
    * Both are listed; a path that does not exist is simply not scanned.
    */
   testPaths: ["test", "tests"],
+  /** `tsc -p`'s own default. TypeScript-only: Python has no equivalent knob. */
+  tsconfig: "tsconfig.json",
   coverageFailUnder: 80,
   typeMaxNestingDepth: 2,
   typeMaxLength: 40,
@@ -348,6 +365,7 @@ type PolicyScopes = Pick<
   | "profile"
   | "sourcePaths"
   | "testPaths"
+  | "tsconfig"
   | "layers"
   | "structureExclude"
   | "mutationInclude"
@@ -384,6 +402,7 @@ function readScopes(source: Source): PolicyScopes {
     profile: getString(source, "profile", base.profile),
     sourcePaths: getStringList(source, "source_paths", base.sourcePaths),
     testPaths: getStringList(source, "test_paths", base.testPaths),
+    tsconfig: getPath(source, "tsconfig", base.tsconfig),
     layers: getStringList(source, "layers", base.layers),
     structureExclude: getStringList(source, "structure_exclude", base.structureExclude),
     mutationInclude: getStringList(source, "mutation_include", base.mutationInclude),
@@ -448,37 +467,4 @@ function readTools(source: Source): PolicyTools {
   };
 }
 
-/**
- * Read the raw config table and where it came from; an empty table when the
- * project configures nothing.
- *
- * A `package.json#kragg` that is present but not an object is REJECTED, not
- * read as "unconfigured" (which is what Python's `isinstance(kragg, dict)`
- * guard does): the project wrote a policy block, and running the defaults in
- * its place would be the silent fall-back this module refuses everywhere
- * else. A `kragg.json` that is not an object is already rejected by
- * `readTable`.
- */
-function loadSource(root: string): Source {
-  const standalonePath = join(root, "kragg.json");
-  const standalone = readTable(standalonePath);
-  if (standalone !== null) {
-    return { table: standalone, label: `${standalonePath}#`, consumed: new Set() };
-  }
-  const pkgPath = join(root, "package.json");
-  const pkg = readTable(pkgPath);
-  const label = `${pkgPath}#kragg.`;
-  if (pkg === null) {
-    return { table: {}, label, consumed: new Set() };
-  }
-  const kragg = own(pkg, "kragg");
-  if (kragg === undefined) {
-    return { table: {}, label, consumed: new Set() };
-  }
-  if (!isTable(kragg)) {
-    throw new PolicyError(
-      `${pkgPath}#kragg must be a JSON object of kragg settings (got ${JSON.stringify(kragg)})`,
-    );
-  }
-  return { table: kragg, label, consumed: new Set() };
-}
+

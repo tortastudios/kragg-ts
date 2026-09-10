@@ -55,7 +55,8 @@ import {
   writeStamp,
 } from "../gates/criticality.ts";
 import type { FunctionProfile } from "../gates/criticality.ts";
-import { loadPolicy, type CriticalDeclarations, type KraggPolicy } from "../policy/policy.ts";
+import { projectTsconfig } from "../environment/project.ts";
+import { loadPolicy, type KraggPolicy } from "../policy/policy.ts";
 import { testScanDirectories } from "../util/testPaths.ts";
 
 export interface CriticalityCommandOptions {
@@ -99,7 +100,7 @@ export function runCriticality(options: CriticalityCommandOptions): number {
   // functions, and running with an unread policy would write a report that
   // quietly omits them.
   const policy = loadPolicy(options.root);
-  const result = analyzeScoped(options.root, paths, policy.criticalFunctions);
+  const result = analyzeScoped(options.root, paths, policy);
   if (!result.ok) {
     logError(result.message);
     return result.code;
@@ -158,16 +159,21 @@ type ScopedAnalysis =
 function analyzeScoped(
   root: string,
   paths: readonly string[],
-  declared: CriticalDeclarations,
+  policy: KraggPolicy,
 ): ScopedAnalysis {
-  const analysis = analysisProgram({ root });
+  // The policy's tsconfig, through the one resolver: the same file a `check`
+  // derives from, so the two never disagree about what the program holds.
+  const analysis = analysisProgram({
+    root,
+    tsconfigPath: projectTsconfig(root, policy.tsconfig),
+  });
   const scoped = scopeFiles(analysis, root, paths);
   if (scoped !== null && !scoped.ok) {
     return scoped;
   }
   const result = analyze({
     analysis,
-    declared,
+    declared: policy.criticalFunctions,
     ...(scoped === null ? {} : { files: scoped.files }),
   });
   return result.ok

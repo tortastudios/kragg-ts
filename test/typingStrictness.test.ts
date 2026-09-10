@@ -492,12 +492,33 @@ describe("typing-strictness: is the source actually type-checked?", () => {
     );
   });
 
-  it("SKIPS VISIBLY on a solution-style config rather than flagging every file", () => {
+  it("REFUSES a solution-style config as a gate error, naming the projects to choose from", () => {
+    // Its `compilerOptions` are not what type-checks anything, so judging them
+    // would produce confident violations about a file that configures nothing
+    // (the base commit reported four), while `tsc -p` on it exits 0 having
+    // checked no files. Neither a pass nor a false alarm: exit 3 and the fix.
+    const outcome = run({
+      "tsconfig.json": JSON.stringify({
+        files: [],
+        references: [{ path: "./tsconfig.app.json" }],
+      }),
+      "tsconfig.app.json": JSON.stringify({ compilerOptions: { strict: true }, include: ["src"] }),
+      "src/a.ts": source,
+    });
+    assert.equal(outcome.ok, false);
+    if (!outcome.ok) {
+      assert.match(outcome.message, /solution-style/u);
+      assert.match(outcome.message, /tsconfig\.app\.json/u);
+      assert.match(outcome.message, /"tsconfig": "tsconfig\.app\.json"/u);
+    }
+  });
+
+  it("audits a hybrid config's own inputs and says the references were not walked", () => {
     const found = ok(
       run({
         "tsconfig.json": JSON.stringify({
           compilerOptions: { strict: true, noUncheckedIndexedAccess: true, exactOptionalPropertyTypes: true, noEmit: true },
-          files: [],
+          include: ["src"],
           references: [{ path: "./packages/a" }],
         }),
         "src/a.ts": source,
@@ -510,9 +531,37 @@ describe("typing-strictness: is the source actually type-checked?", () => {
     const advisory = found.advisories.find(
       (entry) => entry.code === CODE.uncheckedSourceUnaudited,
     );
-    assert.ok(advisory !== undefined, "a solution-style build must skip with a stated reason");
-    assert.match(advisory.message, /solution-style/u);
+    assert.ok(advisory !== undefined, "a hybrid build must say what it did not audit");
+    assert.match(advisory.message, /1 project reference beside its own inputs/u);
     assert.ok(ADVISORY_CODES.has(CODE.uncheckedSourceUnaudited));
+  });
+
+  it("audits the SELECTED tsconfig, and names it in every finding", () => {
+    // The layout the base commit could not see at all: tsconfig.base.json +
+    // tsconfig.app.json and no tsconfig.json. The audit follows `tsconfig`.
+    const root = project({
+      "tsconfig.base.json": JSON.stringify({ compilerOptions: { strict: true, noEmit: true } }),
+      "tsconfig.app.json": JSON.stringify({ extends: "./tsconfig.base.json", include: ["src"] }),
+      "src/a.ts": source,
+    });
+    const outcome = checkTypingStrictness({
+      root,
+      tsconfig: "tsconfig.app.json",
+      sourcePaths: ["src"],
+      api: ts,
+    });
+    const found = ok(outcome);
+    const codes = found.violations.map((violation) => violation.code);
+    assert.ok(!codes.includes(CODE.tsconfigMissing), "the selected file exists");
+    assert.ok(codes.includes(CODE.tsconfigMissingFlag), "the floor is still judged");
+    assert.ok(
+      found.violations.every((violation) => violation.file === "tsconfig.app.json" || violation.file?.startsWith("src/")),
+      "config findings must name the selected file, not tsconfig.json",
+    );
+    // With the default selection the same project has no config at all.
+    const unselected = ok(checkTypingStrictness({ root, sourcePaths: ["src"], api: ts }));
+    assert.equal(unselected.violations[0]?.code, CODE.tsconfigMissing);
+    assert.equal(unselected.violations[0]?.file, "tsconfig.json");
   });
 
   it("names at most twenty files and counts the rest", () => {

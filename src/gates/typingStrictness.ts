@@ -12,8 +12,8 @@
  * So this gate audits the CONFIGURATION and scans for BLANKET IGNORES, in two
  * halves that live in their own modules:
  *
- *  - `typingStrictness/config.ts` — does `tsconfig.json`, with its `extends`
- *    chain resolved, actually meet the strict floor?
+ *  - `typingStrictness/config.ts` — does the selected tsconfig, with its
+ *    `extends` chain resolved, actually meet the strict floor?
  *  - `typingStrictness/included.ts` — does that config's `include`/`exclude`
  *    actually REACH the policy's source paths, or is a directory excluded from
  *    type checking altogether?
@@ -25,6 +25,17 @@
  * that is really nullable still passes. The gate can only require the typing
  * floor that makes honest modelling possible; it cannot make anyone model
  * honestly.
+ *
+ * ── WHICH TSCONFIG ─────────────────────────────────────────────────────────
+ * The policy's `tsconfig`, resolved by `projectTsconfig` — the SAME file the
+ * shared program is built from and the `tsc` gate runs `--project` on, so a
+ * project whose real config is `tsconfig.app.json` is audited where it is
+ * configured, and a workspace member is audited by a package-level run rooted
+ * in the member. A SOLUTION-STYLE file (project `references`, no inputs of
+ * its own) is refused as a gate ERROR rather than audited: its own
+ * `compilerOptions` are not what type-checks anything, so judging them would
+ * produce four confident violations about a file that configures nothing,
+ * while the config that does the checking went unread.
  *
  * ── WHY THIS IS BIGGER THAN THE PYTHON GATE ────────────────────────────────
  * mypy has one config table and one source-level ignore. TypeScript has:
@@ -63,12 +74,9 @@
  * ── WHAT IT DOES NOT AUDIT ─────────────────────────────────────────────────
  * Honest gaps, listed rather than hidden:
  *
- *  - only `<root>/tsconfig.json`. A monorepo's per-package configs and a
- *    project whose real config is `tsconfig.app.json` are unaudited;
- *  - a SOLUTION-STYLE config (one with `references`) is not audited for
- *    include coverage at all. It is skipped with a stated reason rather than
- *    guessed at — see `included.ts` for why a guess would report every file in
- *    the repo as unchecked;
+ *  - ONE tsconfig per run. A config with `references` AND its own inputs is
+ *    audited for its own inputs only; the referenced projects' include
+ *    coverage is not walked — see `included.ts`;
  *  - `.d.ts` files, which `parsedSources` excludes. A hand-authored
  *    declaration file full of `any` is invisible here;
  *  - anything a `// kragg: ignore -- <reason>` covers, by design.
@@ -81,21 +89,28 @@ import {
   type TypeScriptApi,
 } from "../analysis/sourceFile.ts";
 import type { Violation } from "../engine/models.ts";
+import { projectTsconfig } from "../environment/project.ts";
 import { auditTsconfig } from "./typingStrictness/config.ts";
 import { scanSourceHatches } from "./typingStrictness/hatches.ts";
 
 export { ADVISORY_CODES, TYPING_STRICTNESS_CODES } from "./typingStrictness/codes.ts";
 
 export interface TypingStrictnessOptions {
-  /** Absolute project root — the directory holding `tsconfig.json`. */
+  /** Absolute project root. */
   readonly root: string;
+  /**
+   * The tsconfig to audit, absolute or root-relative — the policy's
+   * `tsconfig`. The pipeline always passes the program's own path; the
+   * default is for standalone callers and goes through the same resolver.
+   */
+  readonly tsconfig?: string | undefined;
   /** Directories to scan for escape hatches, as `KraggPolicy.sourcePaths`. */
   readonly sourcePaths: readonly string[];
   /** Compiler to parse with. Defaults to `resolveTypeScript(root).api`. */
   readonly api?: TypeScriptApi | undefined;
   /**
    * Restrict the SOURCE scan to these files — the `--changed` path. The
-   * config audit always runs: `tsconfig.json` governs every file whether or
+   * config audit always runs: the tsconfig governs every file whether or
    * not it changed, and skipping it on an unrelated commit would let a
    * loosened floor ride in unnoticed.
    */
@@ -111,11 +126,12 @@ export interface TypingStrictnessOptions {
  * separate bucket with its own codes (`ADVISORY_CODES`). A caller building a
  * `GateResult` fails on `violations` and reports `advisories` alongside them.
  *
- * The `ok: false` arm is narrow on purpose: a missing `tsconfig.json` is a
- * violation (Python's `mypy-config-missing`), and an unparseable one is also a
- * violation, because "we could not verify the floor" must never be reported as
- * "the floor is met". Only a config that exists and cannot be READ — a
- * permission or I/O failure — is a gate that could not run.
+ * The `ok: false` arm is narrow on purpose: a missing tsconfig is a violation
+ * (Python's `mypy-config-missing`), and an unparseable one is also a
+ * violation, because "we could not verify the floor" must never be reported
+ * as "the floor is met". Only a config that exists and cannot be READ — a
+ * permission or I/O failure — or one that configures NOTHING to check (the
+ * solution-style shape) is a gate that could not run.
  */
 export type TypingStrictnessOutcome =
   | {
@@ -126,7 +142,8 @@ export type TypingStrictnessOutcome =
   | { readonly ok: false; readonly message: string };
 
 /**
- * Audit the project's `tsconfig.json` and scan its sources for escape hatches.
+ * Audit the project's selected tsconfig and scan its sources for escape
+ * hatches.
  *
  * Config findings come first, then source findings in walk order and, within a
  * file, by position — so two runs over an unchanged tree diff cleanly.
@@ -135,7 +152,8 @@ export function checkTypingStrictness(
   options: TypingStrictnessOptions,
 ): TypingStrictnessOutcome {
   const api = options.api ?? resolveTypeScript(options.root).api;
-  const config = auditTsconfig(options.root, api, options.sourcePaths);
+  const tsconfigPath = projectTsconfig(options.root, options.tsconfig);
+  const config = auditTsconfig(options.root, tsconfigPath, api, options.sourcePaths);
   if (!config.ok) {
     return { ok: false, message: config.message };
   }

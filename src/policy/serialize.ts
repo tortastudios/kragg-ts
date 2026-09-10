@@ -54,5 +54,6 @@ export function policyAsDict(policy: KraggPolicy): Record<string, unknown> {
     coverage_report_path: policy.coverageReportPath,
     test_command: [...policy.testCommand],
     baseline: policy.baseline ?? null,
+    tsconfig: policy.tsconfig,
   };
 }

@@ -18,25 +18,39 @@ export function isKnownManager(value: string): value is PackageManager {
   return (KNOWN_MANAGERS as readonly string[]).includes(value);
 }
 
+/** One member package of a workspace. */
+export interface WorkspacePackage {
+  /** `package.json#name`, or `null` when the manifest declares none. */
+  readonly name: string | null;
+  /** The package directory, workspace-root-relative, `/`-separated. */
+  readonly path: string;
+  /** The package directory, absolute — the `root` of a package-level run. */
+  readonly root: string;
+}
+
 /**
- * How workspaces were detected, and what we could and could not read.
+ * How workspaces were detected, what they expand to, and what could not be
+ * read.
  *
- * This is deliberately NOT a list of resolved package directories. Turning
- * `packages/*` into concrete paths needs a glob matcher, and turning
- * `pnpm-workspace.yaml` into patterns needs a YAML reader; this project has
- * zero runtime dependencies (docs/dependency-policy.md) and has neither.
- * Reporting the patterns we actually read, plus an honest `note` about what
- * we could not, is better than a half-expanded list a gate would then treat
- * as complete.
+ * `packages` is the member list the declared patterns expand to, and it is
+ * COMPLETE OR EMPTY, never partial: `workspaces.ts` reads
+ * `pnpm-workspace.yaml#packages` and `package.json#workspaces` with a
+ * deliberately small grammar and refuses anything outside it, because a list
+ * with a member missing is exactly what a root run would then report as
+ * "every package was accounted for". When the list could not be trusted,
+ * `packages` is empty and `note` says why — and a root run prints the note
+ * instead of a member list, so the omission is visible either way.
  */
 export interface WorkspaceInfo {
   /** `"none"` is a successful detection: a single-package repo. */
   readonly kind: "none" | "pnpm" | "package-json";
   /** Absolute path to the file that declared the workspace, if any. */
   readonly configPath: string | null;
-  /** Raw patterns as declared. Empty for pnpm — see `note`. */
+  /** Raw patterns as declared, negations included. */
   readonly patterns: readonly string[];
-  /** What we could not determine, phrased for a human reading `doctor`. */
+  /** The members, sorted by path; empty when `note` says the list is unusable. */
+  readonly packages: readonly WorkspacePackage[];
+  /** Why `packages` could not be expanded, or `null` when it is complete. */
   readonly note: string | null;
 }
 

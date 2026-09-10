@@ -32,6 +32,15 @@
  * cache, one tier down. There is no process-global handle any more; the owner
  * of a handle is whoever created it, and that is the run.
  *
+ * WHICH TSCONFIG. The policy's `tsconfig` setting, resolved by
+ * `projectTsconfig` in `environment/project.ts` — the same resolver the `tsc`
+ * gate, the `typing-strictness` audit, the alias table and the freshness stamp
+ * use, so one run reads one file. A SOLUTION-STYLE file (project `references`
+ * and no inputs of its own, the Vite template's root `tsconfig.json`) is
+ * refused by {@link readProjectConfig}: `tsc -p` on it checks no files and
+ * exits 0, and a program built from it holds no files and would let every
+ * type-aware gate pass over nothing. The fix is to name a concrete project.
+ *
  * Gates that need no type information must NOT come here at all — they use
  * the syntax tier in `sourceFile.ts`.
  *
@@ -46,10 +55,11 @@
  */
 
 import { existsSync } from "node:fs";
-import { dirname, join, resolve, sep } from "node:path";
+import { basename, dirname, relative, resolve, sep } from "node:path";
 
 import type bundledTs from "typescript";
 
+import { projectTsconfig } from "../environment/project.ts";
 import {
   absolutePath,
   resolveTypeScript,
@@ -92,6 +102,7 @@ export type ProgramLoad =
  */
 export interface AnalysisProgram {
   readonly root: string;
+  /** Absolute path of the tsconfig this program is (or will be) built from. */
   readonly tsconfigPath: string;
   /** Which compiler built (or will build) this program, and how we got it. */
   readonly compiler: CompilerResolution;
@@ -104,7 +115,11 @@ export interface AnalysisProgram {
 export interface AnalysisProgramOptions {
   /** Absolute or cwd-relative project root. */
   readonly root: string;
-  /** Defaults to `<root>/tsconfig.json`. */
+  /**
+   * The policy's `tsconfig`, relative to `root` (or absolute). The pipeline
+   * always passes it; the default exists for library callers and tests and
+   * goes through the same resolver, `projectTsconfig`.
+   */
   readonly tsconfigPath?: string | undefined;
   /**
    * Override the compiler. Only for tests and for a caller that has already
@@ -128,7 +143,7 @@ export interface AnalysisProgramOptions {
  */
 export function analysisProgram(options: AnalysisProgramOptions): AnalysisProgram {
   const root = resolve(options.root);
-  const tsconfigPath = resolve(options.tsconfigPath ?? join(root, "tsconfig.json"));
+  const tsconfigPath = projectTsconfig(root, options.tsconfigPath);
   if (options.api !== undefined) {
     return createHandle(root, tsconfigPath, {
       api: options.api,
@@ -160,7 +175,123 @@ function createHandle(
 }
 
 /**
- * Read the tsconfig and construct the program.
+ * What a tsconfig configures, as the compiler resolves it.
+ *
+ * `references` are the referenced projects' config paths, root-relative and
+ * `/`-separated, for a message. `ok: false` carries the reason the file is
+ * unusable — absent, unreadable, a config error, or a SOLUTION-STYLE file
+ * that names no inputs of its own (see the module header) — phrased for the
+ * `tsconfig` setting that selects it.
+ */
+export type ProjectConfig =
+  | {
+      readonly ok: true;
+      readonly parsed: bundledTs.ParsedCommandLine;
+      readonly references: readonly string[];
+    }
+  | { readonly ok: false; readonly kind: ConfigFailure; readonly message: string };
+
+/**
+ * Why a tsconfig is unusable. `"solution"` is the one consumers branch on:
+ * it is the shape `tsc` accepts silently, so it must be refused up front,
+ * while the others are also reported by the compiler in its own words.
+ */
+export type ConfigFailure = "missing" | "unreadable" | "invalid" | "solution" | "empty";
+
+/** TS18002 "The 'files' list is empty" and TS18003 "No inputs were found". */
+const EMPTY_INPUT_DIAGNOSTICS: ReadonlySet<number> = new Set([18002, 18003]);
+
+/**
+ * Read and resolve a tsconfig the way `tsc -p` would, then refuse the one
+ * shape `tsc -p` accepts silently.
+ *
+ * Shared by the program builder, the `tsc` adapter's pre-flight and the
+ * `typing-strictness` audit, so the three cannot disagree about whether a
+ * file configures anything. `readDirectory` is the real one: the file LIST
+ * is the question here.
+ */
+export function readProjectConfig(api: TypeScriptApi, tsconfigPath: string): ProjectConfig {
+  if (!existsSync(tsconfigPath)) {
+    return {
+      ok: false,
+      kind: "missing",
+      message:
+        `no ${basename(tsconfigPath)} at ${tsconfigPath}, so type-aware gates cannot run.\n` +
+        "Fix: add one there, or set `tsconfig` in kragg.json to the project " +
+        "file to analyze.",
+    };
+  }
+  const read = api.readConfigFile(tsconfigPath, api.sys.readFile);
+  if (read.error !== undefined) {
+    return {
+      ok: false,
+      kind: "unreadable",
+      message: `${tsconfigPath} could not be read: ${diagnosticText(api, [read.error])}`,
+    };
+  }
+  return resolveInputs(api, tsconfigPath, read.config);
+}
+
+/** The compiler's resolution of a config that could be read, judged. */
+function resolveInputs(api: TypeScriptApi, tsconfigPath: string, config: unknown): ProjectConfig {
+  const root = dirname(tsconfigPath);
+  const parsed = api.parseJsonConfigFileContent(config, api.sys, root, undefined, tsconfigPath);
+  // `errors` here are config errors (an unknown option, an `extends` that does
+  // not exist), not type errors. They make the resulting options untrustworthy,
+  // so they are fatal for us even though tsc would soldier on. The two
+  // "no inputs" diagnostics are set aside: they are the file-list question,
+  // answered below by looking at the list itself.
+  const errors = parsed.errors.filter((diagnostic) => !EMPTY_INPUT_DIAGNOSTICS.has(diagnostic.code));
+  if (errors.length > 0) {
+    return {
+      ok: false,
+      kind: "invalid",
+      message: `${tsconfigPath} is not usable: ${diagnosticText(api, errors)}`,
+    };
+  }
+  const references = (parsed.projectReferences ?? []).map((reference) =>
+    toPosix(relative(root, reference.path)),
+  );
+  if (parsed.fileNames.length > 0) {
+    return { ok: true, parsed, references };
+  }
+  return references.length > 0
+    ? { ok: false, kind: "solution", message: solutionStyleMessage(tsconfigPath, references) }
+    : {
+        ok: false,
+        kind: "empty",
+        message:
+          `${tsconfigPath} matches no files, so there is nothing to type-check.\n` +
+          "Fix: check its `include`/`files` patterns.",
+      };
+}
+
+/**
+ * The refusal every consumer prints for a solution-style config.
+ *
+ * It names the referenced projects because one of them is the fix: the
+ * `tsconfig` setting must name a project that has inputs. Expanding the
+ * references here instead — one program per referenced project — is
+ * deliberately not done: every other gate in the pipeline would then run
+ * once per reference over the same source tree, and the report would carry
+ * N `tsc` rows nobody asked for. One run, one project, said explicitly.
+ */
+function solutionStyleMessage(tsconfigPath: string, references: readonly string[]): string {
+  const name = basename(tsconfigPath);
+  const first = references[0] ?? "tsconfig.app.json";
+  return (
+    `${name} is a solution-style tsconfig: it declares ${references.length} project ` +
+    `${references.length === 1 ? "reference" : "references"} (${references.join(", ")}) ` +
+    "and no inputs of its own, so it configures nothing to analyze — `tsc -p` on it " +
+    "checks no files and exits 0, and a program built from it holds no files.\n" +
+    `Fix: set \`"tsconfig": "${first}"\` in kragg.json (the policy's \`tsconfig\` ` +
+    "setting selects ONE project per run; in a workspace, run each member with " +
+    "`--package`)."
+  );
+}
+
+/**
+ * Construct the program.
  *
  * Failure is reported, never guessed around. We do NOT fall back to a
  * synthesized default config for a project without a tsconfig: the compiler
@@ -173,49 +304,11 @@ function buildProgram(
   tsconfigPath: string,
   api: TypeScriptApi,
 ): ProgramLoad {
-  if (!existsSync(tsconfigPath)) {
-    return {
-      ok: false,
-      message:
-        `no tsconfig.json at ${tsconfigPath}, so type-aware gates cannot run.\n` +
-        `Fix: add a tsconfig.json at the project root, or point kragg at the ` +
-        `right one (project root resolved to ${root}).`,
-    };
+  const config = readProjectConfig(api, tsconfigPath);
+  if (!config.ok) {
+    return { ok: false, message: `${config.message}\n(project root: ${root})` };
   }
-
-  const read = api.readConfigFile(tsconfigPath, api.sys.readFile);
-  if (read.error !== undefined) {
-    return {
-      ok: false,
-      message: `${tsconfigPath} could not be read: ${diagnosticText(api, [read.error])}`,
-    };
-  }
-
-  const parsed = api.parseJsonConfigFileContent(
-    read.config,
-    api.sys,
-    dirname(tsconfigPath),
-    /* existingOptions */ undefined,
-    tsconfigPath,
-  );
-  // `errors` here are config errors (an unknown option, an `extends` that does
-  // not exist), not type errors. They make the resulting options untrustworthy,
-  // so they are fatal for us even though tsc would soldier on.
-  if (parsed.errors.length > 0) {
-    return {
-      ok: false,
-      message: `${tsconfigPath} is not usable: ${diagnosticText(api, parsed.errors)}`,
-    };
-  }
-  if (parsed.fileNames.length === 0) {
-    return {
-      ok: false,
-      message:
-        `${tsconfigPath} matches no files, so there is nothing to type-check.\n` +
-        `Fix: check its \`include\`/\`files\` patterns.`,
-    };
-  }
-
+  const { parsed } = config;
   const program = api.createProgram({
     rootNames: parsed.fileNames,
     options: parsed.options,
@@ -309,7 +402,11 @@ export function sourceFilesFor(
 /** Compare paths in one spelling: absolute, `/`-separated, no trailing slash. */
 function normalize(path: string): string {
   const absolute = resolve(path);
-  return sep === "/" ? absolute : absolute.split(sep).join("/");
+  return toPosix(absolute);
+}
+
+function toPosix(path: string): string {
+  return sep === "/" ? path : path.split(sep).join("/");
 }
 
 function isVendored(fileName: string): boolean {

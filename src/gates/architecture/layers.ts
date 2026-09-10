@@ -26,6 +26,7 @@ import {
   type ParsedSource,
 } from "../../analysis/sourceFile.ts";
 import type { Violation } from "../../engine/models.ts";
+import { projectTsconfig } from "../../environment/project.ts";
 import { loadAliases } from "./aliases.ts";
 import { expandBarrel } from "./barrel.ts";
 import { importEdges, type ImportEdge } from "./edges.ts";
@@ -36,11 +37,19 @@ import {
   type ResolveContext,
 } from "./resolve.ts";
 
-/** Return one violation per import that crosses layers upward. */
+/**
+ * Return one violation per import that crosses layers upward.
+ *
+ * `tsconfig` is where `paths`/`baseUrl` come from: the pipeline passes the
+ * program's selected file, so aliases resolve the way the checker resolves
+ * them. The default is for standalone callers and goes through the same
+ * resolver.
+ */
 export function checkLayers(
   root: string,
   sourcePaths: readonly string[],
   layers: readonly string[],
+  tsconfig?: string,
 ): readonly Violation[] {
   if (layers.length < 2) {
     return [];
@@ -51,7 +60,7 @@ export function checkLayers(
     root: absoluteRoot,
     api,
     layers,
-    aliases: loadAliases(absoluteRoot, api),
+    aliases: loadAliases(projectTsconfig(absoluteRoot, tsconfig), api),
     parsed: new Map<string, ParsedSource | null>(),
     seen: new Set<string>(),
   };

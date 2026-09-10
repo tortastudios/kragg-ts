@@ -7,13 +7,18 @@
  * is: `@/services/foo` is `src/services/foo`, and a prefix match on the raw
  * text sees neither layer.
  *
- * Known gaps, stated rather than hidden: only `<root>/tsconfig.json` is
- * consulted (a monorepo with per-package tsconfigs is not walked); package
- * `exports` subpath maps and bundler-only aliases (vite, webpack) are not
- * read; and `paths` is applied relative to `baseUrl ?? dirname(<root>/
- * tsconfig.json)` rather than to the compiler-internal `pathsBasePath`, so a
- * `paths` table inherited through `extends` from a tsconfig in ANOTHER
- * directory, with no `baseUrl`, resolves against the wrong base.
+ * WHICH TSCONFIG: the one the caller selected — the policy's `tsconfig`,
+ * resolved by `projectTsconfig`, the same file the program and the `tsc` gate
+ * read — never a root `tsconfig.json` looked up here. A monorepo member is
+ * covered by a package-level run (`--package`), whose root is the member and
+ * whose tsconfig is the member's.
+ *
+ * Known gaps, stated rather than hidden: package `exports` subpath maps and
+ * bundler-only aliases (vite, webpack) are not read; and `paths` is applied
+ * relative to `baseUrl ?? dirname(<tsconfig>)` rather than to the
+ * compiler-internal `pathsBasePath`, so a `paths` table inherited through
+ * `extends` from a tsconfig in ANOTHER directory, with no `baseUrl`, resolves
+ * against the wrong base.
  */
 
 import { statSync } from "node:fs";
@@ -64,7 +69,7 @@ export interface AliasConfig {
 
 const EMPTY_ALIASES: AliasConfig = { base: "", baseUrl: null, patterns: [] };
 
-/** Resolved alias tables, keyed by project root; reading a tsconfig hits disk. */
+/** Resolved alias tables, keyed by tsconfig path; reading one hits disk. */
 const aliasCache = new Map<string, AliasConfig>();
 
 /** Drop cached tsconfig alias tables. For tests and long-lived processes only. */
@@ -73,7 +78,7 @@ export function clearAliasCache(): void {
 }
 
 /**
- * Read `paths`/`baseUrl` from `<root>/tsconfig.json`.
+ * Read `paths`/`baseUrl` from the tsconfig at `tsconfigPath`.
  *
  * Parsed through the project's own compiler rather than `JSON.parse`, so
  * `extends` chains, comments and trailing commas all behave the way the
@@ -85,18 +90,19 @@ export function clearAliasCache(): void {
  * plenty of projects have none, and the layer gate is still meaningful for
  * relative imports.
  */
-export function loadAliases(root: string, api: TypeScriptApi): AliasConfig {
-  const cached = aliasCache.get(root);
+export function loadAliases(tsconfigPath: string, api: TypeScriptApi): AliasConfig {
+  const configPath = resolve(tsconfigPath);
+  const cached = aliasCache.get(configPath);
   if (cached !== undefined) {
     return cached;
   }
-  const config = readAliases(root, api);
-  aliasCache.set(root, config);
+  const config = readAliases(configPath, api);
+  aliasCache.set(configPath, config);
   return config;
 }
 
-function readAliases(root: string, api: TypeScriptApi): AliasConfig {
-  const configPath = resolve(root, "tsconfig.json");
+function readAliases(configPath: string, api: TypeScriptApi): AliasConfig {
+  const root = dirname(configPath);
   if (existingFile(configPath) === null) {
     return EMPTY_ALIASES;
   }

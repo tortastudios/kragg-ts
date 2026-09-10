@@ -20,6 +20,67 @@ a previously green run red — see [Gate additions](#gate-additions) below.
 
 ### Added
 
+- **TOR-1371** — explicit tsconfig selection, honest solution-style
+  reporting, and bounded package-level checks for workspaces. Three layouts
+  were mishandled, each reproduced before the change: a project configured by
+  `tsconfig.base.json` + `tsconfig.app.json` with no `tsconfig.json` could not
+  be checked at all (`tsc` error, `tsconfig-missing`, no program); a
+  solution-style root `tsconfig.json` (`references`, no inputs — the Vite
+  template) made **`tsc -p` exit 0 having checked nothing, so the `tsc` gate
+  reported `[PASS]`** over a project with a real type error, while
+  `typing-strictness` judged the solution file's empty `compilerOptions` as
+  four violations; and a pnpm workspace root run errored on a missing root
+  tsconfig, resolved one compiler for everything, and never mentioned
+  `packages/*` — the type error in `packages/b` was invisible.
+
+  A new policy setting, **`tsconfig`** (default `"tsconfig.json"`, validated
+  like every other key, mirrored in `kragg.schema.json`, TypeScript-only), is
+  resolved ONCE by `projectTsconfig` in `src/environment/project.ts` and read
+  by every consumer: the shared program, the `tsc` gate's `--project`, the
+  `typing-strictness` audit (whose findings now name the selected file), the
+  `boundaries`/`structure` alias table (`paths`/`baseUrl` come from the
+  selected file, keyed by its path) and the criticality freshness stamp (which
+  hashes the selected file under its own name, so switching the setting is a
+  change even when no file moved). A configured file that does not exist is
+  exit 2 before any gate runs; a missing *default* stays the gates' finding.
+  `readProjectConfig` in `src/analysis/program.ts` classifies a config as
+  missing / unreadable / invalid / **solution** / empty, and the program
+  builder, the `tsc` adapter (pre-flight, before spawning — the one shape the
+  compiler accepts silently) and `typing-strictness` all refuse the solution
+  shape as `error: true` with one message naming the referenced projects and
+  the one-line fix. References are deliberately not expanded into N runs over
+  one tree; a hybrid config (references *and* inputs) is audited for its own
+  inputs with the existing advisory.
+
+  **`check --package <name-or-path>` / `security --package …`** (repeatable)
+  check a workspace member instead of the root: the member's root, its own
+  policy (else the root's — never the defaults), its own `tsconfig`, its own
+  compiler (`resolveTypeScript` from the member; a workspace mixing TypeScript
+  5.9.3 and 6.0.3 uses each where installed and prints which), exactly one
+  lazy program, and its own `.kragg/history.jsonl`. Members are never merged:
+  text output has one section per member and a workspace summary line;
+  `--format json` prints an **array** of the ordinary per-member payloads
+  (unchanged schema, own `targets`); the exit code is the worst member's. An
+  unknown member, a member whose configured tsconfig is missing, or a
+  malformed member policy is exit 2 with nothing run. `--package` with
+  `--file`/`--changed`/`--since` is a usage error. A root run in a workspace
+  now prints on stderr which members it did NOT check, or why the list could
+  not be read. `src/environment/workspaces.ts` expands `pnpm-workspace.yaml#
+  packages` and `package.json#workspaces` to members through two small
+  **fail-closed** readers (`workspacePatterns.ts`): a YAML shape or a glob
+  outside the supported grammar empties the list with the line or pattern
+  named, never a partial list. `doctor` now names the selected tsconfig, the
+  compiler it would analyze with (with the bundled-fallback note), the
+  workspace members, and the per-member invocation. The pipeline runner moved
+  to `src/commands/pipeline.ts` (re-exported from `check.ts`) so `check`,
+  `security` and `packages.ts` share one, including the legacy-debt baseline:
+  a member reads and records the file its effective policy names at its OWN
+  root, and refuses `--update-baseline` there when it names none.
+  No wire key was added or changed;
+  the stamp sidecar keeps its keys. `KNOWN_LIMITATIONS.md` lists what remains
+  unsupported (nested workspaces are not expanded from the root, `--changed`
+  per member, glob/YAML syntax outside the grammar, non-TypeScript members).
+
 - **TOR-1373** — the evidence linking a critical change to a test is a
   checker-bound reference, and the limits of the static signals are stated.
   `critical-tests` passed on ANY changed file under a test path, so a

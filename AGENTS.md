@@ -102,7 +102,7 @@ failed task, not a judgement call.
 
 ## Project Map
 
-186 modules under `src/`, listed top-down in the order `kragg.json`'s
+190 modules under `src/`, listed top-down in the order `kragg.json`'s
 `layers` declares — a module may import its own layer or a lower one, never a
 higher one, and the `boundaries` gate enforces that on this repo.
 
@@ -124,7 +124,12 @@ higher one, and the `boundaries` gate enforces that on this repo.
   (the one resolver for `full`/`changed`/`file`, shared by `check` and
   `security`: what the external tools are invoked on, what the path-aware
   gates narrow to, when a configuration change makes an incremental run a
-  full one, and which unresolvable selections are exit 2 or exit 3) and
+  full one, and which unresolvable selections are exit 2 or exit 3),
+  `pipeline.ts` (the one runner `check`, `security` and package runs share:
+  run the gates, build the report, journal it, render it), `packages.ts`
+  (`--package`: one complete run per workspace member — its own root, policy,
+  tsconfig, compiler and program — plus the stderr notice a root run prints
+  about the members it did not check) and
   `inventory.ts` (the filter and output-budget vocabulary `map`, `spec` and
   `brief` share). The five commands too large for one file have their own
   directory: `map/` (`symbols`, `render`, `select`), `spec/` (`property`,
@@ -186,13 +191,20 @@ higher one, and the `boundaries` gate enforces that on this repo.
   `program.ts` is the type-aware tier (one lazy shared `ts.Program`);
   `betweenness.ts` is Brandes' algorithm for the call graph.
 - `src/environment/` — the target project's environment as data: `model.ts`,
-  `project.ts` (entry point), `bin.ts` (project-local binary resolution —
-  never `PATH`, never global, never kragg's own tree), `packageManager.ts`,
-  `manifest.ts`, `workspaces.ts`, `missing.ts` ("not installed" vs. "ran and
-  failed", which decides exit 3 vs. exit 1).
+  `project.ts` (entry point, and `projectTsconfig` — the ONE resolver of which
+  tsconfig a run reads, from the policy's `tsconfig`), `bin.ts` (project-local
+  binary resolution — never `PATH`, never global, never kragg's own tree),
+  `packageManager.ts`, `manifest.ts`, `workspaces.ts` (workspace declarations
+  expanded to members, or an honest note about why they could not be),
+  `workspacePatterns.ts` (the two small fail-closed grammars that expansion is
+  built on: `pnpm-workspace.yaml#packages` and workspace globs), `missing.ts`
+  ("not installed" vs. "ran and failed", which decides exit 3 vs. exit 1).
 - `src/git/changes.ts` — changed-file detection for `--changed` / `--since`.
-- `src/policy/` — `policy.ts` loads `kragg.json`, then `package.json#kragg`,
-  then defaults; `readers.ts` holds the narrowing readers it is built from,
+- `src/policy/` — `policy.ts` turns a config table into a `KraggPolicy`;
+  `source.ts` answers where that table came from (`kragg.json`, then
+  `package.json#kragg`, then an empty one) and whether a project declares a
+  policy at all, which is what a `--package` member asks before inheriting the
+  root's; `readers.ts` holds the narrowing readers it is built from,
   `names.ts` the "did you mean" suggestion they and
   `gates/criticality/declared.ts` share, and `serialize.ts` the `policy show`
   key order that is a contract with Python; `baseline.ts` is the reviewed
@@ -216,7 +228,7 @@ higher one, and the `boundaries` gate enforces that on this repo.
   - `journal.ts` — `.kragg/history.jsonl`, append-only.
   - `runner.ts` — the only approved external-command wrapper, and the one
     legitimate `node:child_process` import in the repo.
-- `test/` — 53 test files using `node:test`, flat, plus `test/fixtures/`
+- `test/` — 57 test files using `node:test`, flat, plus `test/fixtures/`
   and one non-test helper, `conformanceContract.ts`. `conformance.test.ts`
   drives the versioned fixtures under `test/fixtures/conformance/` that pin
   the cross-language contract; see `docs/spec-conformance.md`.
@@ -288,9 +300,9 @@ authority; this list must match it.
 | `init` | add guardrails to an existing project |
 | `hook claude` | hook adapter; reads hook JSON on stdin |
 
-`check` and `security` share `--file`, `--format`, `--max-violations` and
-`--no-journal`; of the two, only `check` takes `--changed`, `--since`,
-`--fail-fast`, `--all` and `--update-baseline`. The rest:
+`check` and `security` share `--file`, `--format`, `--max-violations`,
+`--no-journal` and `--package`; of the two, only `check` takes `--changed`,
+`--since`, `--fail-fast`, `--all` and `--update-baseline`. The rest:
 `fix --file`; `status --format --last`; `map`/`spec --path --symbol --changed
 --limit --all --format`, plus `map --write`; `brief --since --path --limit
 --all`; `criticality --write --path`; `mutation --path --since --all

@@ -125,6 +125,11 @@
     "baseline": {
       "type": ["string", "null"],
       "description": "Reviewed legacy-debt baseline, relative to the project root (conventionally \".kragg/baseline.json\"). Written only by `kragg check --update-baseline`; findings recorded in it are reported as advisories instead of failing the run. Security, compiler and evidence gates can never be baselined. null means none. Default: null."
+    },
+    "tsconfig": {
+      "type": "string",
+      "minLength": 1,
+      "description": "The tsconfig every type-aware surface reads, relative to the project root: the shared program, the tsc gate's --project, the typing-strictness audit, the boundaries alias table and the criticality freshness stamp. Name a concrete project here (e.g. \"tsconfig.app.json\"); a solution-style file with only references is refused. A configured file that does not exist is a usage error (exit 2). Default: \"tsconfig.json\"."
     }
   }
 }
