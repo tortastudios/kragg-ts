@@ -289,7 +289,7 @@ export function runCommand(
     // so its own call site carries the exemption — visible in review rather
     // than hidden in a config allowlist. `execFile` with `shell: false` is
     // what makes it safe: no word-splitting, no globbing, no interpolation.
-    execFile( // kragg: ignore
+    execFile( // kragg: ignore -- the one sanctioned spawn: argv array, shell: false, the wrapper forbidden_calls points at
       file,
       args,
       {

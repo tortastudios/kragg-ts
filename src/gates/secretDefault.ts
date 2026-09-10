@@ -64,7 +64,7 @@
  * ── RESIDUAL FALSE POSITIVE ────────────────────────────────────────────────
  * A non-secret variable that merely matches a suffix — a tokenizer's
  * `token = ""`, a `csrfToken` placeholder in a fixture — is reported. Suppress
- * the reviewed site with a trailing `// kragg: ignore`, which is visible in
+ * the reviewed site with a trailing `// kragg: ignore -- <reason>`, which is visible in
  * review, rather than by narrowing `secret_name_suffixes` repo-wide.
  *
  * ── MEASURED CALIBRATION ───────────────────────────────────────────────────
@@ -105,7 +105,7 @@ import {
   type TypeScriptApi,
 } from "../analysis/sourceFile.ts";
 import type { Violation } from "../engine/models.ts";
-import { suppressed } from "../util/suppress.ts";
+import { suppression, unhonouredMessage } from "../util/suppress.ts";
 import { guardedByThrow, secretFindings, type SecretFinding } from "./secretDefault/detect.ts";
 import { hasUsableSuffix } from "./secretDefault/names.ts";
 
@@ -291,14 +291,15 @@ function toViolation(
   const file = source.sourceFile;
   const start = file.getLineAndCharacterOfPosition(finding.node.getStart(file));
   const end = file.getLineAndCharacterOfPosition(finding.node.getEnd());
-  if (suppressed(source.lines, start.line + 1, end.line + 1)) {
+  const marker = suppression(source.lines, start.line + 1, end.line + 1);
+  if (marker.kind === "honoured") {
     return null;
   }
   const problem = empty
     ? "silently defaults to empty"
     : `has a hardcoded fallback default (\`${truncate(finding.fallback)}\`)`;
   return {
-    message: `secret \`${finding.name}\` ${problem}`,
+    message: unhonouredMessage(`secret \`${finding.name}\` ${problem}`, marker),
     file: source.relative,
     line: start.line + 1,
     column: start.character + 1,

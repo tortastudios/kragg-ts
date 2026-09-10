@@ -73,10 +73,16 @@ import type { Survivor } from "./report.ts";
 /** Repo-relative path of the baseline, shared with the Python sibling. */
 export const BASELINE_RELATIVE = ".kragg/mutants.baseline";
 
-/** The two `.gitignore` lines a project needs. See the module docs. */
+/**
+ * The `.gitignore` lines a project needs. See the module docs. The third
+ * re-includes the legacy-debt baseline `kragg check --update-baseline` writes
+ * at its conventional path (`policy/baseline.ts`), which is tracked for the
+ * same reason this one is.
+ */
 export const GITIGNORE_LINES: readonly string[] = [
   ".kragg/*",
   `!${BASELINE_RELATIVE}`,
+  "!.kragg/baseline.json",
 ];
 
 export function baselinePath(root: string): string {

@@ -50,7 +50,9 @@ syntax-tier gate accepts the `--changed` narrowing. `typing-strictness`,
 `maintainability`, `halstead`, `boundaries` and `structure` take
 `policy.sourcePaths` and walk the whole tree regardless. `boundaries` has to —
 a layering contract is a property of the import graph, not of a file — and the
-metric gates simply have not been given the parameter.
+metric gates simply have not been given the parameter. The full table, gate by
+gate, is in section 3 under "Which gates honour the narrowing, and which must
+not"; the selection itself is resolved once, in `src/commands/scope.ts`.
 
 A deliberate asymmetry with Python lives here too: `ast.parse` *raises* on bad
 syntax, while `ts.createSourceFile` recovers and hands back a partial tree.
@@ -282,6 +284,60 @@ size and an mtime, and includes the other analysis inputs: `kragg.json`,
 path. A read-only `.kragg` cannot land the artifacts, and that is reported —
 never silently converted into a fresh answer.
 
+### What a run is scoped to — `src/commands/scope.ts`
+
+One resolver, called once, by both `check` and `security`. It produces two
+different things and conflating them is the bug it exists to prevent:
+
+- **`targets`** — what the per-file EXTERNAL tools are invoked on. It is on the
+  wire (`ReportPayload.targets`), and the cross-language contract pins it as
+  "the paths/files checked, **as given**", so a `--file src` stays `src` there.
+- **`paths`** — the narrowing the path-aware gates compare file paths against.
+  Internal, and therefore free to be the *expansion* of `--file src` into the
+  files under it. `undefined` means "the whole project" and is **not** the same
+  as `[]`, which is a run with nothing to check.
+
+The three modes are `full` (no scoping), `changed` (`--changed`/`--since`) and
+`file` (`--file`). Two rules make an incremental run honest:
+
+1. **A configuration or dependency input in the change set promotes the run to
+   `full`.** `kragg.json`, `tsconfig*.json`, `package.json`, the lockfiles,
+   `pnpm-workspace.yaml`, the linter and test-runner configs the adapters read,
+   and the configured `secret_baseline` — the exact list is
+   `CONFIGURATION_INPUTS` and `CONFIGURATION_PREFIXES` in that module. The
+   blunt rule is chosen over "run the gates whose inputs changed" on purpose:
+   nobody keeps that mapping honest as gates are added, and a wrong mapping is
+   a silent pass. Before this, editing only `kragg.json` made `check --changed`
+   print "no changed TypeScript files" and exit 0 having run no gate at all.
+2. **A removal is a change.** A deleted file is never a target — there is no
+   file — but a change set whose only source change is a removal is promoted to
+   `full` too. A rename needs no promotion: its destination is in the selection.
+
+Everything else stays as it was: an empty change set is exit 0 with the
+documented clean-run report, and git failing to answer (not a repository, an
+unknown ref, no commit yet) is exit 3 carrying git's own message. `changes.ts`
+runs every plumbing command with `-z`, so a non-ASCII path is not silently lost
+to `core.quotePath` escaping.
+
+### Which gates honour the narrowing, and which must not
+
+`ctx.paths` narrows a gate; `ctx.targets` scopes an external tool's invocation;
+several gates take neither and walk the whole tree, because their verdict is
+not a per-file fact.
+
+| Gate | Reads | Note |
+| --- | --- | --- |
+| `lint` | `ctx.targets` | per-file, and the linter takes directories |
+| `tsc` | `ctx.paths` as an **order**, never a scope | see section 4 |
+| `typing-strictness` | `ctx.paths` for the source scan | the `tsconfig.json` audit always runs |
+| `type-complexity`, `forbidden-calls`, `nullable-default`, `secret-default` | `ctx.paths` | per-file |
+| `detect-secrets` | `ctx.paths`, else the whole project | secrets are not only in `source_paths` |
+| `complexity`, `maintainability`, `halstead`, `structure` | `policy.sourcePaths` | whole tree; the parameter is simply not plumbed, and keeping it whole cannot under-report |
+| `boundaries` | `policy.sourcePaths` | must — a layering contract is a property of the import graph |
+| `critical-tests` | whole tree, plus its own `--since` diff | it compares critical functions against test changes |
+| `test-quality` | whole tree | "is this critical function referenced by a test" is not bounded by a selection |
+| `test-coverage`, `critical-coverage`, `audit` | whole project | SLOW; they skip wholesale in incremental mode |
+
 ---
 
 ## 4. How an external tool becomes a gate
@@ -355,6 +411,26 @@ model that both istanbul JSON and lcov are reduced to, so
 `critical-coverage` has one shape to reason about regardless of which runner
 the project uses.
 
+**A report describes only what the run loaded, and the gates say so.** No
+JavaScript runner reports a file no test imported; it is absent, not 0%. So
+`src/coverage/inventory.ts` walks `source_paths` and `test-coverage`
+reconciles its number against that inventory (`projectTotals` in
+`src/adapters/support/coverage.ts`): an unloaded file counts with every
+statement line uncovered — the count is read off the source with the
+project's compiler, the same "a statement starts on this line" rule the
+model applies to what a report states — and files outside the source paths
+do not count at all. `critical-coverage` reconciles per function: one whose
+file has no entry, whose extent nothing can bound, or whose body the report
+is silent on is UNMEASURED, and unmeasured is a violation
+(`critical-unmeasured`, with the cause in the message), never a pass. Extents
+come from `src/coverage/spans.ts`, whose index is keyed the way
+`criticality.json` spells a name (`Reader.close`, `Client.get token`), so
+same-named methods on two classes resolve to their own bodies; overload
+signatures and abstract members, which have no body, are not indexed; and a
+class that is itself a node owns its own lines with its member functions cut
+out. A document that names no file under the source paths is an error, not a
+list of findings. All of it is line coverage, and nothing pretends otherwise.
+
 **A report is evidence only for the run that produced it.** The test runner
 is pointed at a directory created for this invocation alone
 (`.kragg/runs/test-XXXXXX`, `mkdtemp`, so two concurrent runs get two), and
@@ -427,7 +503,7 @@ exactly the caller's error and printed `[PASS] tsc` for a change that broke it.
 It passes an argv array with `shell: false`; no string concatenation, no
 `exec`. This is enforced, not merely stated: `kragg.json` bans
 `node:child_process` via the `forbidden-calls` gate, and `runner.ts` carries
-the single `// kragg: ignore` exemption, visible in review rather than hidden
+the single `// kragg: ignore -- <reason>` exemption, visible in review rather than hidden
 in a config allowlist. kragg dogfooding its own security-contract mechanism is
 the point.
 

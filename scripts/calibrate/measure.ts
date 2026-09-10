@@ -48,7 +48,7 @@ import {
   MI_MIN_GRADE,
 } from "../../src/gates/complexity.ts";
 import { fileHalstead, MAX_BUGS, MAX_DIFFICULTY, MAX_EFFORT } from "../../src/gates/halstead.ts";
-import { lineSuppressed } from "../../src/util/suppress.ts";
+import { lineSuppression } from "../../src/util/suppress.ts";
 import {
   bucketize,
   gate,
@@ -90,7 +90,7 @@ function countSuppressions(sources: readonly ParsedSource[]): number {
   let found = 0;
   for (const source of sources) {
     for (const line of source.lines) {
-      if (lineSuppressed(line)) {
+      if (lineSuppression(line).kind !== "none") {
         found += 1;
       }
     }

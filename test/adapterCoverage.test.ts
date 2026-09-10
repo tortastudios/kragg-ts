@@ -16,8 +16,15 @@ import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { after, test } from "node:test";
 
-import { coverageTotals, readCoverageReport } from "../src/adapters/support/coverage.ts";
+import ts from "typescript";
+
+import {
+  coverageTotals,
+  projectTotals,
+  readCoverageReport,
+} from "../src/adapters/support/coverage.ts";
 import { parseLcov, readLcov } from "../src/adapters/support/lcov.ts";
+import { sourceInventory, statementLineCount } from "../src/coverage/inventory.ts";
 
 const roots: string[] = [];
 
@@ -174,5 +181,87 @@ test("lcov: a tracefile that ends inside a record is truncated, not partial cove
   assert.match(truncated.ok ? "" : truncated.message, /truncated: it ends inside a record/u);
   // Trailing blank lines are not a truncation.
   assert.equal(readLcov(join(root, "coverage/whole.info")).ok, true);
+});
+
+// ── the project's number, not the report's ─────────────────────────────────
+
+test("project totals: a source file the run never loaded counts as uncovered, by its own statement lines", () => {
+  const root = project({
+    "src/a.ts": "export function a(): number {\n  return 1;\n}\n",
+    // Two statement lines (`const x`, `return x`); the header and brace are not.
+    "src/b.ts": "export function b(): number {\n  const x = 2;\n  return x;\n}\n",
+    "test/a.test.ts": "import { a } from '../src/a.ts';\na();\n",
+  });
+  // The run loaded `a.ts` and the test file, and never imported `b.ts`.
+  const report = parseLcov(
+    "SF:src/a.ts\nDA:2,1\nend_of_record\nSF:test/a.test.ts\nDA:1,1\nDA:2,1\nend_of_record\n",
+    "lcov.info",
+  );
+  const inventory = sourceInventory(root, ["src"], ts);
+  assert.deepEqual(inventory, [
+    { path: "src/a.ts", statementLines: 1 },
+    { path: "src/b.ts", statementLines: 2 },
+  ]);
+  const totals = projectTotals(report, root, ["src"], inventory);
+  // The raw aggregate would say 3/3 = 100%. The project is 1/3.
+  assert.equal(coverageTotals(report).pct, 100);
+  assert.deepEqual(totals, {
+    totalLines: 3,
+    coveredLines: 1,
+    pct: 33.33,
+    measuredFiles: 1,
+    reportFiles: 2,
+    unloaded: [{ path: "src/b.ts", statementLines: 2 }],
+    sourceFiles: 2,
+  });
+});
+
+test("project totals: files outside the source paths never move the number", () => {
+  const root = project({ "src/a.ts": "export const a = 1;\n" });
+  const report = parseLcov(
+    "SF:src/a.ts\nDA:1,1\nend_of_record\nSF:vendor/x.ts\nDA:1,0\nDA:2,0\nend_of_record\n",
+    "lcov.info",
+  );
+  const totals = projectTotals(report, root, ["src"], sourceInventory(root, ["src"], ts));
+  assert.equal(totals.pct, 100);
+  assert.equal(totals.measuredFiles, 1);
+  assert.equal(totals.reportFiles, 2);
+});
+
+test("project totals: a report with nothing under the source paths has no covered line", () => {
+  const root = project({ "src/a.ts": "export const a = 1;\n" });
+  const report = parseLcov("SF:test/a.test.ts\nDA:1,1\nend_of_record\n", "lcov.info");
+  const totals = projectTotals(report, root, ["src"], sourceInventory(root, ["src"], ts));
+  // `a.ts` is unloaded and counts: 0/1, never 100%.
+  assert.equal(totals.totalLines, 1);
+  assert.equal(totals.coveredLines, 0);
+  assert.equal(totals.pct, 0);
+});
+
+test("statement lines: declarations and types do not count; statements in nested bodies do", () => {
+  const source = [
+    "import { x } from './x.ts';", //            no
+    "export interface Shape { a: number }", //   no
+    "export type Id = string;", //               no
+    "declare const ambient: number;", //         no
+    "export const limit = 3;", //                yes (declarator with initializer)
+    "let later: number;", //                     no (no initializer)
+    "export function f(n: number): number {", // no (declaration)
+    "  if (n > limit) {", //                     yes
+    "    return n;", //                          yes
+    "  }", //                                    no
+    "  return [n].map((v) => {", //              yes
+    "    return v + 1;", //                      yes (nested body)
+    "  })[0] ?? 0;", //                          no (continuation)
+    "}", //                                      no
+    "export class C {", //                       no
+    "  run(): void {", //                        no
+    "    later = 1; f(later);", //               yes, once (two statements, one line)
+    "  }", //                                    no
+    "}", //                                      no
+    "",
+  ].join("\n");
+  const sourceFile = ts.createSourceFile("s.ts", source, ts.ScriptTarget.Latest, true);
+  assert.equal(statementLineCount(sourceFile, ts), 6);
 });
 

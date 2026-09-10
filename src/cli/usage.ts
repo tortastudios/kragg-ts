@@ -48,7 +48,9 @@ Harness integration:
   hook claude    hook adapter; reads hook JSON on stdin
 
 Options for check and security:
-  --file <path>          scope to this file (repeatable)
+  --file <path>          scope to this file or directory (repeatable; a
+                         directory scopes to the source files under it, and a
+                         path that does not exist is a usage error)
   --format text|json     output format (default: text)
   --max-violations <n>   cap violations shown per gate
   --no-journal           do not append to .kragg/history.jsonl
@@ -58,6 +60,17 @@ Options for check only:
   --since <ref>          only files changed since <ref>
   --fail-fast            stop at the first failing gate
   --all                  run slow gates even after a fast gate failed
+  --update-baseline      record this run's findings from the metric, structure
+                         and test-quality gates as reviewed legacy debt in the
+                         file kragg.json#baseline names (full runs only; the
+                         security, compiler and evidence gates are refused)
+
+--changed and --since run a FULL check instead when the change set includes a
+configuration or dependency input (kragg.json, tsconfig*.json, package.json, a
+lockfile, a linter or test-runner config, the secret baseline) or when its only
+source change is a deletion: all of those change what every gate concludes.
+The report says mode "full", and the reason is printed on stderr. A change set
+with nothing to check is exit 0; git being unable to answer is exit 3.
 
 Options for fix:
   --file <path>          format and fix only this file (repeatable)
@@ -66,11 +79,28 @@ Options for status:
   --format text|json     output format (default: text)
   --last <n>             how many runs to read (default: 10)
 
-Options for map:
-  --write                also write the inventory to .kragg/map.md
+Options for map and spec:
+  --path <path>          only this file or directory (repeatable)
+  --symbol <name>        map: an exported name, Class.method, or the exact
+                         <module>#<name>; spec: a case-insensitive substring
+                         of a test or describe title (repeatable)
+  --changed              only files changed against HEAD
+  --limit <n>            how many entries to print (default: 100)
+  --all                  print every entry (the same as --limit 0)
+  --format text|json     output format (default: text); json carries total,
+                         shown and truncated beside the entries
+
+Options for map only:
+  --write                also write the FULL inventory to .kragg/map.md
+                         (not with --path, --symbol or --changed, whose
+                         output is a view and not the project's inventory;
+                         --limit is fine and never trims the file)
 
 Options for brief:
   --since <ref>          digest the changes since <ref>
+  --path <path>          only changed files under this path (repeatable)
+  --limit <n>            how many changed files to list (default: 100)
+  --all                  list every changed file (the same as --limit 0)
 
 Options for criticality:
   --write                write CRITICALITY.md and .kragg/criticality.json

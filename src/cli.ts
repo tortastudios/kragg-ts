@@ -49,6 +49,7 @@ import { parseArgs } from "node:util";
 import { pathToFileURL } from "node:url";
 
 import { USAGE } from "./cli/usage.ts";
+import { inventoryOptions } from "./commands/inventory.ts";
 import { runAudit } from "./commands/audit.ts";
 import { runBrief } from "./commands/brief.ts";
 import { runCheck, type ReportFlags } from "./commands/check.ts";
@@ -109,6 +110,8 @@ const OPTIONS = {
   path: { type: "string", multiple: true },
   rerun: { type: "string" },
   "update-baseline": { type: "boolean" },
+  symbol: { type: "string", multiple: true },
+  limit: { type: "string" },
 } as const;
 
 /** Command name -> the flags it accepts. */
@@ -116,15 +119,15 @@ type FlagTable = Readonly<Record<string, readonly string[]>>;
 
 /** Which flags each command accepts. Anything else is a usage error. */
 const ALLOWED: FlagTable = {
-  check: ["file", "format", "max-violations", "no-journal", "changed", "since", "fail-fast", "all"],
+  check: ["file", "format", "max-violations", "no-journal", "changed", "since", "fail-fast", "all", "update-baseline"],
   security: ["file", "format", "max-violations", "no-journal"],
   fix: ["file"],
   status: ["format", "last"],
   doctor: [],
   policy: [],
-  map: ["write"],
-  spec: [],
-  brief: ["since"],
+  map: ["write", "path", "symbol", "changed", "limit", "all", "format"],
+  spec: ["path", "symbol", "changed", "limit", "all", "format"],
+  brief: ["since", "path", "limit", "all"],
   coverage: [],
   criticality: ["write", "path"],
   audit: [],
@@ -253,6 +256,7 @@ function gateCommand(
         ...reportFlags(values, root),
         changed: values.changed === true,
         since: values.since ?? null,
+        updateBaseline: values["update-baseline"] === true,
       });
     case "security":
       return runSecurity(reportFlags(values, root));
@@ -280,11 +284,15 @@ function reportCommand(
 ): Promise<number> | number {
   switch (command) {
     case "map":
-      return runMap({ root, write: values.write === true });
+      return runMap({ root, write: values.write === true, ...inventoryOptions(values) });
     case "spec":
-      return runSpec({ root });
-    case "brief":
-      return runBrief({ root, since: values.since ?? null });
+      return runSpec({ root, ...inventoryOptions(values) });
+    case "brief": {
+      // Only the two filters `brief` accepts: `ALLOWED` has already rejected
+      // the others, and passing them anyway would document a surface it has not.
+      const view = inventoryOptions(values);
+      return runBrief({ root, since: values.since ?? null, paths: view.paths, limit: view.limit });
+    }
     case "coverage":
       return runCoverage({ root });
     case "criticality":
@@ -392,6 +400,7 @@ function invalidValue(values: Values): string | null {
   return (
     notACount("max-violations", values["max-violations"]) ??
     notACount("last", values.last) ??
+    notACount("limit", values.limit) ??
     notACount("rerun", values.rerun)
   );
 }
@@ -416,6 +425,11 @@ function conflict(values: Values): string | null {
   const fromGit = values.changed === true || values.since !== undefined;
   if (fromGit && values.file !== undefined) {
     return "--file cannot be combined with --changed or --since; git decides the file set";
+  }
+  // Same class, one level down: `--all` is the inventories' spelling of
+  // `--limit 0`, so accepting both means silently honouring one.
+  if (values.all === true && values.limit !== undefined) {
+    return "--all cannot be combined with --limit; --all IS the full export (--limit 0)";
   }
   return null;
 }

@@ -236,6 +236,7 @@ export async function runReruns(options: RerunOptions): Promise<RerunOutcome> {
         maxViolations: 0,
         testPaths: policy.testPaths,
         testCommand: policy.testCommand,
+        sourcePaths: policy.sourcePaths,
       }),
     );
     if (!sample.ok) {

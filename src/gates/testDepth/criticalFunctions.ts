@@ -35,6 +35,18 @@
  *  - no MODULE segment may start with `_`, matching Python's treatment of
  *    `pkg._internal.fn`.
  *
+ * ── DECLARED CRITICAL FUNCTIONS ────────────────────────────────────────────
+ * A `critical_functions` entry in the policy makes a function critical that
+ * the call graph did not select, and it arrives here as an ordinary
+ * `is_critical` record — `readJson` applies the declarations, so nothing in
+ * this module has a special case for them beyond carrying the REASON, which
+ * lives in the policy and not in the file. They are then subject to the same
+ * public-surface rule as every other critical function: a declared function
+ * that its module does not export is still skipped, because the gates that
+ * consume this list reason about what a test can address, and a reviewer who
+ * needs a private function gated should export it or declare the exported
+ * function that reaches it.
+ *
  * REMAINING GAP, stated plainly: a `private method()` on an exported class is
  * indistinguishable from a public one here, because `criticality.json` records
  * only names and the TypeScript `private` keyword leaves no trace in one.
@@ -49,7 +61,7 @@ import {
   resolveTypeScript,
   type TypeScriptApi,
 } from "../../analysis/sourceFile.ts";
-import { readJson } from "../criticality.ts";
+import { declaredCritical, readJson, staleDeclarationMessage } from "../criticality.ts";
 
 /** Separator between the module and the qualified name in a node name. */
 export const QUALIFIER = "#";
@@ -65,6 +77,16 @@ export interface CriticalFunction {
   /** The last qualified segment — what a coverage report and a test call it. */
   readonly name: string;
   readonly fanIn: number;
+  /**
+   * Why a reviewer declared this function critical, when one did.
+   *
+   * Present only for a `critical_functions` entry, and read from the POLICY
+   * rather than from `criticality.json` — that file's record shape is a
+   * cross-language contract and carries no reason. The gates quote it when
+   * they name the function, so a violation about a one-caller function says
+   * what made it worth gating instead of looking like a false positive.
+   */
+  readonly declaredReason?: string;
 }
 
 export interface CriticalFunctionOptions {
@@ -89,6 +111,7 @@ export interface ModuleEntry {
 interface CriticalEntry {
   readonly qualname: string;
   readonly fanIn: number;
+  readonly declaredReason?: string;
 }
 
 /**
@@ -127,25 +150,36 @@ export function criticalFunctions(
       file: found.file,
       name: simpleName(entry.qualname),
       fanIn: entry.fanIn,
+      ...(entry.declaredReason === undefined ? {} : { declaredReason: entry.declaredReason }),
     });
   }
   return resolved;
 }
 
 /**
- * Names of the public critical functions.
+ * The reviewed declarations that name nothing in the criticality data, as a
+ * message — or `null` when every one of them resolves.
  *
- * `test-quality`'s reference check needs only names, but it still needs the
- * source walk: whether a name is public is a fact about the module, not about
- * the string.
+ * THE RENAME CASE, AND WHY IT IS AN ERROR. A `critical_functions` entry is a
+ * decision that a specific function needs stronger checks. Rename the function
+ * and leave the entry behind, and the entry matches no record: nothing is
+ * enforced, and — without this — nothing says so, which is the silent loss of
+ * protection the setting exists to prevent. Every gate that consumes the data
+ * calls this first and reports `error: true` (exit 3) with the message, rather
+ * than reporting a green gate over a shrunken population.
+ *
+ * The population compared against is the WHOLE sidecar, critical or not: a
+ * declared function that the graph did not select is still a node in it, so a
+ * name absent from the file really is a name absent from the program. Callers
+ * check `hasCriticalityData` first — with no data at all there is nothing to
+ * compare against, and the visible skip they already have is the right answer.
  */
-export function publicCriticalNames(
-  root: string,
-  sourcePaths: readonly string[],
-  api?: TypeScriptApi | undefined,
-): readonly string[] {
-  return criticalFunctions(root, sourcePaths, api === undefined ? {} : { api }).map(
-    (critical) => critical.qualname,
+export function declarationProblem(root: string): string | null {
+  return staleDeclarationMessage(
+    declaredCritical(root),
+    readJson(root)
+      .map((record) => record["name"])
+      .filter((name): name is string => typeof name === "string"),
   );
 }
 
@@ -317,6 +351,11 @@ function collectExportClause(
  * do not control, and a gate that throws on it stops reporting everything else.
  */
 function criticalEntries(root: string): readonly CriticalEntry[] {
+  // `readJson` has already applied the policy's declarations to `is_critical`,
+  // so a declared function arrives here as an ordinary critical record. Only
+  // the REASON has to be looked up, because the record shape has nowhere to
+  // carry one.
+  const reasons = new Map(declaredCritical(root));
   const entries: CriticalEntry[] = [];
   for (const record of readJson(root)) {
     if (record["is_critical"] !== true) {
@@ -327,9 +366,11 @@ function criticalEntries(root: string): readonly CriticalEntry[] {
       continue;
     }
     const fanIn = record["fan_in"];
+    const declaredReason = reasons.get(name);
     entries.push({
       qualname: name,
       fanIn: typeof fanIn === "number" && Number.isFinite(fanIn) ? fanIn : 0,
+      ...(declaredReason === undefined ? {} : { declaredReason }),
     });
   }
   return entries;

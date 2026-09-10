@@ -20,7 +20,17 @@
  */
 
 import assert from "node:assert/strict";
-import { chmodSync, mkdirSync, mkdtempSync, readdirSync, readFileSync, rmSync, writeFileSync } from "node:fs";
+import {
+  chmodSync,
+  existsSync,
+  mkdirSync,
+  mkdtempSync,
+  readdirSync,
+  readFileSync,
+  renameSync,
+  rmSync,
+  writeFileSync,
+} from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { fileURLToPath } from "node:url";
@@ -470,6 +480,189 @@ describe("a check with nothing in its scope", () => {
   });
 });
 
+/**
+ * TOR-1365, end to end: what an incremental run may conclude, and from what.
+ *
+ * The fixture keeps the external tools off so the report is about the gates
+ * that judge the code, and gives `nullable-default` something real to find in
+ * a nested directory — the finding that a `--file` on that directory used to
+ * miss while reporting `[PASS]`.
+ */
+describe("incremental selection and configuration invalidation", () => {
+  const TSCONFIG = JSON.stringify({
+    compilerOptions: {
+      target: "es2023",
+      module: "nodenext",
+      moduleResolution: "nodenext",
+      strict: true,
+      noUncheckedIndexedAccess: true,
+      exactOptionalPropertyTypes: true,
+      allowImportingTsExtensions: true,
+      verbatimModuleSyntax: true,
+      erasableSyntaxOnly: true,
+      noEmit: true,
+    },
+    include: ["src/**/*.ts"],
+  });
+
+  /** `||` mis-coalescing a legitimate `0` — one `nullable-default` violation. */
+  const MIS_COALESCED = "export function port(given: number | null): number {\n" +
+    "  return given || 8080;\n}\n";
+
+  async function selectionProject(): Promise<string | null> {
+    const root = project({
+      "package.json": '{"name":"x","version":"0.0.0","type":"module","private":true}',
+      "kragg.json":
+        '{"source_paths":["src"],"test_paths":["test"],"lint_tool":"off",' +
+        '"test_runner":"off","secret_scanner":"off"}',
+      "tsconfig.json": TSCONFIG,
+      "README.md": "# fixture\n",
+    });
+    writeProjectFile(root, "src/a.ts", "export const a = 1;\n");
+    writeProjectFile(root, "src/nested/b.ts", MIS_COALESCED);
+    for (const args of [
+      ["init", "--initial-branch=main"],
+      ["add", "-A"],
+      [
+        "-c",
+        "user.name=kragg-test",
+        "-c",
+        "user.email=kragg-test@example.invalid",
+        "-c",
+        "commit.gpgsign=false",
+        "commit",
+        "-q",
+        "-m",
+        "baseline",
+      ],
+    ]) {
+      const result = await runCommand("git", ["git", ...args], root);
+      if (result.returncode !== 0) {
+        return null;
+      }
+    }
+    return root;
+  }
+
+  /** Run `check --changed --format json` and hand back the payload. */
+  async function changedRun(root: string): Promise<{ payload: ReportPayload; err: string }> {
+    const result = await run(["check", "--changed", "--format", "json", "--no-journal"], root);
+    return { payload: JSON.parse(result.out), err: result.err };
+  }
+
+  it("runs a FULL check after a config-only edit, instead of exiting 0 having run nothing", async (t) => {
+    const root = await selectionProject();
+    if (root === null) {
+      t.skip("git is not available");
+      return;
+    }
+    // THE REPORTED BUG. Editing only `kragg.json` left `--changed` with an
+    // empty TypeScript selection, so it printed "no changed TypeScript files"
+    // and exited 0 before a single gate ran — over a file that decides what
+    // every gate concludes about every other file.
+    writeFileSync(join(root, "kragg.json"),
+      '{"source_paths":["src"],"test_paths":["test"],"lint_tool":"off",' +
+        '"test_runner":"off","secret_scanner":"off","max_file_lines":400}');
+    const { payload, err } = await changedRun(root);
+    assert.equal(payload.mode, "full");
+    assert.deepEqual(payload.targets, ["src"]);
+    assert.ok(payload.summary.gates_total > 0, "gates must actually have run");
+    assert.match(err, /kragg\.json changed/);
+  });
+
+  it("runs a FULL check when the only change is a deletion", async (t) => {
+    const root = await selectionProject();
+    if (root === null) {
+      t.skip("git is not available");
+      return;
+    }
+    rmSync(join(root, "src", "a.ts"));
+    const { payload, err } = await changedRun(root);
+    assert.equal(payload.mode, "full");
+    assert.ok(payload.summary.gates_total > 0);
+    assert.match(err, /src\/a\.ts was removed/);
+  });
+
+  it("still reports an empty selection as a clean run when only a doc changed", async (t) => {
+    const root = await selectionProject();
+    if (root === null) {
+      t.skip("git is not available");
+      return;
+    }
+    // Empty is not failed discovery, and it is not a reason to check the world.
+    writeFileSync(join(root, "README.md"), "# edited\n");
+    const { payload, err } = await changedRun(root);
+    assert.equal(payload.mode, "changed");
+    assert.deepEqual(payload.gates, []);
+    assert.equal(err, "");
+  });
+
+  it("selects a changed non-ASCII path instead of silently dropping it", async (t) => {
+    const root = await selectionProject();
+    if (root === null) {
+      t.skip("git is not available");
+      return;
+    }
+    // `core.quotePath` rendered this as `"src/caf\303\251.ts"`, which matched
+    // nothing on disk: the file left the selection and the run passed green.
+    writeProjectFile(root, "src/café.ts", MIS_COALESCED);
+    const { payload } = await changedRun(root);
+    assert.equal(payload.mode, "changed");
+    assert.deepEqual(payload.targets, ["src/café.ts"]);
+    const gate = payload.gates.find((each) => each.name === "nullable-default");
+    assert.equal(gate?.passed, false, "the gate must have looked inside the file");
+    assert.equal(gate?.violation_count, 1);
+  });
+
+  it("narrows every path-aware gate to a --file directory, not just the linter", async (t) => {
+    const root = await selectionProject();
+    if (root === null) {
+      t.skip("git is not available");
+      return;
+    }
+    // `--file src/nested` used to leave `paths` as the directory string, which
+    // no gate that compares FILE paths could ever match: `nullable-default`
+    // scanned nothing and printed `[PASS]` over a real finding underneath it.
+    const result = await run(
+      ["check", "--file", "src/nested", "--format", "json", "--no-journal"],
+      root,
+    );
+    const payload: ReportPayload = JSON.parse(result.out);
+    assert.deepEqual(payload.targets, ["src/nested"], "targets stay as given: they are on the wire");
+    const gate = payload.gates.find((each) => each.name === "nullable-default");
+    assert.equal(gate?.passed, false);
+    assert.equal(gate?.violation_count, 1);
+  });
+
+  it("rejects a --file that names nothing, on both pipelines", async (t) => {
+    const root = await selectionProject();
+    if (root === null) {
+      t.skip("git is not available");
+      return;
+    }
+    for (const command of ["check", "security"]) {
+      const result = await run([command, "--file", "src/typo.ts", "--no-journal"], root);
+      assert.equal(result.code, EXIT_USAGE, command);
+      assert.match(result.err, /--file src\/typo\.ts: no such file or directory/, command);
+      assert.equal(result.out, "", command);
+    }
+  });
+
+  it("reports git's own message for a --since ref that does not exist", async (t) => {
+    const root = await selectionProject();
+    if (root === null) {
+      t.skip("git is not available");
+      return;
+    }
+    // An unresolvable ref is not an empty change set. It used to be reported
+    // as "not a git repository", which sends the reader to the wrong place.
+    const result = await run(["check", "--since", "no-such-ref", "--no-journal"], root);
+    assert.equal(result.code, EXIT_ENVIRONMENT);
+    assert.match(result.err, /merge-base/);
+    assert.equal(result.out, "");
+  });
+});
+
 describe("an accepted argument must be an argument that acts", () => {
   // Three shapes of one bug, each of which used to be a silent fallback: a
   // value outside its domain, a positional nobody reads, and a flag that
@@ -556,6 +749,122 @@ describe("an accepted argument must be an argument that acts", () => {
   });
 });
 
+/**
+ * The inventory filters, end to end.
+ *
+ * `test/map.test.ts` and `test/spec.test.ts` cover what the documents say;
+ * this covers what a caller can ask for and what the process does about it —
+ * the exit code, the machine format on stdout, and the artifact on disk.
+ */
+describe("focused, bounded inventories", () => {
+  /** A project with two source modules and one two-case test file. */
+  function inventory(): string {
+    const root = project();
+    mkdirSync(join(root, "src"), { recursive: true });
+    mkdirSync(join(root, "test"), { recursive: true });
+    writeFileSync(
+      join(root, "src", "alpha.ts"),
+      "export function zulu(): void {}\nexport function alpha(): void {}\n",
+    );
+    writeFileSync(join(root, "src", "beta.ts"), "export const beta = 1;\n");
+    writeFileSync(
+      join(root, "test", "a.test.ts"),
+      'describe("group", () => {\n  it("one", () => {});\n  it("two", () => {});\n});\n',
+    );
+    return root;
+  }
+
+  it("scopes `map` to a path and to a symbol", async () => {
+    const root = inventory();
+    const scoped = await run(["map", "--path", "src/beta"], root);
+    assert.equal(scoped.code, EXIT_OK);
+    assert.match(scoped.out, /^map: 1 exported symbols across 1 modules\n/);
+
+    const named = await run(["map", "--symbol", "zulu"], root);
+    assert.equal(named.code, EXIT_OK);
+    assert.match(named.out, /^map: 1 exported symbols across 1 modules\n/);
+    assert.ok(named.out.includes("fn zulu(): void"), named.out);
+  });
+
+  it("bounds `map` and says what it withheld, in text and in JSON", async () => {
+    const root = inventory();
+    const text = await run(["map", "--limit", "1"], root);
+    assert.equal(text.code, EXIT_OK);
+    assert.ok(
+      text.out.trimEnd().endsWith("showing 1 of 3 exported symbols — pass --limit 0 for everything"),
+      text.out,
+    );
+
+    const json = await run(["map", "--limit", "1", "--format", "json"], root);
+    assert.equal(json.code, EXIT_OK);
+    const parsed = JSON.parse(json.out) as { total: number; shown: number; truncated: boolean };
+    assert.deepEqual(parsed, { ...parsed, total: 3, shown: 1, truncated: true });
+  });
+
+  it("writes the whole inventory to .kragg/map.md however small the printout", async () => {
+    // The enforcement contract: a display budget is not a scope. What the
+    // session-start injection loads must not shrink because of a --limit.
+    const root = inventory();
+    const result = await run(["map", "--limit", "1", "--write"], root);
+    assert.equal(result.code, EXIT_OK);
+    assert.match(result.out, /showing 1 of 3 exported symbols/);
+    const written = readFileSync(join(root, ".kragg", "map.md"), "utf8");
+    assert.equal(written.split("\n").filter((line) => line.startsWith("  ")).length, 3, written);
+    assert.ok(!written.includes("showing"), written);
+  });
+
+  it("refuses to persist a map scoped by a filter", async () => {
+    const result = await run(["map", "--write", "--path", "src/beta"], inventory());
+    assert.equal(result.code, EXIT_USAGE);
+    assert.match(result.err, /--write cannot be combined with --path, --symbol or --changed/);
+  });
+
+  it("scopes and bounds `spec` the same way", async () => {
+    const root = inventory();
+    const scoped = await run(["spec", "--symbol", "one", "--format", "json"], root);
+    assert.equal(scoped.code, EXIT_OK);
+    const parsed = JSON.parse(scoped.out) as { total: number; entries: { title: string }[] };
+    assert.equal(parsed.total, 1);
+    assert.equal(parsed.entries[0]?.title, "one");
+
+    const missed = await run(["spec", "--symbol", "nosuchtest"], root);
+    assert.equal(missed.code, EXIT_OK, "an empty selection is a fact, not a failure");
+    assert.match(missed.out, /^no tests match the selection\n/);
+  });
+
+  it("cannot answer --changed outside a repository, and says so instead of guessing", async () => {
+    // The `null` vs `[]` rule: "git cannot answer" must never render as
+    // "nothing changed", which would look like a clean, complete inventory.
+    for (const command of ["map", "spec"]) {
+      const result = await run([command, "--changed"], inventory());
+      assert.equal(result.code, EXIT_ENVIRONMENT, command);
+      assert.match(result.err, /not a git repository \(required for --changed\)/, command);
+    }
+  });
+
+  it("rejects a limit that is not a count, and --all alongside it", async () => {
+    const bad = await run(["map", "--limit", "abc"]);
+    assert.equal(bad.code, EXIT_USAGE);
+    assert.match(bad.err, /--limit must be a non-negative integer, not 'abc'/);
+
+    const both = await run(["spec", "--all", "--limit", "5"]);
+    assert.equal(both.code, EXIT_USAGE);
+    assert.match(both.err, /--all cannot be combined with --limit/);
+  });
+
+  it("keeps each command's filters to the ones it implements", async () => {
+    // `brief` has no symbol to filter on and `spec` writes no artifact, so
+    // accepting either flag would be an argument that does not act.
+    const symbol = await run(["brief", "--symbol", "x"]);
+    assert.equal(symbol.code, EXIT_USAGE);
+    assert.match(symbol.err, /`brief` does not accept --symbol/);
+
+    const write = await run(["spec", "--write"]);
+    assert.equal(write.code, EXIT_USAGE);
+    assert.match(write.err, /`spec` does not accept --write/);
+  });
+});
+
 describe("the help text and the flag table cannot drift apart", () => {
   // Both directions of one contract: a flag `--help` advertises must be one a
   // command accepts, and a flag a command accepts must be advertised. Read as
@@ -625,10 +934,169 @@ describe("the help text and the flag table cannot drift apart", () => {
     const documented = documentedTable();
     assert.deepEqual(
       [...documented.keys()].sort(),
-      ["brief", "check", "criticality", "fix", "flaky", "init", "map", "mutation", "security", "status"],
+      ["brief", "check", "criticality", "fix", "flaky", "init", "map", "mutation", "security", "spec", "status"],
     );
     assert.deepEqual(documented.get("criticality"), ["write", "path"]);
     assert.deepEqual(allowedTable().get("mutation"), ["path", "since", "all", "update-baseline"]);
   });
 });
 
+
+/**
+ * TOR-1377's fixture: a project with legacy complexity debt and one
+ * security finding, so the baseline's two edges are both in one tree — what
+ * it accepts, and what it refuses.
+ */
+function legacyProject(): string {
+  const root = mkdtempSync(join(tmpdir(), "kragg-legacy-"));
+  roots.push(root);
+  writeProjectFile(root, "package.json", '{"name":"x","version":"0.0.0","type":"module","private":true}');
+  writeProjectFile(
+    root,
+    "kragg.json",
+    '{"source_paths":["src"],"test_paths":["test"],"lint_tool":"off",' +
+      '"test_runner":"off","secret_scanner":"off","baseline":".kragg/baseline.json"}',
+  );
+  writeProjectFile(root, "tsconfig.json", TOR1359_TSCONFIG);
+  writeProjectFile(root, "src/legacy.ts", legacyFunction("legacyOne"));
+  // No `@types/node` in the fixture, so `process` is declared locally — via
+  // aliases, so the declaration itself is not a type-complexity finding.
+  writeProjectFile(
+    root,
+    "src/config.ts",
+    "type Env = Readonly<Record<string, string | undefined>>;\n" +
+      "interface ProcessLike { readonly env: Env }\n" +
+      "declare const process: ProcessLike;\n" +
+      'export const apiToken = process.env["API_TOKEN"] ?? "";\n',
+  );
+  writeProjectFile(root, "node_modules/.bin/tsc", `#!${process.execPath}\nimport(${JSON.stringify(TSC_ENTRY)});\n`);
+  chmodSync(join(root, "node_modules", ".bin", "tsc"), 0o755);
+  return root;
+}
+
+/** A function well over the cyclomatic budget (grade C). */
+function legacyFunction(name: string): string {
+  const branches = Array.from({ length: 14 }, (_, i) => `  if (n === ${String(i)}) { r += ${String(i)}; }`);
+  return `export function ${name}(n: number): number {\n  let r = 0;\n${branches.join("\n")}\n  return r;\n}\n`;
+}
+
+describe("legacy debt is adopted explicitly, and only what may be", () => {
+  // One tree, mutated in sequence: the steps ARE the adoption path.
+  const root = legacyProject();
+  const CHECK = ["check", "--no-journal"];
+
+  it("fails today, with no baseline recorded", async () => {
+    const result = await run(CHECK, root);
+    assert.equal(result.code, EXIT_GATE_FAILURES, result.out);
+    assert.match(result.out, /\[FAIL] complexity \(\d+\.\ds\) — 1 violations/);
+    assert.match(result.out, /\[FAIL] secret-default/);
+    assert.match(result.err, /baseline \.kragg\/baseline\.json: 0 findings accepted as legacy debt, 0 stale entries/);
+  });
+
+  it("refuses --update-baseline outside a full run, and without a configured file", async () => {
+    for (const argv of [["check", "--changed", "--update-baseline"], ["check", "--file", "src/legacy.ts", "--update-baseline"]]) {
+      const result = await run(argv, root);
+      assert.equal(result.code, EXIT_USAGE, argv.join(" "));
+      assert.match(result.err, /--update-baseline records a full run/);
+    }
+    const bare = project({ "kragg.json": '{"lint_tool":"off"}' });
+    const result = await run(["check", "--update-baseline"], bare);
+    assert.equal(result.code, EXIT_USAGE);
+    assert.match(result.err, /kragg\.json#baseline names no file/);
+    assert.equal(existsSync(join(bare, ".kragg", "baseline.json")), false);
+  });
+
+  it("records the complexity debt, refuses the security finding, and still fails on it", async () => {
+    const result = await run([...CHECK, "--update-baseline"], root);
+    assert.equal(result.code, EXIT_GATE_FAILURES, result.out);
+    assert.match(result.err, /recorded 1 findings as accepted legacy debt in \.kragg\/baseline\.json; COMMIT THIS FILE/);
+    assert.match(result.err, /refused to baseline 1 findings in secret-default/);
+    assert.match(result.out, /\[PASS] complexity/);
+    assert.match(result.out, /\[advisory] src\/legacy\.ts:1 CC-C baselined: legacyOne has cyclomatic complexity grade C/);
+    assert.match(result.out, /\[FAIL] secret-default/);
+    const written: unknown = JSON.parse(readFileSync(join(root, ".kragg", "baseline.json"), "utf8"));
+    assert.ok(typeof written === "object" && written !== null && "entries" in written);
+    const entries: unknown = written.entries;
+    assert.ok(Array.isArray(entries) && entries.length === 1);
+    const first: unknown = entries[0];
+    assert.ok(typeof first === "object" && first !== null && "fingerprint" in first);
+    assert.deepEqual(written, {
+      version: 1,
+      entries: [
+        {
+          gate: "complexity",
+          file: "src/legacy.ts",
+          code: "CC-C",
+          message: "legacyOne has cyclomatic complexity grade C (max allowed: B)",
+          fingerprint: first.fingerprint,
+        },
+      ],
+    });
+    assert.equal(typeof first.fingerprint === "string" && first.fingerprint.length, 16);
+  });
+
+  it("passes once the security finding is fixed, with the debt visible as an advisory in both formats", async () => {
+    writeProjectFile(root, "src/config.ts", "export const apiToken = 1;\n");
+    const text = await run(CHECK, root);
+    assert.equal(text.code, EXIT_OK, text.out);
+    assert.match(text.out, /\[PASS] complexity/);
+    assert.match(text.out, /\[advisory] src\/legacy\.ts:1 CC-C baselined:/);
+    assert.match(text.out, /passed, 0 failed, \d+ skipped, 1 advisories/);
+    assert.match(text.err, /baseline \.kragg\/baseline\.json: 1 findings accepted as legacy debt, 0 stale entries/);
+
+    const json = await run([...CHECK, "--format", "json"], root);
+    assert.equal(json.code, EXIT_OK, json.out);
+    const payload: ReportPayload = JSON.parse(json.out);
+    assert.equal(payload.passed, true);
+    const complexity = payload.gates.find((gate) => gate.name === "complexity");
+    assert.ok(complexity !== undefined);
+    // No key gained, lost or renamed: the accepted finding rides in `advisories`.
+    assert.deepEqual(Object.keys(complexity), [
+      "name", "passed", "skipped", "skip_reason", "error", "duration_ms", "violation_count",
+      "violations", "truncated", "raw_output", "advisories", "advisory_count",
+    ]);
+    assert.equal(complexity.passed, true);
+    assert.equal(complexity.violation_count, 0);
+    assert.deepEqual(complexity.violations, []);
+    assert.equal(complexity.advisory_count, 1);
+    assert.match(complexity.advisories[0]?.message ?? "", /^baselined: legacyOne has cyclomatic/);
+    assert.match(json.err, /1 findings accepted as legacy debt/);
+  });
+
+  it("survives a line shift above the accepted finding", async () => {
+    writeProjectFile(root, "src/legacy.ts", `// shifted down by one\n${legacyFunction("legacyOne")}`);
+    const result = await run(CHECK, root);
+    assert.equal(result.code, EXIT_OK, result.out);
+    assert.match(result.out, /\[advisory] src\/legacy\.ts:2 CC-C baselined:/);
+  });
+
+  it("still fails on a NEW finding beside the accepted one", async () => {
+    writeProjectFile(root, "src/legacy.ts", `${legacyFunction("legacyOne")}\n${legacyFunction("legacyTwo")}`);
+    const result = await run(CHECK, root);
+    assert.equal(result.code, EXIT_GATE_FAILURES, result.out);
+    assert.match(result.out, /\[FAIL] complexity \(\d+\.\ds\) — 1 violations/);
+    assert.match(result.out, /src\/legacy\.ts:\d+ CC-C legacyTwo has cyclomatic/);
+    assert.match(result.out, /\[advisory] src\/legacy\.ts:1 CC-C baselined: legacyOne/);
+    assert.doesNotMatch(result.out, /CC-C legacyOne has cyclomatic complexity grade C \(max allowed: B\) ->/);
+  });
+
+  it("reports a renamed file's entry as stale and the finding at the new path as new", async () => {
+    renameSync(join(root, "src", "legacy.ts"), join(root, "src", "old.ts"));
+    writeProjectFile(root, "src/old.ts", legacyFunction("legacyOne"));
+    const result = await run(CHECK, root);
+    assert.equal(result.code, EXIT_GATE_FAILURES, result.out);
+    assert.match(result.out, /\[FAIL] complexity \(\d+\.\ds\) — 1 violations/);
+    assert.match(result.out, /src\/old\.ts:1 CC-C legacyOne has cyclomatic/);
+    assert.match(result.out, /\[advisory] src\/legacy\.ts CC-C stale baseline entry: legacyOne has cyclomatic/);
+    assert.match(result.err, /0 findings accepted as legacy debt, 1 stale entries/);
+  });
+
+  it("writes nothing over a broken environment", async () => {
+    const before = readFileSync(join(root, ".kragg", "baseline.json"), "utf8");
+    rmSync(join(root, "node_modules"), { recursive: true, force: true });
+    const result = await run([...CHECK, "--update-baseline"], root);
+    assert.equal(result.code, EXIT_ENVIRONMENT, result.out);
+    assert.match(result.err, /baseline not written to \.kragg\/baseline\.json: a gate could not run \(exit 3\)/);
+    assert.equal(readFileSync(join(root, ".kragg", "baseline.json"), "utf8"), before);
+  });
+});

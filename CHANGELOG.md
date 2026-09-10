@@ -20,6 +20,36 @@ a previously green run red — see [Gate additions](#gate-additions) below.
 
 ### Added
 
+- **TOR-1377** — a reviewed adoption path for legacy debt, and suppression
+  accountability. `kragg.json#baseline` names a git-tracked baseline file
+  (conventionally `.kragg/baseline.json`; `null`/absent means none) that only
+  `kragg check --update-baseline` writes — full runs only, never over a broken
+  environment, always replacing the previous file so a fixed finding is a
+  deletion in review. Findings recorded there are reported as `baselined:`
+  advisories of their gate instead of failing the run; every finding NOT in
+  it fails as before, so a new regression cannot hide behind old debt. Only
+  the metric, structure and test-quality gates are eligible (`lint`,
+  `complexity`, `maintainability`, `halstead`, `type-complexity`,
+  `boundaries`, `structure`, `nullable-default`, `test-quality`,
+  `critical-coverage`); `detect-secrets`, `secret-default`,
+  `forbidden-calls`, `tsc`, `typing-strictness`, `test-coverage`,
+  `critical-tests`, `audit`, every errored gate and every skip are refused at
+  record time, rejected at read time and ignored at apply time. An entry is
+  `(gate, file, code, message, fingerprint-of-the-flagged-line)` with no line
+  number: it survives edits above it and goes **stale** — reported as an
+  advisory, never dropped or re-matched — when the line, the message or the
+  file name changes, so a rename is a re-review. **No wire key is added**:
+  accepted and stale findings ride in the existing `advisories` list, and the
+  cross-language fixtures are unchanged. The Claude hook applies the same
+  baseline as `check`. `kragg.schema.json` gains the key.
+  `// kragg: ignore` now **requires a reason** — `// kragg: ignore --
+  <reason>` (or `/* kragg: ignore -- <reason> */`): a bare marker suppresses
+  nothing and the gate reports the finding it was written over with a note
+  naming the bare marker. kragg-ts's own three live markers carry reasons.
+  `kragg brief` gains `## Suppressions` (every marker the change set added or
+  removed, with its reason, bare ones flagged) and `## Baseline` (entries
+  added, removed or stale) between the critical and gate sections. The
+  scaffold's `AGENTS.md` and `.gitignore` lines state the new rules.
 - **TOR-1376** — metric-gate calibration on representative TypeScript
   projects, and a regression net so the result cannot be undone quietly.
   `scripts/calibrate.ts` measures `complexity`, `maintainability`, `halstead`,
@@ -44,6 +74,44 @@ a previously green run red — see [Gate additions](#gate-additions) below.
   **No threshold, grade band, profile or default was changed**: the proposals
   the measurements support are written up in `docs/calibration.md` and marked
   as not applied, because each one is a number Python kragg also ships.
+- **TOR-1375** — the agent-facing inventories are focused and bounded.
+  `kragg map` and `kragg spec` on this repository printed 94,729 and 86,284
+  characters, with no way to ask for one directory, one symbol or just what
+  changed — an inventory too expensive to read is one an agent skips, which is
+  the reinvention `map` exists to prevent arriving through the back door.
+  `map`, `spec` and `brief` now take `--path <p>` (repeatable file or
+  directory prefixes); `map` and `spec` also take `--symbol <name>` (for
+  `map`, an exported name, `Class.method`, or the exact `<module>#<name>`; for
+  `spec`, a case-insensitive substring of a test or `describe` title) and
+  `--changed` (files changed against `HEAD`, through the same
+  `src/git/changes.ts` `check --changed` uses — outside a repository it is
+  exit 3 and a message, never an empty inventory). All three take `--limit
+  <n>`, defaulting to 100 entries, with `--limit 0` or `--all` for the
+  deliberate full export; `map` and `spec` also take `--format text|json`,
+  which carries `total`, `shown` and `truncated` beside the entries. Ordering
+  is deterministic — by path then name for `map`, by path then source order
+  for `spec` — so the JSON entry order is the text order and two runs over one
+  tree are byte-identical. The default `map` is now 11,536 characters and the
+  default `spec` 6,977.
+
+  **A display budget is never a scope.** A truncated text render ends with
+  `showing N of M … — pass --limit 0 for everything`; `map` still derives the
+  whole project's criticality graph however narrow the printed map, so no gate
+  can be quietened by asking for less; `map --write` always writes the
+  complete `.kragg/map.md` and refuses `--path`, `--symbol` and `--changed`
+  outright (a scoped map injected at session start reads as "nothing else
+  exists", the same reasoning as `criticality --write --path`), while
+  `--limit` is allowed and trims only the terminal. An empty selection prints
+  "no symbols/tests match the selection" and exits 0, distinct from a project
+  that has none; in JSON it is a valid object with `total: 0`.
+
+  `kragg brief` now says where its gate section comes from: `## Last gate run`
+  is labelled as a summary of `.kragg/history.jsonl` that was not re-run for
+  the brief, and it states when the recorded verdict was reached at another
+  commit, against an unidentifiable one, or on a dirty tree — so a stale
+  `PASS` above a list of changed files can no longer be read as "this change
+  set was checked". No change to the report JSON, the criticality sidecar or
+  any exit code.
 
 ### Fixed
 
@@ -95,6 +163,50 @@ a previously green run red — see [Gate additions](#gate-additions) below.
   argv array, so nothing is ever quoted or split. No wire key is added, renamed
   or removed; `test_command` joins the TypeScript-only tail of `policy show`.
 
+- **TOR-1370** — the Claude Code hook checks what the equivalent command
+  checks, and a hook that fails is no longer silent.
+  - **Scope.** `handleStop` ran the pipeline over `policy.sourcePaths[0]`
+    (inherited from Python's `_stop`), so in a project declaring
+    `source_paths: ["src", "lib"]` the hook's per-file tools — the linter, the
+    secret scanner — were pointed at `src` alone: `kragg check` reported a
+    `no-debugger` violation in `lib/` and exited 1, while the Stop hook on the
+    same tree emitted nothing, let the turn end, and journalled `passed: true`.
+    The hook now states an INTENT (`full`, `file`, `changed`) that
+    `src/commands/scope.ts` — the one resolver `check` and `security` use —
+    expands, so a Stop is `kragg check`, a post-edit is `check --file <path>`,
+    and a tool that edited no single file is `check --changed`, including the
+    rules the hook must not reimplement (a configuration edit promoting an
+    incremental run, deletions, an edited file outside the source paths). The
+    hook loads no policy and derives no file list of its own any more.
+  - **Observability.** Failing open is the deliberate exception and it is
+    unchanged — exit 0, nothing blocked, valid protocol JSON or no output at
+    all — but every internal failure is now RECORDED: a line on stderr (debug
+    output at exit 0, never a `hook error` notice), an append-only entry in
+    `.kragg/hook-errors.jsonl` carrying a timestamp, the event name narrowed to
+    a fixed set and the error message, and a first line in the next
+    `SessionStart` context: `N kragg hook failures recorded since the last
+    session`. The record NEVER contains the stdin payload — a `tool_input` is a
+    tool's own arguments, which for `Bash` is a command line. The injected
+    check seam answers `report` / `nothing` / `failed` instead of
+    `CheckReport | null`, because that `null` meant both "nothing to check" and
+    "could not run at all" and both read as a pass.
+  - **Recursion.** `stop_hook_active` is unchanged and still pinned. Alongside
+    it, `KRAGG_HOOK_ACTIVE` is set for the duration of a hook run and inherited
+    by everything the pipeline spawns, so a project whose test command or
+    wrapper script invokes `kragg hook claude` re-enters a no-op instead of
+    starting another full pipeline inside the one already running.
+  - **Truncation** is unchanged at 9000 characters with the in-band marker, and
+    is now pinned on both emitting paths (a block `reason` and a SessionStart
+    `additionalContext`) with the assertion that the cut is applied to the text
+    and never to the JSON envelope, so `decision` always survives.
+
+  No wire format moves: `.kragg/history.jsonl` keeps its keys and its
+  `"changed"`/`"full"` mode values, the report payload is untouched, and the
+  `hook-protocol` conformance golden is byte-identical.
+  `.kragg/hook-errors.jsonl` is a new kragg-ts-only file in the journal's
+  shape, rotated at 200 lines, that no gate and no Python reader consults.
+  `src/hooks/session.ts` and `src/hooks/diagnostics.ts` split the SessionStart
+  and diagnostics halves out of `claude.ts`.
 - **TOR-1366** — criticality freshness and compiler state are now invalidated
   by everything the analysis actually reads. Three separate ways a run could
   believe pre-edit state:
@@ -148,6 +260,48 @@ a previously green run red — see [Gate additions](#gate-additions) below.
   with exit 3 naming what happened. A test that fails in every run is now
   reported as a stable failure (exit 1) rather than dropped, and the output
   names the per-run totals and each test's pass/fail tally.
+- **TOR-1365 — incremental input selection is unified, and a configuration
+  change no longer bypasses checking.** `kragg check --changed` after editing
+  only `kragg.json`, `tsconfig.json`, `package.json`, a lockfile or a linter
+  config resolved an empty TypeScript selection, printed "no changed
+  TypeScript files" and exited **0 without running a single gate** — over the
+  files that decide what every gate concludes about every file. A change set
+  containing a configuration or dependency input (`kragg.json`,
+  `tsconfig*.json`, `package.json`, the lockfiles, `pnpm-workspace.yaml`, the
+  linter configs `.oxlintrc.*` / `oxlint.config.*` / `biome.json(c)` /
+  `eslint.config.*` / `.eslintrc*`, the test-runner configs `vitest.config.*` /
+  `vitest.workspace.*` / `bunfig.toml`, and the configured `secret_baseline`)
+  now runs a **full** check, reporting `mode: "full"` and `targets` of the
+  source paths — what was actually checked — with the reason on stderr so the
+  promotion is never a surprise. A change set whose only source change is a
+  **deletion** is promoted for the same reason: a deleted file is still never
+  handed to a per-file tool, it just stops being mistaken for "nothing
+  changed". Also fixed, in the same resolution:
+  - **Non-ASCII paths are no longer silently dropped.** Every git plumbing call
+    is `-z`, so `src/café.ts` survives instead of arriving as
+    `"src/caf\303\251.ts"`, matching nothing on disk and leaving the selection
+    without a word.
+  - **A git failure is exit 3 with git's own message**, never an empty
+    selection: an unknown `--since` ref now says `git merge-base: fatal: …`
+    rather than "not a git repository", and a repository with no commit yet is
+    an error rather than a run that silently checked only untracked files. A
+    genuinely empty change set is unchanged — exit 0 and the documented clean
+    run.
+  - **`--file` on a path that does not exist is a usage error (exit 2) naming
+    it**, on `check` and `security` alike. It used to run the pipeline: the
+    linter errored about *itself* finding no files while five path-aware gates
+    matched nothing and printed `[PASS]`.
+  - **`--file` on a directory now narrows every gate, not just the linter.**
+    `targets` stays exactly as typed (it is on the wire, and the
+    cross-language contract pins it as "as given"); the internal narrowing is
+    the expansion, so `typing-strictness`, `type-complexity`,
+    `nullable-default`, `secret-default` and `forbidden-calls` stop reporting
+    `[PASS]` over zero files.
+  - **One resolver.** `check` and `security` share
+    `src/commands/scope.ts` instead of each deriving `--file` semantics; which
+    scope every gate honours — and which whole-program gates deliberately
+    ignore it — is now a table in `README.md` and `docs/architecture.md`. No
+    whole-program verdict was narrowed. No wire key was added or renamed.
 
 - **TOR-1359** — `tsc` in incremental mode (`--changed`, `--file`, and
   therefore the Claude PostToolUse hook) no longer hides type errors outside
@@ -206,6 +360,49 @@ a previously green run red — see [Gate additions](#gate-additions) below.
   run's lcov. The coverage artifact is published to `coverage_report_path`
   afterwards for `kragg coverage`. `kragg mutation` refuses to start Stryker
   while an earlier report it could not remove is still at the report path.
+- **TOR-1364: coverage completeness is reconciled against the project, and
+  unavailable evidence is an error.** Three ways a coverage gate could report
+  green without having looked are closed. (1) A critical function whose file
+  the test run never loaded had no entry in the coverage report and therefore
+  no uncovered lines: it passed `critical-coverage`. It is now a violation
+  with its own code, `critical-unmeasured`, whose message states the cause —
+  `the test run never loaded src/x.ts (no entry in the coverage report)`, a
+  name the source could not disambiguate, or a body the report is silent on
+  — and `kragg coverage` lists the same rows under the same words instead of
+  `no coverage entry`. (2) The `test-coverage` percentage counted only the
+  files present in the report, so a project whose tests imported three of
+  forty modules could report 100%; every TypeScript file under
+  `source_paths` the report does not mention now counts with all of its
+  statement lines uncovered (the count is read from the source with the
+  project's compiler, and the gate's output names the files: `3 of 5 source
+  files never loaded by the test run, counted as uncovered (6 statement lines
+  read from the source): …`), files outside `source_paths` no longer move
+  the number, and a report that leaves no line to count under the source
+  paths is an error rather than 100%. (3) `critical-coverage` handed a report
+  naming no file under the source paths treated every critical function as
+  unmeasured; it is now `error: true` (exit 3) naming what was expected.
+  Attribution is exact where it used to decline: two classes with a
+  same-named method (`Reader.close`/`Writer.close`) each get their own
+  extent from the source, keyed the way `criticality.json` spells the name,
+  so neither is blamed for the other's lines and neither slips through as
+  unmeasured; overload signatures are no longer mistaken for a name bound
+  twice; a class that is itself a critical node (`new Foo()` on a class with
+  no constructor) is measured by its own lines and V8's field-initializer
+  record, never by its methods' lines. All of this is **line** coverage; no
+  message implies a branch verdict.
+- **TOR-1364: `kragg coverage` reads the artifact the project's own runner
+  publishes.** It read `coverage/coverage-final.json` or `.kragg/…` and then
+  `coverage/lcov.info`, ignoring `coverage_report_path` entirely — so with a
+  custom path it printed `no coverage data` on a project that had plenty, and
+  after a switch from vitest to `node --test` it preferred the stale istanbul
+  file over this run's tracefile. It now detects the runner the way the gate
+  does and reads exactly one file: `coverage_report_path` for vitest, the
+  `lcov.info` beside it for node and bun. A missing file still prints
+  `cmd_coverage`'s line and exits 0, followed by the path that was expected;
+  a file that is present but unusable — truncated, not JSON, naming no file
+  under the source paths — is exit 3 with the file named, never
+  `no coverage data`; a project with no runner is exit 3, since nothing
+  publishes coverage for it.
 - **TOR-1361: `.kragg/criticality.json` keeps the complete eligible
   population.** `analyze` truncated its result to the twenty riskiest
   functions, and since both `kragg criticality --write` and the check
@@ -259,6 +456,31 @@ a previously green run red — see [Gate additions](#gate-additions) below.
 
 ### Added
 
+- **TOR-1374: reviewed critical functions.** `critical_functions` in
+  `kragg.json` (or `package.json#kragg`) names functions a human decided are
+  high-consequence, each with the reason it is critical, which is required:
+  `{"src/auth/login#verifyPassword": "authorization entrypoint"}`.
+  Centrality only measures how much
+  other code leans on a function, so an authorization or payment entrypoint
+  with one caller ranked last and every criticality-driven gate was silent
+  about it. A declaration is **additive**: it makes a function critical
+  alongside the graph's own selection, never demotes one, and both reasons are
+  shown when it does both. From there it flows unchanged into `critical-tests`,
+  `test-quality`, `critical-coverage`, `kragg coverage` and mutation
+  targeting. `CRITICALITY.md` and the terminal table gain a `Why` column —
+  `declared: authorization entrypoint` against `fan-in 7, betweenness 0.3000` —
+  and the gates quote the reason when they name a declared function. A
+  declaration that matches no analysed function is an ERROR: `kragg
+  criticality` exits 3 naming the stale entry (with the nearest match when a
+  rename is obvious) and writes nothing, and the three gates report
+  `error: true`, so a rename cannot silently retire the protection. **No wire
+  key is added**: a declared function reaches `.kragg/criticality.json` as an
+  ordinary six-key record with `is_critical: true`, and the reason is
+  re-derived from the policy wherever it is shown rather than stored — which is
+  also why a declaration takes effect on the next read without re-running
+  `kragg criticality --write`. Recorded as divergence 29 in
+  `docs/spec-conformance.md`; the default is an empty declaration list, so a
+  project that declares nothing sees byte-identical output.
 - TOR-1363: `kragg.schema.json`, shipped in the package, mirrors the keys,
   types and ranges the loader enforces so an editor can validate `kragg.json`
   (`"$schema": "./node_modules/kragg/kragg.schema.json"`); `$schema` is

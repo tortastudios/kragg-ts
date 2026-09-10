@@ -41,6 +41,17 @@
  *
  * The second section, property-based coverage, lives in `spec/property.ts`;
  * read its header for the fast-check decision.
+ *
+ * ── AND WHERE IT NEEDED A BUDGET ANYWAY ────────────────────────────────────
+ * "Nothing is capped" was written for a human reading one project's suite. On
+ * this repository it is 1,335 cases and ~86,000 characters, which no agent can
+ * afford to read and therefore does not — so `--path`, `--symbol`, `--changed`
+ * and a default `--limit` make the useful subset cheap, while `--limit 0` /
+ * `--all` still prints the whole claim for the reviewer who wants it. The
+ * header always counts the SELECTION, and a truncated tree ends with the line
+ * that says so, so a bounded view can never be mistaken for the full suite.
+ * Nothing here gates anything, so no budget can hide a finding: see
+ * `commands/inventory.ts`.
  */
 
 import type bundledTs from "typescript";
@@ -50,11 +61,31 @@ import {
   type ParsedSource,
   type TypeScriptApi,
 } from "../analysis/sourceFile.ts";
-import { EXIT_OK, EXIT_USAGE } from "../engine/report.ts";
+import { EXIT_ENVIRONMENT, EXIT_OK, EXIT_USAGE } from "../engine/report.ts";
 import { calleeChain, findTestCases } from "../gates/testDepth/testCases.ts";
 import { parsedTestSources } from "../gates/testDepth/testFiles.ts";
 import { loadPolicy, PolicyError, type KraggPolicy } from "../policy/policy.ts";
+import { testScanDirectories } from "../util/testPaths.ts";
+import {
+  applyBudget,
+  changedSet,
+  CHANGED_UNAVAILABLE,
+  DEFAULT_LIMIT,
+  truncationNote,
+  type Budgeted,
+  type InventoryFormat,
+  type InventoryOptions,
+} from "./inventory.ts";
 import { propertyCoverage, type PropertyReport } from "./spec/property.ts";
+import {
+  regroupSpec,
+  renderSpecJson,
+  selectSpecEntries,
+  specCounts,
+  specEntries,
+  type SpecCounts,
+  type SpecEntry,
+} from "./spec/select.ts";
 
 /** Callee names that open a group in every runner kragg supports. */
 const SUITE_HEADS: ReadonlySet<string> = new Set(["describe", "suite"]);
@@ -93,14 +124,26 @@ export interface SpecOptions {
   readonly policy?: KraggPolicy | undefined;
   /** Compiler to parse with. Defaults to the project's own. */
   readonly api?: TypeScriptApi | undefined;
+  /** `--path`: test file or directory prefixes to print. Empty prints all. */
+  readonly paths?: readonly string[] | undefined;
+  /** `--symbol`: case-insensitive substrings of a test or `describe` title. */
+  readonly symbols?: readonly string[] | undefined;
+  /** `--changed`: print only cases in test files changed against `HEAD`. */
+  readonly changed?: boolean | undefined;
+  /** `--limit`: cases to print. `0` is the full export. */
+  readonly limit?: number | undefined;
+  /** `--format`. Defaults to `text`. */
+  readonly format?: InventoryFormat | undefined;
 }
 
 /**
  * Print the spec tree, then the property-based coverage section.
  *
- * Always `0` except on a malformed `kragg.json`. `spec` is a REPORT: a suite
- * with no property tests is a finding, not a failure, and nothing here gates
- * a build.
+ * `0` except on a malformed `kragg.json` (usage) and on `--changed` outside a
+ * git repository (environment — the tool could not answer, which is not the
+ * same as "nothing changed"). `spec` is otherwise a REPORT: a suite with no
+ * property tests is a finding, not a failure, an empty selection is a fact
+ * about the filter, and nothing here gates a build.
  */
 export async function runSpec(options: SpecOptions = {}): Promise<number> {
   const root = options.root ?? process.cwd();
@@ -114,22 +157,92 @@ export async function runSpec(options: SpecOptions = {}): Promise<number> {
     }
     throw error;
   }
+  return specReport(root, policy, options);
+}
+
+/**
+ * The command proper, once the policy is known.
+ *
+ * Split from {@link runSpec} so the policy's failure mode — the one usage
+ * error in a command that is otherwise a report — stays a two-line function,
+ * and this one stays inside the complexity budget the repo enforces on itself.
+ */
+async function specReport(
+  root: string,
+  policy: KraggPolicy,
+  options: SpecOptions,
+): Promise<number> {
+  const view = specView(options);
+  // `testScanDirectories`: `changedSet` filters by directory prefix, and a
+  // pattern entry is not one. The set is intersected with the spec entries
+  // below, which `parsedTestSources` already narrowed to the pattern.
+  const changed = view.changed
+    ? await changedSet(root, testScanDirectories(policy.testPaths))
+    : null;
+  if (view.changed && changed === null) {
+    process.stderr.write(`${CHANGED_UNAVAILABLE}\n`);
+    return EXIT_ENVIRONMENT;
+  }
   const api = options.api ?? resolveTypeScript(root).api;
   const files = buildSpec(root, policy.testPaths, api);
+  const entries = specEntries(files);
+  const selection = selectSpecEntries(entries, view, changed);
+  const budget = applyBudget(selection, view.limit);
+  const report = propertyCoverage({
+    root,
+    sourcePaths: policy.sourcePaths,
+    testPaths: policy.testPaths,
+    api,
+  });
+  if (view.format === "json") {
+    process.stdout.write(renderSpecJson(budget, specCounts(selection), report));
+    return EXIT_OK;
+  }
   const lines = [
-    ...renderSpec(files),
-    ...renderPropertyReport(
-      propertyCoverage({
-        root,
-        sourcePaths: policy.sourcePaths,
-        testPaths: policy.testPaths,
-        api,
-      }),
-      policy.maxViolationsPerGate,
-    ),
+    ...treeSection(files, entries, budget, specCounts(selection)),
+    ...renderPropertyReport(report, policy.maxViolationsPerGate),
   ];
   process.stdout.write(`${lines.join("\n")}\n`);
   return EXIT_OK;
+}
+
+/** Resolve the filters and budget, defaulting everything the caller omitted. */
+function specView(options: SpecOptions): InventoryOptions {
+  return {
+    paths: options.paths ?? [],
+    symbols: options.symbols ?? [],
+    changed: options.changed === true,
+    limit: options.limit ?? DEFAULT_LIMIT,
+    format: options.format ?? "text",
+  };
+}
+
+/**
+ * The tree, with the budget note attached to it.
+ *
+ * The note sits here rather than at the very bottom of the output because it
+ * describes the TREE — the property section below has its own, separate cap
+ * and its own "+N more" line, and one truncation notice covering two sections
+ * would be read as covering whichever the reader was looking at.
+ *
+ * The two empty cases stay distinguishable: a project with no tests at all,
+ * and a filter that matched none of the tests there are.
+ */
+function treeSection(
+  files: readonly SpecFile[],
+  entries: readonly SpecEntry[],
+  budget: Budgeted<SpecEntry>,
+  counts: SpecCounts,
+): string[] {
+  if (entries.length === 0) {
+    return ["no tests found"];
+  }
+  if (counts.total === 0) {
+    return ["no tests match the selection"];
+  }
+  const lines = renderSpec(regroupSpec(files, budget.entries), counts);
+  const note = truncationNote(budget, "tests");
+  return note === null ? lines : [...lines, note];
 }
 
 /**
@@ -154,18 +267,28 @@ export function buildSpec(
   return files;
 }
 
-/** Render the spec tree as readable documentation lines. */
-export function renderSpec(files: readonly SpecFile[]): string[] {
+/**
+ * Render the spec tree as readable documentation lines.
+ *
+ * `counts` states what the SELECTION held, which is not what `files` holds
+ * once a budget has trimmed it: the header must report the total a filter
+ * matched, or a truncated tree would announce its own truncated count as the
+ * suite's size. Omitted, the counts are taken from `files`, which is right
+ * for an untrimmed render.
+ */
+export function renderSpec(
+  files: readonly SpecFile[],
+  counts?: SpecCounts | undefined,
+): string[] {
   if (files.length === 0) {
     return ["no tests found"];
   }
-  const total = files.reduce((sum, file) => sum + file.cases.length, 0);
-  const skipped = files.reduce(
-    (sum, file) => sum + file.cases.filter((entry) => entry.skipped).length,
-    0,
-  );
+  const total = counts?.total ?? files.reduce((sum, file) => sum + file.cases.length, 0);
+  const skipped =
+    counts?.skipped ??
+    files.reduce((sum, file) => sum + file.cases.filter((entry) => entry.skipped).length, 0);
   const suffix = skipped === 0 ? "" : ` (${skipped} skipped)`;
-  const lines = [`spec: ${total} tests across ${files.length} files${suffix}`];
+  const lines = [`spec: ${total} tests across ${counts?.files ?? files.length} files${suffix}`];
   for (const file of files) {
     lines.push(file.file);
     lines.push(...renderFile(file));

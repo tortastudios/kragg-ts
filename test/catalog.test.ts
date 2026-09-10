@@ -545,7 +545,15 @@ describe("critical-coverage consumes this run's evidence, never a file on disk",
 
   const measuredLcov: TestRunFindings["coverage"] = {
     ok: true,
-    totals: { totalLines: 4, coveredLines: 3, pct: 75 },
+    totals: {
+      totalLines: 4,
+      coveredLines: 3,
+      pct: 75,
+      measuredFiles: 1,
+      reportFiles: 1,
+      unloaded: [],
+      sourceFiles: 1,
+    },
     reportPath: "lcov.info",
     violation: undefined,
     evidence: { format: "lcov", report: LCOV_LINE_3_UNCOVERED },

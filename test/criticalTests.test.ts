@@ -159,6 +159,52 @@ describe("critical-tests: the rule", () => {
     );
   });
 
+  it("gates a DECLARED function, and says who declared it", async (t) => {
+    if (!gitAvailable) {
+      t.skip("git is not available");
+      return;
+    }
+    // `Client.idle` has fan-in 1 and the criticality run did not select it; a
+    // reviewer did. The finding has to say so, or a fan-in-1 function being
+    // gated reads as a false positive and gets suppressed.
+    const root = await repo({
+      "kragg.json": JSON.stringify({
+        critical_functions: { "src/client#Client.idle": "shuts the session down" },
+      }),
+    });
+    write(root, "src/client.ts", `${CLIENT}\n// edited\n`);
+    const messages = (await violationsFor(root)).map((violation) => violation.message);
+    assert.deepEqual(messages, [
+      "critical function src/client#Client.send (fan-in 9) changed without test changes",
+      "critical function src/client#Client.idle (declared: shuts the session down) " +
+        "changed without test changes",
+    ]);
+  });
+
+  it("errors, rather than going quiet, when a declaration names nothing", async (t) => {
+    if (!gitAvailable) {
+      t.skip("git is not available");
+      return;
+    }
+    const root = await repo({
+      "kragg.json": JSON.stringify({
+        critical_functions: { "src/client#Client.renamed": "authorization" },
+      }),
+    });
+    write(root, "src/client.ts", `${CLIENT}\n// edited\n`);
+    writeStamp(root, ["src", "test", "tests"]);
+    const outcome = await checkCriticalTests({
+      root,
+      sourcePaths: ["src"],
+      testPaths: ["test", "tests"],
+      api: ts,
+    });
+    // `error: true` and exit 3 in the pipeline — never a pass, and never a
+    // silent drop back to "not critical".
+    assert.equal(outcome.ok, false);
+    assert.match(outcome.ok ? "" : outcome.message, /src\/client#Client\.renamed/u);
+  });
+
   it("passes when a file under a test path changed too", async (t) => {
     if (!gitAvailable) {
       t.skip("git is not available");

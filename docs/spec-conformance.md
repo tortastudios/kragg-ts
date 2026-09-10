@@ -214,6 +214,15 @@ it does open is unchanged. See
 [`src/gates/criticality/freshness.ts`](../src/gates/criticality/freshness.ts)
 for the full argument and the two known gaps in the fingerprint.
 
+**Reviewed declarations do not change that file's shape either.** A
+`critical_functions` entry in the policy (kragg-ts only, divergence 29) makes a
+function critical that the thresholds did not select, and it appears here as an
+ordinary record whose `is_critical` is `true` — no seventh key, no second file.
+The reviewer's REASON is never stored: it is re-derived from `kragg.json`
+wherever it is shown, which keeps the record shape frozen and makes it
+impossible for the stored flag to disagree with the policy. Python's `read_json`
+therefore reads such a file exactly as it reads its own.
+
 The numbers are the contract. `betweenness` is normalized betweenness
 centrality to 4 decimal places (kragg-ts reproduces networkx's algorithm; a
 Python `0.0` and a TypeScript `0` are the same number). Records are sorted by
@@ -264,10 +273,20 @@ nowhere else:
 
 Output is truncated at 9000 characters with an in-band marker, because the
 harness spills over-long hook output to a file where the model never sees it.
+The cap applies to both emitted shapes — a block `reason` and a SessionStart
+`additionalContext` — and it truncates the TEXT, never the envelope, so the
+`decision` field always survives.
+
 The hook returns 0 on *any* internal failure — the one deliberate fail-open in
-kragg, since a broken guardrail must not become a broken editing session. See
-[`src/hooks/protocol.ts`](../src/hooks/protocol.ts) and
-[`src/hooks/claude.ts`](../src/hooks/claude.ts).
+kragg, since a broken guardrail must not become a broken editing session.
+kragg-ts additionally **records** each such failure (divergence 30): a line on
+stderr and an entry in `.kragg/hook-errors.jsonl`, which is a kragg-ts-only
+file in the journal's shape and is not read by Python. What each event checks
+is resolved by `src/commands/scope.ts`, the same resolver `check` uses
+(divergence 29). See [`src/hooks/protocol.ts`](../src/hooks/protocol.ts),
+[`src/hooks/claude.ts`](../src/hooks/claude.ts),
+[`src/hooks/session.ts`](../src/hooks/session.ts) and
+[`src/hooks/diagnostics.ts`](../src/hooks/diagnostics.ts).
 
 ### 8. Configuration
 
@@ -277,11 +296,12 @@ Same key vocabulary, snake_case, on both sides; only the carrier differs —
 merging. kragg-ts adds tool-selection keys (`lint_tool`, `test_runner`,
 `test_command`, `secret_scanner`, `audit_severity`) that have no Python
 analogue, where `"off"` is a deliberate, visible disable: the gate SKIPs with a
-reason saying so. `test_command` is an argv ARRAY, never a shell string, and
-`test_paths` entries may be patterns as well as directories — divergences 20
-and 21 below.
-Malformed *values* fail closed to the stricter default; a file that cannot be
-parsed at all is a usage error (exit 2).
+reason saying so — and `baseline`, the root-relative path of the legacy-debt
+baseline (row 31 of section 11), `null` by default. `test_command` is an argv
+ARRAY, never a shell string, and `test_paths` entries may be patterns as well
+as directories — rows 34 and 35 below. A malformed *value* is rejected by name
+(`PolicyError`, exit 2; row 15) rather than defaulted, and a file that cannot
+be parsed at all is a usage error too (exit 2).
 
 ## 9. Fixtures in this repository
 
@@ -347,9 +367,7 @@ A conformance runner must not flag these; a suite that diffs the two
 implementations naively will flag every one. Rows 1–9 are this repository's
 original table, re-verified against both trees while the spec was written; rows
 10–12 were added by that verification and are also SPEC.md section 10's rows
-10–12; rows 13–19 were introduced by TOR-1358, TOR-1363, TOR-1361 and TOR-1369,
-and rows 20–22 by TOR-1372, on this branch. Fixtures that exercise a row carry
-a `divergences` entry naming its id.
+10–12; rows 13–36 were introduced by TOR-1358, TOR-1363, TOR-1361, TOR-1369, TOR-1375, TOR-1364, TOR-1365, TOR-1374, TOR-1377, TOR-1370 and TOR-1372 on this branch. Fixtures that exercise a row carry a `divergences` entry naming its id.
 
 | # | Divergence | Why it is intentional |
 | --- | --- | --- |
@@ -372,9 +390,23 @@ a `divergences` entry naming its id.
 | 17 | `criticality --write --path` is exit 2 | Python writes whatever the scoped analysis produced. A partial `.kragg/criticality.json` is not read as partial: `critical-tests` and `critical-coverage` would treat every function outside the scope as uncritical. Refusing keeps the file whole-project by construction. |
 | 18 | `check --file` with `--changed`/`--since` is exit 2 | Python's `_check_targets` takes the git branch first and drops `--file` on the floor. Same file set either way; kragg-ts declines to guess which one the caller meant. |
 | 19 | `check` with an empty `--changed` set under `--format json` | Python prints `no changed Python files` in both formats. kragg-ts prints that only for text and emits the ordinary payload with `gates: []` for JSON, so every `--format json` path is parseable. No key is added, and the text path is byte-identical apart from the language name. |
-| 20 | `test_paths` entries may be PATTERNS, and one rule answers "is this a test file" everywhere | Python's `test_paths` are directories, and its pytest invocation does not pass them at all — pytest discovers by its own rootdir convention, so the setting only scopes `test_quality`. JavaScript has no such convention and half the ecosystem colocates `src/foo.test.ts`, so an entry may be a directory or a pattern (`src/**/*.test.ts`), and the runner's selection, the test-depth corpus and `critical-tests`' notion of a test change all come from the same two functions in `src/util/testPaths.ts`. No wire field changes. |
-| 21 | `test_command`: an explicit, argv-array test invocation | Python builds one `pytest` command and needs no equivalent — pytest reads Python with no loader flag. A JS suite frequently cannot be run without one (`node --import tsx --test`), and detection reading `package.json#scripts.test` concludes only WHICH RUNNER, never an equivalent command. The setting is a TypeScript-only tail key in `policy show`, exactly like `lint_tool` and `test_runner`; a shell string is rejected with exit 2, because `src/engine/runner.ts` spawns with `shell: false`. |
-| 22 | a completed run that discovered ZERO tests is `error: true` / exit 3 | "0 tests, 0 failed" parses cleanly, so it used to pass. Nothing was executed, so nothing was verified — the same rule TOR-1368 applies to a `flaky --rerun` sample, applied to the gate. Python passes `--cov-fail-under` to pytest and reads pytest's exit code, so it does not model this as its own outcome. `"test_runner": "off"` remains the way to say the gate should not run. |
+| 20 | `map` orders symbols by (path, name); Python's `cmd_map` emits source order | With a display budget in play, source order decides which symbols fall inside the printed window by where their author happened to declare them, and re-ordering a file produces a spurious `.kragg/map.md` diff. Sorting by qualified name still places a class before its own methods, which the deeper method indent depends on. |
+| 21 | `map`, `spec` and `brief` take `--path` / `--symbol` / `--changed` / `--limit` / `--all` / `--format`; Python's have no filters and no budget | Unfiltered, this repository's `map` and `spec` are ~95,000 and ~86,000 characters, which an agent cannot afford to read. The filters are DISPLAY-only: `map` still derives the whole criticality graph, `map --write` still writes the complete `.kragg/map.md` (and refuses the content filters, as row 17 does for `criticality`), no gate reads any of it, and a truncated render names the total it withheld. `--limit 0` / `--all` reproduces the unbudgeted output. No fixture covers `map`/`spec`/`brief`, so no golden moves. |
+| 22 | `brief` labels its `## Last gate run` section as read from `.kragg/history.jsonl`, and says when the recorded verdict is stale | Python prints the journal summary bare. Under a list of changed files that reads as "these files passed" — a conclusion nobody reached. kragg-ts names the source, states that nothing was re-run, and prints the recorded commit against `HEAD` whenever they differ or the tree was dirty. |
+| 23 | an UNMEASURED critical function fails `critical-coverage`, under the additive violation code `critical-unmeasured` | Python's `check_critical_coverage` skips a function with `measured=False`, on the stated reasoning that a missing entry is likelier a coverage-key mismatch than an untested function. kragg-ts hands the gate the document its own test run wrote under this root (divergence "test evidence" above), so a file with no entry was never loaded by any test — exactly the finding the gate exists for. The message states the cause (never loaded, a name the source could not disambiguate, a body the report is silent on); `kragg coverage` prints the same rows. `Violation` field names and the gate's name are unchanged; a new `code` value is additive under the CHANGELOG's rule. No Python fixture exercises `critical-coverage`, so no golden is affected. |
+| 24 | the `test-coverage` percentage is reconciled against `source_paths` | Python runs `pytest --cov=src`, and coverage.py instruments every file under `src` whether or not a test imported it, so unloaded files are already 0% in its number. vitest, `node --test` and `bun test` report only the files the run loaded. kragg-ts closes the gap itself: every TypeScript file under `source_paths` the report does not mention counts with its statement lines (read from the source with the project's compiler) uncovered, files outside the source paths do not count, and a report with no countable line under the source paths is `error: true`. The gate's output names the unloaded files. Same violation code (`coverage-below-threshold`), same wire format. |
+| 25 | a **configuration or dependency** change makes `--changed`/`--since` a FULL run | SPEC §4.4 defines `changed` as "git decides the file set", and both implementations filtered that set down to source files — so an edit to `kragg.json`, `tsconfig*.json`, `package.json`, a lockfile or a linter/test-runner config resolved to an empty selection and exited 0 without running a gate, even though those files decide what every gate concludes about every file. kragg-ts promotes the run: `mode` is `"full"`, `targets` is `source_paths`, and the reason goes to stderr. No key is added or changed, and no TypeScript golden covers `--changed`. |
+| 26 | a change set whose only source change is a **deletion** is likewise a FULL run | Both implementations drop deletions from the selection (a deleted file cannot be checked), which turned "the module half the tree imports is gone" into an empty selection and exit 0. A deleted file is still never handed to a per-file tool; it just stops being mistaken for "nothing changed". |
+| 27 | `check --file <path that does not exist>` is exit 2, naming the path | Python runs the pipeline over a selection that matches nothing, which reads as a clean pass: the linter errors about *itself* finding no files while every path-aware gate prints a `[PASS]` over zero files. `targets` for a path that DOES exist is unchanged — including a directory, which stays verbatim on the wire and is expanded only into the internal narrowing. |
+| 28 | git plumbing runs with `-z`; a git failure carries git's message | Python reads `git diff --name-only` with `core.quotePath` on, so `src/café.ts` arrives as `"src/caf\303\251.ts"`, fails the existence check and leaves the selection silently. It also treats any non-zero git exit as an empty diff, so a repository with no commit yet (`git diff HEAD` has no HEAD) reports only untracked files. kragg-ts parses NUL-separated records and reports a git failure as exit 3 with git's own diagnostic. |
+| 29 | reviewed `critical_functions` declarations make a function critical | Python has no such setting: its `is_critical` is `fan_in >= 3 or betweenness >= 0.1` and nothing else. A declaration is ADDITIVE (it never demotes a graph-selected function) and reaches the sidecar as an ordinary record with `is_critical: true` — **no key is added** to the six-key record shape, and the reason is re-derived from the policy wherever it is shown, never stored. Python's reader therefore consumes such a file unchanged; the only observable difference is that one more record says `true` than Python's own thresholds would produce, in a repo whose `kragg.json` says so. A declaration that matches no analysed function is exit 3 from `kragg criticality` and `error: true` from the three gates, so a rename cannot silently drop the protection. Fixtures declare nothing, so every golden is unaffected. |
+| 30 | `// kragg: ignore` requires a reason | Python's `# kragg: ignore` (`gates/suppress.py`) is honoured bare. kragg-ts honours only `// kragg: ignore -- <reason>`; a bare marker suppresses nothing and the finding is reported with a note naming it (`src/util/suppress.ts`). Pinned by the gate unit tests; no wire change. |
+| 31 | the legacy-debt baseline (`kragg.json#baseline`, `check --update-baseline`) | Python has no violation baseline. kragg-ts records accepted findings of the metric, structure and test-quality gates — never security, compiler or evidence gates, errors or skips — and reports them as `baselined:` entries in the existing `advisories` list of their gate, so `passed`, `exit_code`, `violation_count` and the journal describe the post-baseline results and **no key is added** to any payload. Stale entries are advisories too. `kragg.json#baseline` is a TypeScript-only policy key (see section 8). Pinned by `test/baseline.test.ts` and `test/cli.test.ts`; the cross-language fixtures configure no baseline and are unaffected. |
+| 32 | the hook checks what the equivalent `kragg check` invocation checks, through the same resolver | Python's `_stop` runs `_run_check(root, (policy.source_paths[0],), incremental=False)`, so in a project declaring `["src", "lib"]` the Stop hook's per-file tools — the linter, the secret scanner — are pointed at `src` only, and a turn ends green over `lib` because nothing looked at it. kragg-ts's hook now states an INTENT (`full` / `file` / `changed`) and `src/commands/scope.ts` resolves it exactly as it does for `check`, `check --file` and `check --changed`, so the command and the hook cannot disagree about a project's source paths, about a `--file` that names nothing (recorded, since a hook may not exit 2) or about a configuration edit promoting an incremental run. The report and journal `mode` values are unchanged (`"changed"`/`"full"`, as Python writes), and the `hook-protocol` golden is byte-identical. |
+| 33 | hook internal failures are RECORDED: stderr, `.kragg/hook-errors.jsonl`, and a notice at the next SessionStart | Both implementations fail open — exit 0, no block — and Python leaves no trace, so a hook whose `kragg.toml` broke, whose project stopped resolving or whose pipeline crashed is indistinguishable from a hook with nothing to say, indefinitely. kragg-ts keeps the fail-open contract byte for byte on stdout and adds the trace: a stderr line (debug output at exit 0, not a `hook error` notice), an append-only record carrying a timestamp, the event name narrowed to a fixed set, and the error message — never the stdin payload — and a first line in the next SessionStart context saying how many failures were recorded since the last session. The file is kragg-ts-only, in the journal's shape; `.kragg/history.jsonl` is untouched. kragg-ts also sets `KRAGG_HOOK_ACTIVE` for the duration of a hook run, so a project whose own tooling invokes `kragg hook claude` from inside the pipeline the hook started re-enters a no-op instead of a second full run. |
+| 34 | `test_paths` entries may be PATTERNS, and one rule answers "is this a test file" everywhere | Python's `test_paths` are directories, and its pytest invocation does not pass them at all — pytest discovers by its own rootdir convention, so the setting only scopes `test_quality`. JavaScript has no such convention and half the ecosystem colocates `src/foo.test.ts`, so an entry may be a directory or a pattern (`src/**/*.test.ts`), and the runner's selection, the test-depth corpus and `critical-tests`' notion of a test change all come from the same two functions in `src/util/testPaths.ts`. No wire field changes. |
+| 35 | `test_command`: an explicit, argv-array test invocation | Python builds one `pytest` command and needs no equivalent — pytest reads Python with no loader flag. A JS suite frequently cannot be run without one (`node --import tsx --test`), and detection reading `package.json#scripts.test` concludes only WHICH RUNNER, never an equivalent command. The setting is a TypeScript-only tail key in `policy show`, exactly like `lint_tool` and `test_runner`; a shell string is rejected with exit 2, because `src/engine/runner.ts` spawns with `shell: false`. |
+| 36 | a completed run that discovered ZERO tests is `error: true` / exit 3 | "0 tests, 0 failed" parses cleanly, so it used to pass. Nothing was executed, so nothing was verified — the same rule TOR-1368 applies to a `flaky --rerun` sample, applied to the gate. Python passes `--cov-fail-under` to pytest and reads pytest's exit code, so it does not model this as its own outcome. `"test_runner": "off"` remains the way to say the gate should not run. |
 
 Four defects found in the Python implementation during the port are recorded in
 [KNOWN_LIMITATIONS.md](../KNOWN_LIMITATIONS.md#found-in-the-python-implementation-during-this-port).

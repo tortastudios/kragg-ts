@@ -65,6 +65,28 @@ function parseOne(
   return { root, path: join(root, name) };
 }
 
+describe("walkFiles", () => {
+  it("yields the TypeScript family, sorted at every level, and nothing under node_modules", () => {
+    const root = project({
+      "src/b.ts": "",
+      "src/a.tsx": "",
+      "src/nested/z.mts": "",
+      "src/nested/y.cts": "",
+      "src/types.d.ts": "",
+      "src/build.js": "",
+      "node_modules/dep/index.ts": "",
+    });
+    const files = [...walkFiles(root, DEFAULT_EXTENSIONS, false, root)].map((path) =>
+      path.slice(root.length + 1),
+    );
+    assert.deepEqual(files, ["src/a.tsx", "src/b.ts", "src/nested/y.cts", "src/nested/z.mts"]);
+    // Declaration files are opt-in; a missing base yields nothing rather than throwing.
+    const withDeclarations = [...walkFiles(join(root, "src"), DEFAULT_EXTENSIONS, true, root)];
+    assert.ok(withDeclarations.some((path) => path.endsWith("types.d.ts")));
+    assert.deepEqual([...walkFiles(join(root, "absent"), DEFAULT_EXTENSIONS, false, root)], []);
+  });
+});
+
 describe("parseSourceFile", () => {
   it("describes the file with everything a name-resolving gate needs", () => {
     const { root, path } = parseOne(

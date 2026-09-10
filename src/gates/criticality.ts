@@ -59,9 +59,20 @@
  * `kragg.gates.criticality.build_call_graph` because a TypeScript module
  * specifier is a path, not a dotted package name.
  *
- * THIS FILE IS THE PUBLIC ENTRY POINT and nothing else. The analysis lives in
- * six single-concern modules:
+ * WHAT THE GRAPH CANNOT SEE is declared instead. Centrality measures how much
+ * OTHER CODE leans on a function; it says nothing about CONSEQUENCE, so an
+ * authorization or payment entrypoint with a single caller ranks last and is
+ * invisible here. `critical_functions` in `kragg.json` lets a reviewer name
+ * such a function with the reason it matters, and it is then critical in
+ * ADDITION to everything the graph selected — never instead of it. See
+ * `criticality/declared.ts`.
  *
+ * THIS FILE IS THE PUBLIC ENTRY POINT and nothing else. The analysis lives in
+ * seven single-concern modules:
+ *
+ *  - `criticality/declared.ts` — the reviewed declarations: where they are
+ *    read from, how they are applied, and why an entry that matches no
+ *    function is an error rather than a shrug;
  *  - `criticality/scope.ts` — what the registration pass learns, and the
  *    naming rules it learns it under;
  *  - `criticality/register.ts` — pass 1, which declarations are graph nodes;
@@ -84,6 +95,8 @@
  * exported by the modules that define them, so a future caller is one line
  * away; the names simply do not sit in the public door until someone opens it.
  */
+
+export { declaredCritical, staleDeclarationMessage } from "./criticality/declared.ts";
 
 export {
   criticalityFreshness,

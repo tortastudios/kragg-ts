@@ -31,23 +31,52 @@
  *    this text arrives through a context-window budget.
  *  - `.d.ts` files are walked (`includeDeclarations`), because in TypeScript a
  *    declaration file IS public surface. Python has no such category.
+ *  - ORDER IS (PATH, THEN NAME), not source order, and the inventory can be
+ *    FILTERED and BUDGETED — see `map/select.ts` and `commands/inventory.ts`.
+ *
+ * ── WHAT A FILTER MAY AND MAY NOT NARROW ───────────────────────────────────
+ * `--path`, `--symbol`, `--changed` and `--limit` decide what is PRINTED and
+ * nothing else. The criticality graph is still derived over the whole project
+ * (`ensure()` below, with the policy's paths, never the caller's), so the risk
+ * flags on a one-directory map are the same flags the check pipeline would
+ * compute, and no gate can be made quieter by asking for a smaller map.
+ *
+ * `.kragg/map.md` is held to a stricter rule still. `--limit` only trims the
+ * terminal; the file is always the complete inventory. The content filters
+ * are refused outright alongside `--write` — same reasoning as
+ * `criticality --write --path`: the file is injected at session start as THE
+ * inventory, so a scoped one does not read as "part of the map", it reads as
+ * "nothing else exists", and the agent reinvents what was filtered out.
  */
 
 import { mkdirSync, writeFileSync } from "node:fs";
 import { dirname, join } from "node:path";
 
 import { analysisProgram } from "../analysis/program.ts";
-import {
-  parsedSources,
-  resolveTypeScript,
-  type TypeScriptApi,
-} from "../analysis/sourceFile.ts";
+import { resolveTypeScript, type TypeScriptApi } from "../analysis/sourceFile.ts";
 import { criticalityCache } from "../catalog/criticalityCache.ts";
-import { EXIT_OK, EXIT_USAGE } from "../engine/report.ts";
+import { EXIT_ENVIRONMENT, EXIT_OK, EXIT_USAGE } from "../engine/report.ts";
 import { readJson } from "../gates/criticality.ts";
 import { loadPolicy, PolicyError, type KraggPolicy } from "../policy/policy.ts";
 import { testScanDirectories } from "../util/testPaths.ts";
-import { moduleSymbols, type MapSymbol } from "./map/symbols.ts";
+import {
+  applyBudget,
+  changedSet,
+  CHANGED_UNAVAILABLE,
+  DEFAULT_LIMIT,
+  isFiltered,
+  type InventoryFormat,
+  type InventoryOptions,
+} from "./inventory.ts";
+import {
+  mapEntries,
+  moduleCount,
+  renderFullMap,
+  renderMapJson,
+  renderMapText,
+  selectMapEntries,
+  type MapEntry,
+} from "./map/select.ts";
 
 /** Where `--write` puts the map, matching `cmd_map`'s `.kragg/map.md`. */
 export const MAP_RELATIVE = join(".kragg", "map.md");
@@ -62,6 +91,16 @@ export interface MapOptions {
   readonly policy?: KraggPolicy | undefined;
   /** Compiler to parse with. Defaults to the project's own. */
   readonly api?: TypeScriptApi | undefined;
+  /** `--path`: file or directory prefixes to print. Empty prints all. */
+  readonly paths?: readonly string[] | undefined;
+  /** `--symbol`: exported names or `<module>#<name>`. Empty prints all. */
+  readonly symbols?: readonly string[] | undefined;
+  /** `--changed`: print only symbols in files changed against `HEAD`. */
+  readonly changed?: boolean | undefined;
+  /** `--limit`: entries to print. `0` is the full export. */
+  readonly limit?: number | undefined;
+  /** `--format`. Defaults to `text`. */
+  readonly format?: InventoryFormat | undefined;
 }
 
 /**
@@ -100,6 +139,27 @@ export async function runMap(options: MapOptions = {}): Promise<number> {
     }
     throw error;
   }
+  return mapReport(root, policy, options);
+}
+
+/**
+ * The command proper, once the policy is known.
+ *
+ * Split from {@link runMap} so the policy's failure mode — the one thing here
+ * that is a usage error rather than a report — stays a two-line function and
+ * this one stays under the complexity budget the repo enforces on itself.
+ */
+async function mapReport(
+  root: string,
+  policy: KraggPolicy,
+  options: MapOptions,
+): Promise<number> {
+  const view = mapView(options);
+  const write = options.write === true;
+  if (write && isFiltered(view)) {
+    process.stderr.write(`${scopedWriteRefusal()}\n`);
+    return EXIT_USAGE;
+  }
   const analysis = analysisProgram({
     root,
     ...(options.api === undefined ? {} : { api: options.api }),
@@ -108,26 +168,109 @@ export async function runMap(options: MapOptions = {}): Promise<number> {
     root,
     // Sources AND tests, matching `catalogContext`: both are in the program,
     // so both contribute call-graph nodes and either can change the answer.
+    // NOT the caller's `--path`: a display filter must never narrow what the
+    // gates are told is critical.
     scanPaths: [...policy.sourcePaths, ...testScanDirectories(policy.testPaths)],
     analysis,
   }).ensure();
-  const lines = buildMap(root, policy, analysis.compiler.api);
-  if (lines.length === 0) {
-    process.stdout.write("no exported symbols found\n");
-    return EXIT_OK;
+  const changed = view.changed ? await changedSet(root, policy.sourcePaths) : null;
+  if (view.changed && changed === null) {
+    process.stderr.write(`${CHANGED_UNAVAILABLE}\n`);
+    return EXIT_ENVIRONMENT;
   }
-  process.stdout.write(`${lines.join("\n")}\n`);
-  if (options.write === true) {
-    const output = join(root, MAP_RELATIVE);
-    writeMap(lines, output);
-    process.stdout.write(`Wrote ${output}\n`);
+  const all = mapEntries(root, policy, analysis.compiler.api, criticalityFlags(root));
+  printMap(all, view, changed);
+  if (write && all.length > 0) {
+    persistMap(root, all, view.format);
   }
   return EXIT_OK;
 }
 
 /**
+ * Write `.kragg/map.md` and announce it.
+ *
+ * The FULL inventory, not the printed window: this file is what a session
+ * start reads, and a budget is a property of a terminal. The notice goes to
+ * stderr under `--format json`, because a machine reading that stream must
+ * not have to strip a sentence off the end of the document.
+ */
+function persistMap(
+  root: string,
+  all: readonly MapEntry[],
+  format: InventoryFormat,
+): void {
+  const output = join(root, MAP_RELATIVE);
+  writeMap(renderFullMap(all), output);
+  const stream = format === "json" ? process.stderr : process.stdout;
+  stream.write(`Wrote ${output}\n`);
+}
+
+/** Resolve the filters and budget, defaulting everything the caller omitted. */
+function mapView(options: MapOptions): InventoryOptions {
+  return {
+    paths: options.paths ?? [],
+    symbols: options.symbols ?? [],
+    changed: options.changed === true,
+    limit: options.limit ?? DEFAULT_LIMIT,
+    format: options.format ?? "text",
+  };
+}
+
+/**
+ * Print the selection in the requested format.
+ *
+ * The two empty cases stay distinguishable, because they call for different
+ * actions: a repository with no exports at all, and a filter that matched
+ * none of the exports there are. Both are exit 0 — `map` is a report, and an
+ * empty answer is a fact about the selection, not a failure.
+ */
+function printMap(
+  all: readonly MapEntry[],
+  view: InventoryOptions,
+  changed: ReadonlySet<string> | null,
+): void {
+  const selection = selectMapEntries(all, view, changed);
+  const budget = applyBudget(selection, view.limit);
+  const modules = moduleCount(selection);
+  if (view.format === "json") {
+    process.stdout.write(renderMapJson(budget, modules));
+    return;
+  }
+  if (all.length === 0) {
+    process.stdout.write("no exported symbols found\n");
+    return;
+  }
+  if (selection.length === 0) {
+    process.stdout.write("no symbols match the selection\n");
+    return;
+  }
+  process.stdout.write(`${renderMapText(budget, modules).join("\n")}\n`);
+}
+
+/**
+ * Why `--write` refuses `--path`, `--symbol` and `--changed`.
+ *
+ * The same fail-closed rule as `criticality --write --path`. `.kragg/map.md`
+ * is injected at session start as the inventory of what exists, so a file
+ * holding one directory does not read as "a scoped map" — it reads as the
+ * whole surface, and the agent confidently reinvents everything that was
+ * filtered out. `--limit` is deliberately NOT in this list: it trims the
+ * terminal only, and the written file stays complete.
+ */
+function scopedWriteRefusal(): string {
+  return (
+    "--write cannot be combined with --path, --symbol or --changed: " +
+    ".kragg/map.md is the whole project's inventory, and a scoped one would " +
+    "read as `nothing else exists` to the session that loads it. Drop --write " +
+    "for the scoped view, or the filters to write the full map. (--limit is " +
+    "fine: it trims the terminal, never the file.)"
+  );
+}
+
+/**
  * Build the map lines: a module heading followed by its indented symbols.
  *
+ * The complete, unbudgeted inventory — the same text `--write` persists.
  * Modules contributing no exported symbol are omitted entirely — a heading
  * with nothing under it costs tokens to say "this file exists", which the
  * agent could have learned from `ls`.
@@ -138,26 +281,7 @@ export function buildMap(
   api?: TypeScriptApi | undefined,
 ): string[] {
   const compiler = api ?? resolveTypeScript(root).api;
-  const flags = criticalityFlags(root);
-  const body: string[] = [];
-  let modules = 0;
-  let symbols = 0;
-  for (const source of parsedSources(root, policy.sourcePaths, {
-    api: compiler,
-    includeDeclarations: true,
-  })) {
-    const found = moduleSymbols(source, compiler);
-    if (found.length === 0) {
-      continue;
-    }
-    modules += 1;
-    symbols += found.length;
-    body.push(source.module);
-    for (const entry of found) {
-      body.push(symbolLine(entry, source.module, flags));
-    }
-  }
-  return body.length === 0 ? [] : [headerLine(symbols, modules), ...body];
+  return renderFullMap(mapEntries(root, policy, compiler, criticalityFlags(root)));
 }
 
 /** Write the map where hooks and session-start injection read it. */
@@ -192,29 +316,4 @@ export function criticalityFlags(root: string): ReadonlyMap<string, string> {
     flags.set(name, typeof risk === "string" && risk !== "" ? risk : "MED");
   }
   return flags;
-}
-
-/* --- Rendering ------------------------------------------------------------ */
-
-function headerLine(symbols: number, modules: number): string {
-  return `map: ${symbols} exported symbols across ${modules} modules`;
-}
-
-/**
- * One symbol line.
- *
- * Methods are indented one level deeper than their class so the containment
- * is visible without repeating the class name in a heading. Everything else
- * sits at one level under the module.
- */
-function symbolLine(
-  entry: MapSymbol,
-  module: string,
-  flags: ReadonlyMap<string, string>,
-): string {
-  const indent = entry.kind === "method" ? "    " : "  ";
-  const risk = flags.get(`${module}#${entry.qualname}`);
-  const suffix = risk === undefined ? "" : `  [${risk}]`;
-  const doc = entry.doc === null ? "" : ` — ${entry.doc}`;
-  return `${indent}${entry.signature}${doc}${suffix}`;
 }

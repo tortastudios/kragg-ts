@@ -32,10 +32,12 @@ import { runPipeline } from "../src/commands/check.ts";
 import { runCriticality } from "../src/commands/criticality.ts";
 import { runDoctor } from "../src/commands/doctor.ts";
 import { runPolicyShow } from "../src/commands/policyShow.ts";
+import { resolveScope, type Scope, type ScopeRequest } from "../src/commands/scope.ts";
 import { runStatus } from "../src/commands/status.ts";
 import { errorGate, nativeGate, skipGate } from "../src/catalog/results.ts";
 import { FAST, type GateSpec } from "../src/engine/gate.ts";
 import { journalPath, type JournalEntry } from "../src/engine/journal.ts";
+import { runCommand } from "../src/engine/runner.ts";
 import {
   EXIT_ENVIRONMENT,
   EXIT_GATE_FAILURES,
@@ -481,5 +483,240 @@ describe("runCriticality: --path", () => {
     assert.equal(result.code, EXIT_OK);
     assert.match(result.out, /Wrote /);
     assert.equal(criticalityFreshness(root), "fresh");
+  });
+});
+
+/**
+ * Scope resolution — the one place `check` and `security` decide what a run
+ * checks.
+ *
+ * The bug class every case here pins down is a run that reads green because it
+ * looked at nothing: a state of the world that used to produce "no changed
+ * TypeScript files" and exit 0, or a `[PASS]` from a gate that matched no file.
+ */
+describe("resolveScope", () => {
+  const COMMIT_FLAGS = [
+    "-c",
+    "user.name=kragg-test",
+    "-c",
+    "user.email=kragg-test@example.invalid",
+    "-c",
+    "commit.gpgsign=false",
+  ];
+
+  async function vcs(root: string, args: readonly string[]): Promise<void> {
+    const result = await runCommand("git", ["git", ...args], root);
+    assert.equal(result.returncode, 0, `git ${args.join(" ")}: ${result.stderr}`);
+  }
+
+  function put(root: string, relative: string, contents = "export {};\n"): void {
+    const target = join(root, relative);
+    mkdirSync(join(target, ".."), { recursive: true });
+    writeFileSync(target, contents);
+  }
+
+  /** A committed repository with one source file and the usual config files. */
+  async function repo(): Promise<string> {
+    const root = project();
+    put(root, "src/committed.ts");
+    put(root, "kragg.json", "{}\n");
+    put(root, "tsconfig.json", "{}\n");
+    put(root, "package.json", '{"name":"x"}\n');
+    await vcs(root, ["init", "--initial-branch=main"]);
+    await vcs(root, ["add", "."]);
+    await vcs(root, [...COMMIT_FLAGS, "commit", "-m", "initial"]);
+    return root;
+  }
+
+  function request(root: string, over: Partial<ScopeRequest> = {}): ScopeRequest {
+    return { root, targets: [], changed: false, since: null, ...over };
+  }
+
+  /** `resolveScope`, asserted to have resolved. */
+  async function scopeOf(root: string, over: Partial<ScopeRequest> = {}): Promise<Scope> {
+    const result = await resolveScope(request(root, over), DEFAULT_POLICY);
+    assert.ok(result.ok, `resolveScope failed: ${result.ok ? "" : result.message}`);
+    return result.scope;
+  }
+
+  it("checks the whole project when nothing narrows the run", async () => {
+    const scope = await scopeOf(await repo());
+    assert.equal(scope.mode, "full");
+    assert.deepEqual(scope.targets, DEFAULT_POLICY.sourcePaths);
+    assert.equal(scope.paths, undefined);
+  });
+
+  it("selects the changed source files for --changed", async () => {
+    const root = await repo();
+    put(root, "src/committed.ts", "export const x = 1;\n");
+    const scope = await scopeOf(root, { changed: true });
+    assert.equal(scope.mode, "changed");
+    assert.deepEqual(scope.targets, ["src/committed.ts"]);
+    assert.deepEqual(scope.paths, ["src/committed.ts"]);
+    assert.equal(scope.note, undefined);
+  });
+
+  it("keeps a non-ASCII changed path in the selection", async () => {
+    const root = await repo();
+    put(root, "src/café.ts");
+    const scope = await scopeOf(root, { changed: true });
+    assert.deepEqual(scope.targets, ["src/café.ts"]);
+  });
+
+  it("stays a clean, empty CHANGED run when only a doc changed", async () => {
+    // Empty is not failed discovery, and it must not become a full run either
+    // — every README edit would then run the whole test suite.
+    const root = await repo();
+    put(root, "README.md", "# hi\n");
+    const scope = await scopeOf(root, { changed: true });
+    assert.equal(scope.mode, "changed");
+    assert.deepEqual(scope.targets, []);
+    assert.equal(scope.note, undefined);
+  });
+
+  describe("a configuration edit is a change, and it changes everything", () => {
+    for (const name of [
+      "kragg.json",
+      "tsconfig.json",
+      "tsconfig.build.json",
+      "package.json",
+      "pnpm-lock.yaml",
+      ".oxlintrc.json",
+      "eslint.config.js",
+      "biome.json",
+      "vitest.config.ts",
+      "bunfig.toml",
+    ]) {
+      it(`runs a FULL check after ${name} changed on its own`, async () => {
+        // The reported bug: `--changed` after editing only the policy printed
+        // "no changed TypeScript files" and exited 0 having run no gate at
+        // all, while the edit changed what every gate would conclude.
+        const root = await repo();
+        put(root, name, '{"edited": true}\n');
+        const scope = await scopeOf(root, { changed: true });
+        assert.equal(scope.mode, "full", name);
+        assert.deepEqual(scope.targets, DEFAULT_POLICY.sourcePaths);
+        assert.equal(scope.paths, undefined);
+        assert.match(scope.note ?? "", new RegExp(`${name.replaceAll(".", "\\.")} changed`));
+      });
+    }
+
+    it("counts a workspace package's own package.json", async () => {
+      const root = await repo();
+      put(root, "packages/api/package.json", '{"name":"api"}\n');
+      assert.equal((await scopeOf(root, { changed: true })).mode, "full");
+    });
+
+    it("counts the configured secret baseline", async () => {
+      const root = await repo();
+      put(root, ".kragg/secrets.json", "{}\n");
+      const policy = { ...DEFAULT_POLICY, secretBaseline: ".kragg/secrets.json" };
+      const result = await resolveScope(request(root, { changed: true }), policy);
+      assert.ok(result.ok);
+      assert.equal(result.scope.mode, "full");
+    });
+
+    it("leaves an ordinary JSON file alone", async () => {
+      const root = await repo();
+      put(root, "src/data.json", "{}\n");
+      const scope = await scopeOf(root, { changed: true });
+      assert.equal(scope.mode, "changed");
+      assert.deepEqual(scope.targets, []);
+    });
+
+    it("does not mistake source that merely starts with `tsconfig` for a config", async () => {
+      // `tsconfig` is the one prefix common enough to collide with real code,
+      // so it is matched with its `.json` extension required.
+      const root = await repo();
+      put(root, "src/tsconfigLoader.ts");
+      const scope = await scopeOf(root, { changed: true });
+      assert.equal(scope.mode, "changed");
+      assert.deepEqual(scope.targets, ["src/tsconfigLoader.ts"]);
+    });
+  });
+
+  describe("a deletion is a change too", () => {
+    it("runs a FULL check when the only source change is a removal", async () => {
+      // Deleting the module half the tree imports used to be "no changed
+      // TypeScript files": exit 0, nothing compiled, nothing checked.
+      const root = await repo();
+      rmSync(join(root, "src/committed.ts"));
+      const scope = await scopeOf(root, { changed: true });
+      assert.equal(scope.mode, "full");
+      assert.match(scope.note ?? "", /src\/committed\.ts was removed/);
+    });
+
+    it("never passes a deleted file to a per-file tool", async () => {
+      const root = await repo();
+      put(root, "src/survivor.ts");
+      await vcs(root, ["add", "."]);
+      await vcs(root, [...COMMIT_FLAGS, "commit", "-m", "two files"]);
+      rmSync(join(root, "src/committed.ts"));
+      put(root, "src/survivor.ts", "export const x = 1;\n");
+      const scope = await scopeOf(root, { changed: true });
+      assert.equal(scope.mode, "changed");
+      assert.deepEqual(scope.targets, ["src/survivor.ts"]);
+    });
+
+    it("treats a rename's old path as removed and its new path as changed", async () => {
+      const root = await repo();
+      await vcs(root, ["mv", "src/committed.ts", "src/renamed.ts"]);
+      const scope = await scopeOf(root, { changed: true });
+      assert.equal(scope.mode, "changed");
+      assert.deepEqual(scope.targets, ["src/renamed.ts"]);
+    });
+  });
+
+  describe("git that cannot answer is an error, never an empty selection", () => {
+    it("exits 3 with git's own message outside a repository", async () => {
+      const result = await resolveScope(request(project(), { changed: true }), DEFAULT_POLICY);
+      assert.equal(result.ok, false);
+      assert.equal(result.ok ? 0 : result.exit, EXIT_ENVIRONMENT);
+      assert.match(result.ok ? "" : result.message, /not a git repository/i);
+    });
+
+    it("exits 3 naming the ref for an unknown --since", async () => {
+      const result = await resolveScope(
+        request(await repo(), { since: "no-such-ref" }),
+        DEFAULT_POLICY,
+      );
+      assert.equal(result.ok, false);
+      assert.equal(result.ok ? 0 : result.exit, EXIT_ENVIRONMENT);
+      assert.match(result.ok ? "" : result.message, /merge-base/);
+    });
+  });
+
+  describe("--file", () => {
+    it("is a usage error naming a path that is not there", async () => {
+      // It used to sail through: the linter errored about ITSELF finding no
+      // files while five path-aware gates matched nothing and printed [PASS].
+      const result = await resolveScope(
+        request(await repo(), { targets: ["src/nope.ts"] }),
+        DEFAULT_POLICY,
+      );
+      assert.equal(result.ok, false);
+      assert.equal(result.ok ? 0 : result.exit, EXIT_USAGE);
+      assert.match(result.ok ? "" : result.message, /--file src\/nope\.ts: no such file/);
+    });
+
+    it("expands a directory into paths while targets stay as typed", async () => {
+      // `targets` is on the wire and pinned as "as given" by the cross-language
+      // contract; `paths` is internal, and is what the path-aware gates read.
+      const root = await repo();
+      put(root, "src/nested/b.ts");
+      put(root, "src/types.d.ts");
+      put(root, "src/readme.md", "# no\n");
+      const scope = await scopeOf(root, { targets: ["src"] });
+      assert.equal(scope.mode, "file");
+      assert.deepEqual(scope.targets, ["src"]);
+      assert.deepEqual(scope.paths, ["src/committed.ts", "src/nested/b.ts"]);
+    });
+
+    it("takes a named file at its word, extension and all", async () => {
+      const root = await repo();
+      const scope = await scopeOf(root, { targets: ["src/committed.ts", "kragg.json"] });
+      assert.deepEqual(scope.targets, ["src/committed.ts", "kragg.json"]);
+      assert.deepEqual(scope.paths, ["src/committed.ts", "kragg.json"]);
+    });
   });
 });

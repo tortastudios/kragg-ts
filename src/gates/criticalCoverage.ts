@@ -13,45 +13,53 @@
  * formats either: vitest writes istanbul's `coverage-final.json`, while `node
  * --test` and `bun test` can only write lcov. `coverage/istanbul.ts` and
  * `coverage/lcov.ts` normalize both into the one model in `coverage/model.ts`,
- * so this gate runs under EVERY supported runner. It used to skip under two of
- * the three, which meant the report said `SKIP` on a `node --test` project
- * every single run.
+ * so this gate runs under EVERY supported runner.
  *
  * THE REPORT ARRIVES PARSED. This gate never runs a coverage tool and never
  * reads a well-known path; the caller passes the parsed document, or the lcov
  * text. That keeps the gate testable with a literal, and leaves the question
- * of HOW coverage gets produced (`vitest --coverage`, `c8`, a CI artifact) to
- * the adapter phase that owns it.
+ * of HOW coverage gets produced to the adapter phase that owns it.
+ *
+ * ── UNMEASURED IS A FINDING, NOT A PASS ────────────────────────────────────
+ * Python's gate treats a critical function the report never mentions as
+ * `measured=False` and does not fail it, on the reasoning that the likeliest
+ * cause is a measurement-key mismatch. That reasoning does not hold here: the
+ * `check` pipeline hands this gate the document ITS OWN test run just wrote,
+ * keyed under this root, so a file with no entry was not mis-keyed — it was
+ * never loaded, because no test imports it. A critical function no test
+ * imports is the exact thing this gate exists to notice, and reporting it as
+ * a pass would let the highest-fan-in function in the project go untested
+ * without a word. So every critical function must be MEASURED — its file in
+ * the report, its extent known, and something in the report saying whether
+ * it ran — or it is reported as UNMEASURED: a violation with its own code,
+ * `critical-unmeasured`, whose message states the cause (never loaded, a
+ * name the source could not disambiguate, or a body the report is silent on)
+ * so a reader can tell "write a test that imports this" from "cover lines 4
+ * and 5". This is a deliberate divergence from Python; `kragg coverage`
+ * lists the same functions under the same causes.
  *
  * ── WHERE THE FUNCTION'S EXTENT COMES FROM ─────────────────────────────────
- * istanbul states where a function ends; lcov does not. So for an lcov span
- * the extent is read off the SOURCE (`coverage/spans.ts`) rather than guessed
- * at from the next `FN:` record — see that module for why the guess is wrong
- * rather than merely imprecise. When neither the report nor the source can
- * bound the function, the gate falls back to the one thing lcov does state
- * unambiguously: whether it was ever entered.
+ * The SOURCE, first (`coverage/spans.ts`): its index is keyed the way
+ * `criticality.json` spells a name, so `Reader.close` and `Writer.close`
+ * resolve to their own bodies even though every report records both as
+ * `close`. Only a function the source cannot bound falls back to the span
+ * the report states (istanbul's `fnMap.loc`; lcov states none). A line is
+ * attributed to exactly one function's span, and a class node — `new Foo()`
+ * on a class without a constructor — owns only the lines outside its member
+ * functions, so no function is ever blamed for another's lines.
  *
- * ── MATCHING A FUNCTION TO ITS COVERAGE ────────────────────────────────────
- * `criticality.json` names a function `src/a#Client.send`; istanbul's `fnMap`
- * records it as `send`, with no class and no module qualification. So matching
- * is by SIMPLE NAME within the already-resolved file, and it has one failure
- * mode: two functions in one file sharing a simple name — `Reader.close` and
- * `Writer.close` — are indistinguishable in the report.
+ * STATED LIMIT of the class node: what it can observe is its own lines and
+ * V8's `<instance_members_initializer>` record (which counts constructions).
+ * A class with no field initializer leaves no such record, and its header
+ * line runs when the MODULE loads, so such a class reads as clean once its
+ * module is imported even if no test ever constructed it. That is what line
+ * coverage states, and this gate does not claim more.
  *
- * An ambiguous name is treated as UNMEASURED and produces no violation. The
- * alternative, unioning the candidates' spans, would blame `Reader.close` for
- * `Writer.close`'s uncovered lines and send a reviewer to the wrong function.
- * Understating is the safe failure — the same trade `criticality.ts` makes when
- * a call will not resolve — but it IS a recall gap, and a file with same-named
- * methods on two classes is where this gate quietly checks less than it looks.
- *
- * Python's `measured` flag is preserved for the same purpose: a critical
- * function absent from the report is not a violation, because the likely cause
- * is a measurement-key mismatch rather than an untested function. That is
- * exactly what `critical_coverage.py`'s docstring says, and it is why a repo
- * with a misconfigured coverage tool gets silence here rather than a wall of
- * false failures — and why `kragg coverage` is meant to surface the unmeasured
- * ones separately.
+ * ── LINE COVERAGE, NOT BRANCH COVERAGE ─────────────────────────────────────
+ * "No uncovered lines" is a statement about LINES. `if (broken) fix();` on
+ * one line counts as covered once the `if` ran, whether or not `fix()` did;
+ * `coverage/model.ts` states why branch facts stay out of the line model.
+ * Nothing this gate prints should be read as a branch verdict.
  */
 
 import { join } from "node:path";
@@ -61,13 +69,16 @@ import { normalizeIstanbul } from "../coverage/istanbul.ts";
 import { normalizeLcov } from "../coverage/lcov.ts";
 import {
   functionsNamed,
+  ranWithin,
   uncoveredWithin,
   type FileCoverage,
+  type FunctionSpan,
   type LineCoverageReport,
   type NormalizedCoverage,
 } from "../coverage/model.ts";
 import {
   functionSpans,
+  ownsLine,
   uniqueSpan,
   type SourceSpan,
   type SpanIndex,
@@ -76,19 +87,24 @@ import { parseLcov } from "../adapters/support/lcov.ts";
 import type { Violation } from "../engine/models.ts";
 import {
   criticalFunctions,
+  declarationProblem,
   hasCriticalityData,
   simpleName,
   type CriticalFunction,
 } from "./testDepth/criticalFunctions.ts";
 import {
+  failed,
   NO_CRITICALITY_REASON,
   ran,
   skipped,
   type TestDepthOutcome,
 } from "./testDepth/outcome.ts";
 
-/** `Violation.code` for every finding this gate produces. */
+/** `Violation.code` for a critical function with uncovered lines. */
 export const CRITICAL_COVERAGE_CODE = "critical-coverage";
+
+/** `Violation.code` for a critical function the report says nothing usable about. */
+export const CRITICAL_UNMEASURED_CODE = "critical-unmeasured";
 
 /** Skip reason when no coverage report of either format was supplied. */
 export const NO_COVERAGE_REASON =
@@ -130,23 +146,42 @@ export interface CriticalCoverageGap {
   readonly fanIn: number;
   /** 1-based uncovered lines inside the function, ascending. */
   readonly missingLines: readonly number[];
-  /** False when the report has no unambiguous entry for this function. */
+  /** False when the report says nothing usable about this function. */
   readonly measured: boolean;
+  /** When `measured` is false: the cause, in the words a reader needs. */
+  readonly reason?: string | undefined;
+  /** The declaration's 1-based line in the source, when the source states it. */
+  readonly line?: number | undefined;
+  /** Why a reviewer declared it critical, when one did; see the policy. */
+  readonly declaredReason?: string;
 }
 
-/** Return violations for critical functions with uncovered lines. */
+/** Return violations for critical functions with uncovered or unmeasured lines. */
 export function checkCriticalCoverage(
   options: CriticalCoverageOptions,
 ): TestDepthOutcome {
   if (!hasCriticalityData(options.root)) {
     return skipped(NO_CRITICALITY_REASON);
   }
-  if (normalize(options) === null) {
+  // A `critical_functions` entry that names nothing means this gate would
+  // measure a population a reviewer believes is larger. Error, not silence.
+  const stale = declarationProblem(options.root);
+  if (stale !== null) {
+    return failed(stale);
+  }
+  const coverage = coverageModel(options);
+  if (coverage === null) {
     return skipped(NO_COVERAGE_REASON);
+  }
+  const problem = coverageEvidenceProblem(coverage, options.sourcePaths);
+  if (problem !== null) {
+    return failed(problem);
   }
   const violations: Violation[] = [];
   for (const gap of criticalCoverageGaps(options)) {
-    if (gap.measured && gap.missingLines.length > 0) {
+    if (!gap.measured) {
+      violations.push(unmeasuredViolation(gap));
+    } else if (gap.missingLines.length > 0) {
       violations.push(toViolation(gap));
     }
   }
@@ -156,14 +191,13 @@ export function checkCriticalCoverage(
 /**
  * Uncovered lines per public critical function, ranked by fan-in.
  *
- * Includes the unmeasured ones, which the gate ignores and the planned
- * `kragg coverage` command reports separately — the same split Python makes
- * between `critical_gaps` and `check_critical_coverage`.
+ * Includes the unmeasured ones with their cause — the gate reports them and
+ * `kragg coverage` lists them, off the same rows, so the two never disagree.
  */
 export function criticalCoverageGaps(
   options: CriticalCoverageOptions,
 ): readonly CriticalCoverageGap[] {
-  const coverage = normalize(options);
+  const coverage = coverageModel(options);
   if (coverage === null) {
     return [];
   }
@@ -178,10 +212,10 @@ export function criticalCoverageGaps(
 /**
  * Whichever coverage document was supplied, in the one model, or `null`.
  *
- * `null` is "nothing was measured" and must never be confused with "nothing is
- * uncovered": every caller turns it into a visible skip.
+ * `null` is "nothing was supplied" and must never be confused with "nothing
+ * is uncovered": every caller turns it into a visible skip.
  */
-function normalize(options: CriticalCoverageOptions): NormalizedCoverage | null {
+export function coverageModel(options: CriticalCoverageOptions): NormalizedCoverage | null {
   if (typeof options.report === "object" && options.report !== null) {
     return normalizeIstanbul(options.report, options.root);
   }
@@ -190,6 +224,34 @@ function normalize(options: CriticalCoverageOptions): NormalizedCoverage | null 
   }
   if (typeof options.lcov === "object") {
     return normalizeLcov(options.lcov, options.root);
+  }
+  return null;
+}
+
+/**
+ * Why a document that WAS supplied cannot serve as evidence, or `null`.
+ *
+ * An empty document, or one naming only files outside `sourcePaths`, is not
+ * "every critical function is unmeasured" — that would be a wall of findings
+ * about a broken input. It is an ERROR naming what was expected: the run's
+ * coverage over the project's source. The gate maps it to exit 3.
+ */
+export function coverageEvidenceProblem(
+  coverage: NormalizedCoverage,
+  sourcePaths: readonly string[],
+): string | null {
+  const expected = `expected an entry for every file under ${sourcePaths.join(", ")} the tests loaded`;
+  if (coverage.files.size === 0) {
+    return `the coverage report names no files (${expected})`;
+  }
+  const prefixes = sourcePaths.map((path) => `${path.replace(/\/+$/u, "")}/`);
+  const paths = [...coverage.files.keys()];
+  if (!paths.some((path) => prefixes.some((prefix) => path.startsWith(prefix)))) {
+    return (
+      `the coverage report names ${paths.length} files but none under ` +
+      `${sourcePaths.join(", ")} — its keys do not resolve inside this project root ` +
+      `(first: ${paths[0] ?? ""}; ${expected})`
+    );
   }
   return null;
 }
@@ -205,31 +267,37 @@ class SourceExtents {
     this.#api = api;
   }
 
-  /** The one span `name` identifies in `file`, or `null` if it is ambiguous. */
-  spanOf(file: string, name: string): SourceSpan | null {
+  /**
+   * The one span `critical` identifies in its file, or `null` if it is absent
+   * or ambiguous. The qualified name is tried first — it is what tells
+   * `Reader.close` from `Writer.close` — and the simple name only after it.
+   */
+  spanOf(critical: CriticalFunction): SourceSpan | null {
     const cached =
-      this.#cache.get(file) ??
-      functionSpans(join(this.#root, file), this.#root, this.#api);
-    this.#cache.set(file, cached);
-    return uniqueSpan(cached, name);
+      this.#cache.get(critical.file) ??
+      functionSpans(join(this.#root, critical.file), this.#root, this.#api);
+    this.#cache.set(critical.file, cached);
+    const qualified = critical.qualname.slice(critical.module.length + 1);
+    return uniqueSpan(cached, qualified) ?? uniqueSpan(cached, critical.name);
   }
 }
 
 /**
  * Resolve one critical function against the report.
  *
- * THREE WAYS THIS DECLINES TO GUESS, and each is a recall gap paid on purpose:
- * a file with no entry, a name the report records twice, and a function whose
- * extent neither the report nor the source can pin down are all UNMEASURED —
- * never a violation. Python's gate makes the same call, and its reasoning
- * holds here too: the likeliest cause is a measurement-key mismatch, and a
- * wall of false failures from a misconfigured coverage tool is how a gate gets
- * switched off.
+ * THREE WAYS THIS IS UNMEASURED, and every one is reported rather than passed:
+ * the file has no entry (never loaded), the function's extent is known from
+ * neither the source nor the report, or the extent is known but the report
+ * has neither a function record for it nor an executable line inside it — a
+ * one-expression arrow the report never recorded — so nothing says whether
+ * it ran.
  *
- * A function that WAS matched but never entered (`hits === 0`) and whose span
- * holds no uncovered statement line — a one-expression arrow, whose body a
- * report records as a function and not as a statement — is reported as missing
- * its declaration line. Without that, a critical function no test ever calls
+ * Whether the function RAN comes from its own function record when the report
+ * has one (matched by name, or by the line it starts on when the report names
+ * it differently — V8 names a constructor after its class), and otherwise
+ * from an executable line inside its span having run. A function that never
+ * ran and holds no uncovered statement line is reported as missing its
+ * declaration line: without that, a critical function no test ever calls
  * could pass a gate whose entire purpose is to notice exactly that.
  */
 function measure(
@@ -237,49 +305,182 @@ function measure(
   file: FileCoverage | undefined,
   extents: SourceExtents,
 ): CriticalCoverageGap {
-  const base = { qualname: critical.qualname, file: critical.file, fanIn: critical.fanIn };
+  const source = extents.spanOf(critical);
+  const row = new Row(critical, source?.startLine);
   if (file === undefined) {
-    return { ...base, missingLines: [], measured: false };
+    return row.unmeasured(
+      `the test run never loaded ${critical.file} (no entry in the coverage report)`,
+    );
   }
-  const spans = functionsNamed(file, critical.name);
-  const span = spans.length === 1 ? spans[0] : undefined;
-  if (span === undefined) {
-    return { ...base, missingLines: [], measured: false };
+  const named = functionsNamed(file, critical.name);
+  const only = named.length === 1 ? named[0] : undefined;
+  const span = source ?? reportedSpan(only);
+  if (span === null) {
+    // Nothing can bound the body, but the report may state the one fact that
+    // needs no extent: the function was never entered.
+    return only !== undefined && only.hits === 0
+      ? row.measured([only.startLine])
+      : row.unmeasured(unbounded(critical, only, named));
   }
-  // lcov states no end line, so the extent comes from the source. `startLine`
-  // comes with it: where the report and the source disagree by a line (a
-  // decorated or overloaded declaration), the source is the one that matches
-  // the file a reviewer will open.
-  const extent =
-    span.endLine !== null
-      ? { startLine: span.startLine, endLine: span.endLine }
-      : extents.spanOf(critical.file, critical.name);
-  if (extent === null) {
-    // Entered at least once, and nothing can bound its body: reporting zero
-    // uncovered lines here would claim a check that was never made. Only the
-    // never-entered case is stated, because only it is stated by the report.
-    return span.hits === 0
-      ? { ...base, missingLines: [span.startLine], measured: true }
-      : { ...base, missingLines: [], measured: false };
+  return withinExtent(row, file, named, span);
+}
+
+/** The extent is known: its uncovered lines, or the one fact that it never ran. */
+function withinExtent(
+  row: Row,
+  file: FileCoverage,
+  named: readonly FunctionSpan[],
+  span: SourceSpan,
+): CriticalCoverageGap {
+  const record = recordFor(file, named, span);
+  const missing = uncoveredWithin(file, span.startLine, span.endLine).filter((at) =>
+    ownsLine(span, at),
+  );
+  const entered =
+    record === undefined ? ranWithin(file, span.startLine, span.endLine) : record.hits > 0;
+  if (missing.length > 0 || entered) {
+    return row.measured(missing);
   }
-  const missing = uncoveredWithin(file, extent.startLine, extent.endLine);
-  if (missing.length === 0 && span.hits === 0) {
-    return { ...base, missingLines: [extent.startLine], measured: true };
+  return record === undefined
+    ? row.unmeasured(
+        "the coverage report records neither a function nor an executable line at " +
+          `${row.file}:${span.startLine}-${span.endLine}, so it does not say whether it ran`,
+      )
+    : row.measured([span.startLine]);
+}
+
+/** One critical function's row, built from whichever outcome `measure` reaches. */
+class Row {
+  readonly #critical: CriticalFunction;
+  readonly #line: number | undefined;
+
+  constructor(critical: CriticalFunction, line: number | undefined) {
+    this.#critical = critical;
+    this.#line = line;
   }
-  return { ...base, missingLines: missing, measured: true };
+
+  get file(): string {
+    return this.#critical.file;
+  }
+
+  measured(missingLines: readonly number[]): CriticalCoverageGap {
+    return { ...this.base(), missingLines, measured: true };
+  }
+
+  unmeasured(reason: string): CriticalCoverageGap {
+    return { ...this.base(), missingLines: [], measured: false, reason };
+  }
+
+  private base(): RowBase {
+    const { qualname, file, fanIn, declaredReason } = this.#critical;
+    return {
+      qualname,
+      file,
+      fanIn,
+      line: this.#line,
+      ...(declaredReason === undefined ? {} : { declaredReason }),
+    };
+  }
+}
+
+/** The fields every row carries, whichever way it was measured. */
+interface RowBase {
+  readonly qualname: string;
+  readonly file: string;
+  readonly fanIn: number;
+  readonly line: number | undefined;
+  /** Why a reviewer declared it critical; absent when the graph selected it. */
+  readonly declaredReason?: string;
+}
+
+/** The span the report itself states — istanbul's `loc`; lcov states none. */
+function reportedSpan(only: FunctionSpan | undefined): SourceSpan | null {
+  return only === undefined || only.endLine === null
+    ? null
+    : { startLine: only.startLine, endLine: only.endLine };
+}
+
+/** Why neither the source nor the report could bound this function. */
+function unbounded(
+  critical: CriticalFunction,
+  only: FunctionSpan | undefined,
+  named: readonly FunctionSpan[],
+): string {
+  if (named.length > 1) {
+    return (
+      `${critical.name} is bound ${named.length} times in ${critical.file} and the ` +
+      "source could not tell them apart"
+    );
+  }
+  if (only !== undefined) {
+    return (
+      `${critical.name} was entered ${only.hits} times, but neither the source nor the ` +
+      "tracefile states where its body ends, so its lines could not be checked"
+    );
+  }
+  return (
+    `the coverage report records no function named ${critical.name} in ` +
+    `${critical.file}, and the source could not bound it`
+  );
+}
+
+/**
+ * The function record that describes `span`, if the report has one.
+ *
+ * By name when the name is unique in the span (the report and the source
+ * agree), then by the line the span starts on (the report names it
+ * differently — V8 calls a constructor by its class). A class span accepts
+ * any record in its own lines — V8's `<instance_members_initializer>` — since
+ * that is what runs when the class is constructed.
+ */
+function recordFor(
+  file: FileCoverage,
+  named: readonly FunctionSpan[],
+  span: SourceSpan,
+): FunctionSpan | undefined {
+  const inside = (record: FunctionSpan): boolean => ownsLine(span, record.startLine);
+  const byName = named.filter(inside);
+  if (byName.length === 1) {
+    return byName[0];
+  }
+  const atStart = file.functions.find((record) => record.startLine === span.startLine);
+  if (atStart !== undefined) {
+    return atStart;
+  }
+  return span.holes === undefined ? undefined : file.functions.find(inside);
 }
 
 /** Message, hint and location copied from Python's `_violation`. */
 function toViolation(gap: CriticalCoverageGap): Violation {
   const simple = simpleName(gap.qualname);
   const preview = gap.missingLines.slice(0, PREVIEW_LIMIT).join(", ");
+  // A declared function is named with the reviewer's reason, for the same
+  // purpose as in `critical-tests`: "fan-in 1, why is this gated" is the
+  // question the message has to answer before anybody acts on it.
+  const why = gap.declaredReason === undefined ? "" : ` (declared: ${gap.declaredReason})`;
   return {
     message:
-      `critical function ${gap.qualname} has ` +
+      `critical function ${gap.qualname}${why} has ` +
       `${gap.missingLines.length} uncovered lines`,
     file: gap.file,
     line: gap.missingLines[0] ?? 1,
     code: CRITICAL_COVERAGE_CODE,
     fixHint: `add a test exercising ${simple} (uncovered: ${preview})`,
+  };
+}
+
+/** An unmeasured function: its own code, and the cause in the message. */
+function unmeasuredViolation(gap: CriticalCoverageGap): Violation {
+  const simple = simpleName(gap.qualname);
+  // Same reason `toViolation` quotes it: a declared function is gated because
+  // a reviewer said so, and a reader asked to write a test for a fan-in-1
+  // function needs to be told that before deciding it is a false positive.
+  const why = gap.declaredReason === undefined ? "" : ` (declared: ${gap.declaredReason})`;
+  return {
+    message: `critical function ${gap.qualname}${why} has no coverage data: ${gap.reason ?? ""}`,
+    file: gap.file,
+    line: gap.line ?? 1,
+    code: CRITICAL_UNMEASURED_CODE,
+    fixHint: `add a test that imports ${gap.file} and exercises ${simple}`,
   };
 }
