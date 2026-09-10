@@ -20,6 +20,13 @@ a previously green run red — see [Gate additions](#gate-additions) below.
 
 ### Changed
 
+- **TOR-1416** — the `halstead` gate's violation messages now report
+  `effort`, `difficulty` and `estimated bugs` to four decimal places instead
+  of one, so a genuine threshold breach cannot print the identical rounded
+  number on both sides of "exceeds max" (e.g. `estimated bugs 0.4 exceeds max
+  0.4` for an actual value of 0.4331, since `MAX_BUGS` is 0.4). This is
+  display precision only — `checkSource` already compares the unrounded
+  values, so the threshold decision is unchanged.
 - The npm package is now `@tortastudios/kragg-ts`, not the bare `kragg-ts`
   this project shipped a few commits earlier. The org owns the scope on
   npm, so the package lives there too. The command it installs is still

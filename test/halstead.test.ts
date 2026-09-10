@@ -267,10 +267,44 @@ describe("halsteadViolations", () => {
     assert.equal(violation.file, "src/a.ts");
     assert.equal(violation.code, "halstead");
     assert.equal(violation.fixHint, "reduce operators/operands; split the function");
-    assert.equal(violation.message, "add: effort 8.0 exceeds max 1.0");
+    assert.equal(violation.message, "add: effort 8.0000 exceeds max 1.0000");
     assert.equal(violation.line, 1);
   });
+
+  it("stays legible when the one-decimal-rounded value ties the threshold", () => {
+    // A real function whose estimated-bugs value (0.4331...) rounds to
+    // exactly the default MAX_BUGS ceiling (0.4) at one decimal place — 27
+    // distinctly-named locals combined by a spread of operators give enough
+    // vocabulary to push volume, and so bugs = volume / 3000, just past that
+    // tie. Before the precision fix this printed the identical number on
+    // both sides: "add: estimated bugs 0.4 exceeds max 0.4", with no visible
+    // margin between the offending value and the ceiling it broke.
+    const root = mkdtempSync(join(tmpdir(), "kragg-halstead-"));
+    temporaryRoots.push(root);
+    writeFileSync(join(root, "package.json"), "{}");
+    const sourceDir = join(root, "src");
+    mkdirSync(sourceDir);
+    writeFileSync(join(sourceDir, "a.ts"), `${tieBugsSource()}\n`);
+
+    const violations = halsteadViolations(root, ["src"], { api });
+    assert.equal(violations.length, 1);
+    const violation = violations[0];
+    assert.ok(violation !== undefined);
+    // Assert the tie actually exists at one decimal place before checking
+    // that the four-decimal message tells the two numbers apart.
+    assert.match(violation.message, /^tie: estimated bugs 0\.4331 exceeds max 0\.4000$/);
+    assert.notEqual(violation.message, "tie: estimated bugs 0.4 exceeds max 0.4");
+  });
 });
+
+/** A function whose estimated bugs ties MAX_BUGS (0.4) at one decimal place. */
+function tieBugsSource(): string {
+  const names = Array.from({ length: 27 }, (_, i) => `v${i}`);
+  const decls = names.map((n, i) => `let ${n}: number = ${i + 1};`).join(" ");
+  const ops = ["+", "-", "*", "/", "%", "&&", "||", "===", "!==", "<", ">", "<=", ">="];
+  const terms = names.slice(0, -1).map((n, i) => `${n} ${ops[i % ops.length]} ${names[i + 1]}`);
+  return `function tie() { ${decls} return (${terms.join(" + ")}) as unknown as number; }`;
+}
 
 /**
  * The block predicate and the block name, called on the nodes themselves.
