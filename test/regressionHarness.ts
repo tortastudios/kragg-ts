@@ -213,6 +213,23 @@ export function edit(root: string, files: Readonly<Record<string, string>>): voi
   }
 }
 
+/**
+ * Delete a path from a materialized project — the other half of {@link edit}.
+ *
+ * A project is broken by things that are ABSENT at least as often as by things
+ * that are wrong, and "half-installed dependency" is exactly that shape: the
+ * `.bin` shim still there, the entry point it points at gone. Loud when the
+ * path does not exist, because a case that quietly removed nothing would then
+ * assert against a perfectly healthy project and pass for the wrong reason.
+ */
+export function remove(root: string, relative: string): void {
+  const path = join(root, relative);
+  if (!existsSync(path)) {
+    throw new Error(`the case removes ${relative}, and the fixture has no such path`);
+  }
+  rmSync(path, { recursive: true, force: true });
+}
+
 /** One invocation of the built CLI, with its real streams and exit status. */
 export interface CliRun {
   readonly argv: readonly string[];

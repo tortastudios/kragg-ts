@@ -694,6 +694,23 @@ function assertPreserved(root: string): void {
   assert.deepEqual(readdirSync(join(root, RUNS_DIR)), []);
 }
 
+test("a half-installed runner is still MISSING, not crashed", async () => {
+  // The `.bin` shim is there and the package it needs is not — and this is a
+  // REAL resolution failure, not a recorded string: the shim execs this very
+  // Node on `require('vitest')` in a project that has no vitest, so the stderr
+  // the adapter reads is Node's own uncaught MODULE_NOT_FOUND with the
+  // `node:internal/modules/` stack under it. That stack is the signal
+  // `missingTool` keys off after TOR-1414, and this is the case that must not
+  // have been weakened by tightening it.
+  const root = vitestProject(`exec ${JSON.stringify(process.execPath)} -e "require('vitest')"`);
+  const outcome = await run(root);
+  assert.equal(outcome.ok, false);
+  assert.equal(outcome.kind, "missing-tool");
+  assert.match(outcome.message, /vitest is not installed in this project/u);
+  assert.match(outcome.message, /pnpm add -D vitest/u);
+  assertPreserved(root);
+});
+
 test("a crashed runner is an error — never the previous run's pass", async () => {
   const root = vitestProject("echo 'Error: worker crashed' >&2\nexit 1");
   const outcome = await run(root);

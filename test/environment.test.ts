@@ -93,6 +93,41 @@ function command(stdout: string, stderr: string, returncode = 1): CompletedComma
   return { name: "t", command: ["tsc"], cwd: "/tmp", returncode, stdout, stderr };
 }
 
+/**
+ * What Node ACTUALLY prints when a binary's entry point does not resolve —
+ * both loaders, captured from `node` 24 and trimmed only in the middle of the
+ * stack. `missingTool` keys off the `node:internal/modules/` frames, so these
+ * are the fixtures that say what "keys off" means.
+ */
+const CJS_RESOLUTION_FAILURE = [
+  "node:internal/modules/cjs/loader:1459",
+  "  throw err;",
+  "  ^",
+  "",
+  "Error: Cannot find module 'vitest/node'",
+  "Require stack:",
+  "- /repo/node_modules/.bin/vitest",
+  "    at Module._resolveFilename (node:internal/modules/cjs/loader:1456:15)",
+  "    at Module._load (node:internal/modules/cjs/loader:1242:25)",
+  "    at Object.<anonymous> (/repo/node_modules/.bin/vitest:2:1) {",
+  "  code: 'MODULE_NOT_FOUND'",
+  "}",
+  "",
+].join("\n");
+
+const ESM_RESOLUTION_FAILURE = [
+  "node:internal/modules/package_json_reader:301",
+  "  throw new ERR_MODULE_NOT_FOUND(packageName, fileURLToPath(base), null);",
+  "        ^",
+  "",
+  "Error [ERR_MODULE_NOT_FOUND]: Cannot find package 'vitest' imported from /repo/run.mjs",
+  "    at packageResolve (node:internal/modules/esm/resolve:768:81)",
+  "    at moduleResolve (node:internal/modules/esm/resolve:859:18) {",
+  "  code: 'ERR_MODULE_NOT_FOUND'",
+  "}",
+  "",
+].join("\n");
+
 describe("detectPackageManager", () => {
   it("reads each lockfile", () => {
     withOverride(undefined, () => {
@@ -328,11 +363,47 @@ describe("missingTool", () => {
     assert.equal(missingTool(command("", "sh: 1: knip: not found")), "knip");
   });
 
-  it("detects an entry point that does not resolve", () => {
-    assert.equal(
-      missingTool(command("", "Error: Cannot find module 'vitest/node'")),
-      "vitest/node",
-    );
+  it("detects an entry point that does not resolve, from the CJS loader's own crash", () => {
+    // Copied from a real `node node_modules/.bin/vitest` whose package tree was
+    // half-installed, trimmed to the frames Node always prints.
+    assert.equal(missingTool(command("", CJS_RESOLUTION_FAILURE)), "vitest/node");
+  });
+
+  it("detects the ESM spelling of the same crash", () => {
+    assert.equal(missingTool(command("", ESM_RESOLUTION_FAILURE)), "vitest");
+  });
+
+  it("does not read a COMPILER DIAGNOSTIC as a missing tool", () => {
+    // TS2307 is worded exactly like Node's own resolution failure and lands on
+    // tsc's stdout. Reading it as "tsc is not installed" reported the whole
+    // type-check gate as exit 3 (environment) instead of exit 1 (findings) —
+    // and named `node:fs` as the missing tool.
+    const diagnostic =
+      "src/a.ts(1,26): error TS2307: Cannot find module 'node:fs' or its " +
+      "corresponding type declarations.\n" +
+      "src/b.ts(4,10): error TS2307: Cannot find module './missing.ts' or its " +
+      "corresponding type declarations.\n";
+    assert.equal(missingTool(command(diagnostic, "")), null);
+  });
+
+  it("does not read another tool's report of the same words as a missing tool", () => {
+    // The point of keying off the Node stack rather than tighter wording: a
+    // linter, bundler or test runner quoting a resolution error it CAUGHT is
+    // reporting on the project's code, not on its own installation.
+    const bundler =
+      "ERROR in ./src/app.ts\n" +
+      "Module not found: Error: Cannot find module 'left-pad' from '/repo/src'\n" +
+      "    at /repo/node_modules/bundler/lib/resolve.js:120:19\n";
+    assert.equal(missingTool(command("", bundler)), null);
+  });
+
+  it("needs BOTH the uncaught header and the loader stack, never either alone", () => {
+    const headerOnly = "Error: Cannot find module 'vitest/node'\n";
+    assert.equal(missingTool(command("", headerOnly)), null);
+    const stackOnly =
+      "TypeError: x is not a function\n" +
+      "    at Module._compile (node:internal/modules/cjs/loader:1812:14)\n";
+    assert.equal(missingTool(command("", stackOnly)), null);
   });
 
   it("returns null for a tool that ran and found problems", () => {

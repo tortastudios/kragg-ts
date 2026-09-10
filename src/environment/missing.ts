@@ -4,6 +4,12 @@
  * Split out of `project.ts`, which re-exports both functions. The distinction
  * decides the process exit code — 3 (environment) versus 1 (findings) — so
  * the evidence required here is textual and deliberately strict.
+ *
+ * "Textual" is not the same as "these words appeared somewhere". Every pattern
+ * below is a shape only a FAILED LAUNCH produces — a shell's own refusal, a
+ * spawn ENOENT, Node's uncaught loader crash with its internal stack under it
+ * — never a phrase a tool might use in a report ABOUT the project's code. See
+ * {@link unresolvedEntryPoint} for the one that had to be re-derived.
  */
 
 import { join } from "node:path";
@@ -33,10 +39,59 @@ const MISSING_PATTERNS: readonly RegExp[] = [
   /command not found: ([\w@./-]+)/,
   /([\w@./-]+): command not found/,
   /([\w@./-]+): not found/,
-  // A tool that exists but whose entry point does not resolve.
-  /Cannot find module '([^']+)'/,
-  /Cannot find package '([^']+)'/,
 ];
+
+/**
+ * The HEADER of an uncaught Node module-resolution error.
+ *
+ * Anchored to the start of a line and to Node's own error class, because the
+ * words themselves are not evidence of anything: `Cannot find module 'x'` is
+ * also how a TypeScript compiler diagnostic reads (TS2307, "Cannot find
+ * module 'node:fs' or its corresponding type declarations"), and tsc writes
+ * that to STDOUT of a run that worked perfectly. Matching it loose reported
+ * the whole type-check gate as "tsc is not installed" — exit 3 — instead of
+ * the compiler finding it actually was. The two spellings Node emits:
+ *
+ *   Error: Cannot find module 'foo'                      (CJS loader)
+ *   Error [ERR_MODULE_NOT_FOUND]: Cannot find package 'foo' imported from …
+ */
+const UNCAUGHT_RESOLUTION_ERROR =
+  /^Error(?: \[ERR_[A-Z_]+\])?: Cannot find (?:module|package) '([^']+)'/mu;
+
+/**
+ * A stack frame inside Node's OWN module loader.
+ *
+ * This — not the wording of the message — is what makes the error above a
+ * process that died before it could start, rather than a line of some tool's
+ * report. Node prints its resolution failures as uncaught exceptions, and the
+ * frames under `node:internal/modules/` are always there: the CJS path goes
+ * through `Module._resolveFilename` / `Module._load` in
+ * `node:internal/modules/cjs/loader`, the ESM path through `packageResolve` /
+ * `moduleResolve` in `node:internal/modules/esm/resolve`. No diagnostic a
+ * compiler, linter or test runner prints about the code it is analysing
+ * carries them, so no such diagnostic can be mistaken for a missing tool.
+ *
+ * `[ \t]*` rather than `\s*`: with `m` the latter would match across the
+ * newline and let a frame belonging to no line satisfy the anchor.
+ */
+const NODE_LOADER_FRAME = /^[ \t]*at (?:[^\n]*\()?node:internal\/modules\//mu;
+
+/**
+ * The name in a genuine Node module-resolution failure, or `null`.
+ *
+ * BOTH signals are required — the uncaught-error header AND the loader stack —
+ * and the stack is the load-bearing one. Tightening the message pattern alone
+ * would only move the coincidence somewhere else: the next tool whose
+ * diagnostic happens to be worded like Node's would trip it just as the
+ * compiler did.
+ */
+function unresolvedEntryPoint(haystack: string): string | null {
+  if (!NODE_LOADER_FRAME.test(haystack)) {
+    return null;
+  }
+  const captured = UNCAUGHT_RESOLUTION_ERROR.exec(haystack)?.[1];
+  return captured === undefined || captured === "" ? null : captured;
+}
 
 /**
  * Detect "the tool is missing" from a command result — Python's
@@ -51,6 +106,10 @@ const MISSING_PATTERNS: readonly RegExp[] = [
  * as sufficient. `runner.ts` also returns 127 for a timeout or a signal
  * death, and reporting a test suite that timed out as "vitest is not
  * installed" would send the user to fix the wrong thing.
+ *
+ * The unresolved-entry-point case is checked LAST and structurally, by
+ * {@link unresolvedEntryPoint}, because the words a failed `require` prints
+ * are also the words a compiler prints ABOUT the code it just analysed.
  */
 export function missingTool(result: CompletedCommand): string | null {
   const haystack = `${result.stderr}\n${result.stdout}`;
@@ -61,7 +120,7 @@ export function missingTool(result: CompletedCommand): string | null {
       return captured;
     }
   }
-  return null;
+  return unresolvedEntryPoint(haystack);
 }
 
 /**
