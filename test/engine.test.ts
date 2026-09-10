@@ -455,6 +455,105 @@ describe("exit-code selection", () => {
 });
 
 /**
+ * TOR-1418 — dedupe collapses REPEATS, never LOCATIONS.
+ *
+ * The defect: a family of findings sharing a `(code, message)` was folded into
+ * one violation object whose `message` named the other locations in prose —
+ * `… (+2 more at src/scene.ts, src/simulation.ts)` — and no structured field
+ * named them at all. A consumer filtering `violations` by `file` (a file-scoped
+ * agent deciding what it has been assigned) saw one file where three had been
+ * flagged, and read the other two as clean.
+ *
+ * What is pinned here is that every distinct location survives as its own
+ * violation object, and that `truncated`/`violation_count` keep meaning what
+ * they meant: genuine overflow past the per-gate cap, never this folding.
+ */
+describe("violation dedupe", () => {
+  const mi = (file: string): Violation => ({
+    message: "maintainability index grade C (minimum: A)",
+    file,
+    code: "MI-C",
+  });
+
+  function payloadOf(violations: readonly Violation[], maxViolations = 25) {
+    const gate = toPayload(
+      buildReport({
+        command: "check",
+        mode: "full",
+        targets: [],
+        results: [
+          gateResult({
+            name: "maintainability",
+            passed: false,
+            violations,
+            violationCount: violations.length,
+          }),
+        ],
+        maxViolations,
+        startedAt: "2026-01-01T00:00:00+00:00",
+        gitSha: null,
+      }),
+    ).gates[0];
+    assert.ok(gate !== undefined);
+    return gate;
+  }
+
+  it("keeps one structured entry per file for a family spanning three files", () => {
+    const gate = payloadOf([mi("src/main.ts"), mi("src/scene.ts"), mi("src/simulation.ts")]);
+    assert.deepEqual(
+      gate.violations.map((v) => v.file),
+      ["src/main.ts", "src/scene.ts", "src/simulation.ts"],
+    );
+    assert.equal(gate.violation_count, 3);
+    assert.equal(gate.truncated, false, "nothing overflowed the cap");
+    for (const violation of gate.violations) {
+      assert.doesNotMatch(violation.message, /more at/, "no location may live in prose");
+    }
+  });
+
+  it("lets a file-scoped consumer recover its own work from `file` alone", () => {
+    const gate = payloadOf([mi("src/main.ts"), mi("src/scene.ts"), mi("src/simulation.ts")]);
+    const mine = gate.violations.filter((v) => v.file === "src/simulation.ts");
+    assert.equal(mine.length, 1, "the file the folded payload used to call clean");
+  });
+
+  it("keeps two findings in ONE file apart when their lines differ", () => {
+    // The same-file half of the defect: line 24 used to exist only inside
+    // line 20's message.
+    const call = (line: number): Violation => ({
+      message: "forbidden call `src/unsafe.runShell` (banned: `src/unsafe`)",
+      file: "src/index.ts",
+      line,
+      column: 10,
+      code: "forbidden-call",
+    });
+    const gate = payloadOf([call(20), call(24)]);
+    assert.deepEqual(
+      gate.violations.map((v) => v.line),
+      [20, 24],
+    );
+  });
+
+  it("still collapses the identical finding reported twice at one location", () => {
+    // Nothing is hidden: both entries pointed at the same place.
+    const gate = payloadOf([mi("src/main.ts"), mi("src/main.ts")]);
+    assert.equal(gate.violations.length, 1);
+    assert.equal(gate.violations[0]?.message.endsWith("(+1 more)"), true);
+    assert.equal(gate.violation_count, 2, "the raw total is untouched");
+    assert.equal(gate.truncated, false, "dedupe is not overflow");
+  });
+
+  it("reports `truncated` for real overflow past the cap, and only that", () => {
+    const files = ["a", "b", "c", "d"].map((n) => mi(`src/${n}.ts`));
+    const capped = payloadOf(files, 2);
+    assert.equal(capped.violations.length, 2);
+    assert.equal(capped.violation_count, 4);
+    assert.equal(capped.truncated, true);
+    assert.equal(payloadOf(files, 4).truncated, false);
+  });
+});
+
+/**
  * The advisory channel.
  *
  * Advisories exist for findings a reader must SEE but must not be blocked by —
@@ -525,10 +624,23 @@ describe("advisories", () => {
   });
 
   it("are deduped and capped, and say so rather than vanishing", () => {
+    // TOR-1418: three lines are three advisories. Dedupe used to fold the
+    // second and third into the first's prose, so an advisory list a machine
+    // read structurally named one line out of three.
     const many = [hatch(1), hatch(2), hatch(3)];
-    const deduped = reportOf(gateResult({ name: "g", passed: true, advisories: many }));
+    const spread = reportOf(gateResult({ name: "g", passed: true, advisories: many }));
+    assert.equal(spread.gates[0]?.advisoryCount, 3);
+    assert.deepEqual(
+      spread.gates[0]?.advisories.map((a) => a.line),
+      [1, 2, 3],
+    );
+
+    // Two reports of the identical finding AT THE SAME line still collapse:
+    // there is no second location for a reader to go to.
+    const twice = [hatch(1), hatch(1)];
+    const deduped = reportOf(gateResult({ name: "g", passed: true, advisories: twice }));
     assert.equal(deduped.gates[0]?.advisoryCount, 1);
-    assert.match(String(deduped.gates[0]?.advisories[0]?.message), /\+2 more at tsconfig/);
+    assert.match(String(deduped.gates[0]?.advisories[0]?.message), /\(\+1 more\)$/);
 
     const distinct = [hatch(1), { ...hatch(2), message: "second" }];
     const capped = reportOf(gateResult({ name: "g", passed: true, advisories: distinct }), 1);

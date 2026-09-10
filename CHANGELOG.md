@@ -101,6 +101,29 @@ a previously green run red — see [Gate additions](#gate-additions) below.
   so `critical-coverage` still fails it for a single uncovered line and
   `critical-tests` still demands a relevant test change when its file is
   edited. No gate, threshold, exclusion or wire key changed.
+- **TOR-1418** — every flagged location now reaches the JSON payload as its own
+  violation object. The report's display dedupe grouped findings by
+  `(code, message)` and folded the other locations into the survivor's message
+  — `maintainability index grade C (minimum: A) (+2 more at src/scene.ts,
+  src/simulation.ts)` — so a gate with three affected files emitted **one**
+  violation object naming one file, and no structured field named the other
+  two. A consumer that reads `file`/`line`/`code` (a file-scoped agent deciding
+  what it has been assigned) undercounted the affected files and read an
+  actually-flagged file as clean. Dedupe now groups by
+  `(code, message, location)`: only the identical finding reported twice at the
+  same place collapses, with a bare `(+N more)` tail, and everything else is its
+  own entry with its own `file`, `line` and `column`, under the unchanged
+  per-gate cap.
+
+  **No key was added, renamed or retyped.** `ViolationPayload` is the same six
+  fields, `violation_count` is still the raw total, and `truncated` still means
+  exactly one thing — the `max_violations_per_gate` cap dropped entries — rather
+  than being `false` while a fold hid a location. Text output changes: a family
+  spanning several files now prints one line per file instead of one line with
+  the rest in prose. Python still folds across locations, which is now
+  divergence 41 in `docs/spec-conformance.md`; `test/fixtures/regressions/`
+  gains `folded-locations`, which fails if the fold comes back.
+
 - The npm package is now `@tortastudios/kragg-ts`, not the bare `kragg-ts`
   this project shipped a few commits earlier. The org owns the scope on
   npm, so the package lives there too. The command it installs is still

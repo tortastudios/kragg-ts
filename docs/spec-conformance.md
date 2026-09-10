@@ -98,13 +98,29 @@ than trusting the recorded bytes: the four gate counts, `violations_total`,
 (`all(g.passed or g.skipped)`), and `exit_code` (section 3).
 
 `violation_count` is the true total of raw findings. `violations` is a
-*display* list: findings sharing a `(code, message)` may be collapsed into one
-entry that names the extra locations, and the list is capped at
-`max_violations_per_gate` (default 25) with `truncated: true` when the cap
-dropped entries. So `truncated: false` does **not** imply
-`violations.length === violation_count` — the `security-violations` fixture
-pins exactly that case. A consumer reading `violations.length` as the count is
+*display* list: repeated findings may be collapsed into one entry, and the list
+is capped at `max_violations_per_gate` (default 25) with `truncated: true` when
+the cap dropped entries. A consumer reading `violations.length` as the count is
 reading the wrong field, in either implementation.
+
+**What may be collapsed is where the two implementations differ**
+(divergence 41). Python groups on `(code, message)` and folds the other
+locations into the survivor's message — `… (+2 more at src/scene.ts,
+src/simulation.ts)`. kragg-ts groups on `(code, message, location)`, so only
+the identical finding reported twice **at the same place** collapses, and it
+says so with a bare `(+N more)`. Every distinct location is a violation object
+of its own, with its own `file`/`line`/`column`, up to the same cap. The reason
+is stated in `src/engine/report.ts`: a location that exists only inside another
+violation's prose cannot be read by the consumers this payload is for, and a
+file-scoped agent filtering `violations` by `file` concluded that a flagged
+file was clean. No key changed; the shape of the list did.
+
+`truncated: false` therefore does not imply `violations.length ===
+violation_count` in either implementation — in Python whenever dedupe fired, in
+kragg-ts whenever the same finding was reported twice at one location. The
+`security-violations` fixture pins the kragg-ts side: two findings at two lines
+under `max_violations_per_gate: 1`, so one is shown and `truncated` is **true**,
+because the cap — the only thing that flag has ever claimed — is what dropped it.
 
 ### 2. Additive keys, and the rule that makes them legal
 
@@ -318,7 +334,7 @@ run from inside it would find kragg-ts's own `node_modules/.bin/tsc` and
 | fixture | what it pins |
 | --- | --- |
 | `security-clean` | exit 0; `git_sha: null` survives normalization; two skip reasons; a skipped gate is not a failure |
-| `security-violations` | exit 1; dedupe vs. `truncated` vs. `violation_count` (section 1); `static gates failed` on the SLOW tier |
+| `security-violations` | exit 1; one violation object per LOCATION, `truncated` vs. `violation_count` (section 1, divergence 41); `static gates failed` on the SLOW tier |
 | `check-missing-tsc` | exit 3; the whole 18-gate pipeline; a gate that cannot run is `error`, with remediation in `raw_output` and a `Fix:` line in `next_actions`; non-null `git_sha` |
 | `config-error` | exit 2; no report; the reason on stderr |
 | `criticality-sidecar` | the shared list, the six record keys, the numbers, and the sidecar beside it |
@@ -368,7 +384,7 @@ A conformance runner must not flag these; a suite that diffs the two
 implementations naively will flag every one. Rows 1–9 are this repository's
 original table, re-verified against both trees while the spec was written; rows
 10–12 were added by that verification and are also SPEC.md section 10's rows
-10–12; rows 13–39 were introduced by TOR-1358, TOR-1363, TOR-1361, TOR-1369, TOR-1375, TOR-1364, TOR-1365, TOR-1374, TOR-1377, TOR-1370, TOR-1372, TOR-1373 and TOR-1371 on this branch. Fixtures that exercise a row carry a `divergences` entry naming its id.
+10–12; rows 13–41 were introduced by TOR-1358, TOR-1363, TOR-1361, TOR-1369, TOR-1375, TOR-1364, TOR-1365, TOR-1374, TOR-1377, TOR-1370, TOR-1372, TOR-1373, TOR-1371, TOR-1419 and TOR-1418 on this branch (TOR-1417 extended row 37 rather than adding one). Fixtures that exercise a row carry a `divergences` entry naming its id.
 
 | # | Divergence | Why it is intentional |
 | --- | --- | --- |
@@ -412,6 +428,7 @@ original table, re-verified against both trees while the spec was written; rows
 | 38 | a `tsconfig` policy setting selects the ONE project file every type-aware surface reads; a solution-style file is a gate ERROR | TypeScript-only, like the tool-selection keys in §8: Python has one `pyproject.toml`. The shared program, `tsc --project`, the `typing-strictness` audit, the alias table and the freshness stamp all read the file the setting names, so a `tsconfig.app.json` project is checked where it is configured. A file with `references` and no inputs makes `tsc -p` exit 0 having checked nothing; kragg-ts refuses it as `error: true` (SPEC §4.3's "could not run") naming the referenced projects, rather than reporting a `[PASS] tsc` over an unchecked tree. A configured file that does not exist is exit 2. No key is added to the report or the stamp — the selected file is folded into the existing `inputs_digest`. |
 | 39 | `check --package` / `security --package` run a workspace member as its own run; a root run names the members it did not check | TypeScript-only: Python has no workspace notion. Each member is a complete run (own root, policy, tsconfig, compiler, program, journal) and produces the ordinary payload with the unchanged schema; several members are an **array** of payloads on stdout, never one merged report. The exit code is the worst member's; every usage error refuses the invocation before a gate runs. No fixture covers `--package`, so no golden moves. |
 | 40 | a threshold the RUNNER enforced from its own config fails `test-coverage`, under the additive violation code `runner-reported-failure` | Python has no analogue and needs none: it passes `--cov-fail-under=<policy>` to pytest, so pytest's exit code IS kragg's floor and there is no second, independent threshold in play. The JavaScript runners are deliberately given no threshold (kragg computes the percentage itself, so "tests fail" stays distinguishable from "coverage slipped") — but `--coverage` leaves the project's own `vitest.config.ts` in force, so `coverage.thresholds` there is still checked by vitest, over dimensions kragg does not compute, and signalled with `process.exitCode = 1` AFTER the json report was written with `success: true`. Reading the report alone turned a failure the tool had already computed into a kragg pass. kragg-ts raises it when, and only when, the runner's own report is a pass with no violations, a complete coverage artifact came back, and the process still exited non-zero; the runner's own threshold line is quoted when it printed one. It is a SECOND violation beside `coverage-below-threshold`, never merged with it, and kragg still computes line coverage only. `Violation` field names and the gate's name are unchanged; a new `code` value is additive under the CHANGELOG's rule, and no fixture drives a runner with native thresholds, so no golden is affected. Pinned by `test/testRunner.test.ts` and the `runner-native-threshold` end-to-end regression. |
+| 41 | display dedupe keys on `(code, message, LOCATION)`; Python keys on `(code, message)` alone | Python's `dedupe_violations` folds every other location of a family into the survivor's message — `(+2 more at src/scene.ts, src/simulation.ts)` — so the payload carries one violation object for three flagged files and no structured field names the other two. A consumer that reads only `file`/`line`/`code` (a file-scoped agent deciding what it has been assigned) undercounts the affected files and reads a flagged file as clean; the reported case was `src/simulation.ts`. kragg-ts collapses only the identical finding reported twice AT ONE location, appends a bare `(+N more)`, and gives every other location its own violation object under the unchanged per-gate cap. No key is added, renamed or retyped: `ViolationPayload` is the same six fields and `violation_count` is still the raw total, so a Python reader consumes such a report exactly as it consumes its own. `truncated` narrows to what it always claimed — the cap dropped entries — instead of also being false while a fold hid a location. Pinned by `security-violations` and by `test/fixtures/regressions/folded-locations`. |
 
 Four defects found in the Python implementation during the port are recorded in
 [KNOWN_LIMITATIONS.md](../KNOWN_LIMITATIONS.md#found-in-the-python-implementation-during-this-port).

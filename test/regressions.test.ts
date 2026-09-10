@@ -770,3 +770,84 @@ describe("TOR-1419: a runner-native coverage threshold is not absorbed into a pa
     assert.equal(report.passed, false);
   });
 });
+
+// ---------------------------------------------------------------------------
+// TOR-1418. A location that exists only inside another violation's prose is a
+// location no machine consumer can act on.
+// ---------------------------------------------------------------------------
+
+const foldedLocations = scenario(async (): Promise<ReportView> => {
+  const root = await materialize({ fixture: "folded-locations", typescript: true });
+  return reportOf(await runCli(root, ["check", "--no-journal", "--format", "json"]));
+});
+
+describe("TOR-1418: every flagged location is its own violation object", () => {
+  it("gives each of the three over-budget modules its own entry", async () => {
+    const structure = gate(await foldedLocations(), "structure");
+    assert.equal(ran(structure), true);
+    assert.equal(structure.passed, false);
+    assert.equal(structure.violationCount, 3);
+    assert.deepEqual(
+      structure.violations.map((violation) => violation.file),
+      ["src/main.ts", "src/scene.ts", "src/simulation.ts"],
+    );
+  });
+
+  it("lets a file-scoped consumer find the file the fold used to swallow", async () => {
+    // THE REPORTED FAILURE. `src/simulation.ts` was flagged, but a filter over
+    // `violations[].file` matched nothing and the agent skipped the file.
+    const structure = gate(await foldedLocations(), "structure");
+    const mine = structure.violations.filter((v) => v.file === "src/simulation.ts");
+    assert.equal(mine.length, 1);
+    assert.equal(mine[0]?.code, "symbol-budget");
+  });
+
+  it("keeps two findings in ONE file apart by line", async () => {
+    const secrets = gate(await foldedLocations(), "secret-default");
+    assert.equal(ran(secrets), true);
+    assert.equal(secrets.violationCount, 2);
+    assert.deepEqual(
+      secrets.violations.map((violation) => violation.line),
+      [22, 27],
+    );
+  });
+
+  it("puts no location in prose, in any gate", async () => {
+    for (const view of (await foldedLocations()).gates) {
+      for (const violation of view.violations) {
+        assert.doesNotMatch(
+          violation.message,
+          /\+\d+ more at /u,
+          `${view.name} folded a location into a message: ${violation.message}`,
+        );
+      }
+    }
+  });
+
+  it("leaves `truncated` false when the cap dropped nothing", async () => {
+    // The fold used to hide two of three files with `truncated: false`, which
+    // is the same sentence as "nothing was hidden".
+    const report = await foldedLocations();
+    for (const name of ["structure", "secret-default"]) {
+      const view = gate(report, name);
+      assert.equal(view.truncated, false, name);
+      assert.equal(view.violations.length, view.violationCount, name);
+    }
+  });
+
+  it("still reports `truncated` when the cap really does drop entries", async () => {
+    const root = await materialize({ fixture: "folded-locations", typescript: true });
+    const run = await runCli(root, [
+      "check",
+      "--no-journal",
+      "--format",
+      "json",
+      "--max-violations",
+      "2",
+    ]);
+    const structure = gate(reportOf(run), "structure");
+    assert.equal(structure.violationCount, 3);
+    assert.equal(structure.violations.length, 2);
+    assert.equal(structure.truncated, true);
+  });
+});
