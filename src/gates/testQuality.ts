@@ -17,6 +17,18 @@
  *    reference says a test EXERCISES the function, not that its assertions
  *    would catch a wrong answer — see `testDepth/references.ts`.
  *
+ * ── A `private` MEMBER IS ASKED FOR A PATH, NOT A NAME ─────────────────────
+ * A `private`/`protected` member of an exported class cannot be named from a
+ * test file: the compiler rejects it. Demanding a direct reference from one
+ * therefore asks an author either to export an internal helper so a test can
+ * spell it, or to write a binding that satisfies the checker and tests
+ * nothing. So for those members — and ONLY for the direct-reference demand —
+ * the evidence is a path instead: the member is accepted when the call graph
+ * puts it downstream of something a running test binds, and reported when it
+ * does not. Nothing else is relaxed: it stays in the population
+ * `critical-coverage` and `critical-tests` enforce on. See
+ * `testDepth/restricted.ts`.
+ *
  * ── WHAT CHANGED IN THE PORT ───────────────────────────────────────────────
  * Python collects `def test_*` from files named `test_*.py`. Here a test is a
  * CALL (`it(...)`, `test(...)`) — see `testDepth/testCases.ts` for the runner
@@ -75,7 +87,9 @@ import {
   OUTSIDE_PROGRAM_NOTE,
   referenceResolver,
   type BoundReferences,
+  type ReferenceResolver,
 } from "./testDepth/references.ts";
+import { exercisedFunctions, restrictedNames } from "./testDepth/restricted.ts";
 import { findTestCases } from "./testDepth/testCases.ts";
 import { parsedTestSources } from "./testDepth/testFiles.ts";
 
@@ -92,6 +106,18 @@ export const NO_ASSERT_FIX_HINT =
 /** Note appended when the only references sit in tests that do not run. */
 export const SKIPPED_ONLY_NOTE =
   "referenced only inside skipped or todo tests, which do not count";
+
+/**
+ * Note appended when a `private`/`protected` member is on no exercised path.
+ *
+ * Such a member is never asked for a direct reference — a test cannot legally
+ * write one — so saying "no test references it" without this would send an
+ * author to write the one thing the compiler forbids. The finding is that
+ * nothing the suite runs reaches it; the fix is a test for the public entry
+ * point that should.
+ */
+export const UNREACHED_MEMBER_NOTE =
+  "private to its class, and no test exercises a public member that reaches it";
 
 export interface TestQualityOptions {
   readonly root: string;
@@ -214,29 +240,73 @@ function referenceViolations(
       outside.push(source.relative);
     }
   }
+  const bound = mergeReferences(parts);
   return {
     ok: true,
-    violations: unreferenced(critical, mergeReferences(parts), outside),
+    violations: unreferenced(critical, bound, outside, evidenceScope(loaded.resolver, critical, bound)),
   };
+}
+
+/**
+ * Which critical functions are `private`/`protected`, and what the suite runs.
+ *
+ * A member behind one of those keywords cannot be named from a test file at
+ * all, so the direct-reference demand is answered for it by the call graph
+ * instead — see `testDepth/restricted.ts`. The graph is built ONLY when such a
+ * member would otherwise be a finding: an ordinary repo, and every repo whose
+ * private members are already reached, pays nothing for this.
+ */
+function evidenceScope(
+  resolver: ReferenceResolver,
+  critical: readonly CriticalFunction[],
+  bound: BoundReferences,
+): RestrictedEvidence {
+  const restricted = restrictedNames(resolver);
+  const unbound = critical.filter(
+    (entry) => !bound.functions.has(entry.qualname) && restricted.has(entry.qualname),
+  );
+  return {
+    restricted,
+    exercised:
+      unbound.length === 0 ? bound.functions : exercisedFunctions(resolver, bound.functions),
+  };
+}
+
+/** The two facts a restricted member is judged on, resolved once per run. */
+interface RestrictedEvidence {
+  /** Every registered function declared `private` or `protected`. */
+  readonly restricted: ReadonlySet<string>;
+  /** What the tests bind, plus everything that transitively calls. */
+  readonly exercised: ReadonlySet<string>;
 }
 
 /**
  * The critical functions the merged evidence does not bind, as findings.
  *
- * The message distinguishes the three ways a function ends up here — nothing
- * binds it, only a skipped test binds it, or the test files that might have
- * are outside the program — because each has a different fix. No file or
- * line: the finding is about the test suite as a whole, and there is no
- * honest place to point at.
+ * The message distinguishes the four ways a function ends up here — nothing
+ * binds it, only a skipped test binds it, the test files that might have are
+ * outside the program, or it is a `private`/`protected` member no exercised
+ * path reaches — because each has a different fix. No file or line: the
+ * finding is about the test suite as a whole, and there is no honest place to
+ * point at.
+ *
+ * A restricted member that IS on an exercised path is not a finding: it cannot
+ * be named from a test, and the call graph says the suite runs it. See
+ * `testDepth/restricted.ts` for what that claim rests on.
  */
 function unreferenced(
   critical: readonly CriticalFunction[],
   bound: BoundReferences,
   outside: readonly string[],
+  evidence: RestrictedEvidence,
 ): readonly Violation[] {
   const violations: Violation[] = [];
   for (const { qualname, declaredReason } of critical) {
     if (bound.functions.has(qualname)) {
+      continue;
+    }
+    const restricted = evidence.restricted.has(qualname);
+    if (restricted && evidence.exercised.has(qualname)) {
       continue;
     }
     // A declared function is named with the reviewer's reason: this gate's
@@ -245,12 +315,18 @@ function unreferenced(
     const why = declaredReason === undefined ? "" : ` (declared: ${declaredReason})`;
     const note = bound.skippedFunctions.has(qualname)
       ? ` (${SKIPPED_ONLY_NOTE})`
-      : outsideNote(outside);
+      : restricted
+        ? ` (${UNREACHED_MEMBER_NOTE})`
+        : outsideNote(outside);
     const simple = simpleName(qualname);
     violations.push({
       message: `no test references critical function ${qualname}${why}${note}`,
       code: CRITICAL_UNTESTED_CODE,
-      fixHint: `add a test that exercises ${simple}, directly or through a helper`,
+      // A restricted member cannot legally be named from a test file, so the
+      // hint must not ask for the one thing the compiler rejects.
+      fixHint: restricted
+        ? `add a test that exercises ${simple} through its class's public API`
+        : `add a test that exercises ${simple}, directly or through a helper`,
     });
   }
   return violations;
