@@ -63,8 +63,14 @@ that almost nothing else does. **It is not a precedent.**
 | `oxlint` | `1.73.0` | The linter kragg-ts runs on its own source, through the same `lint` gate every project using kragg gets. |
 
 `@types/node` pulls one transitive package, `undici-types`, from
-DefinitelyTyped. Types only, no runtime code. `oxlint` is a single native
-binary with **zero** dependencies of its own.
+DefinitelyTyped. Types only, no runtime code. `oxlint` is a prebuilt native
+binary published the way rule 5 and the `oxc-parser` note below require of a
+native addon: it declares **no** `dependencies` and **no** install scripts
+(`npm view oxlint@1.73.0 scripts` prints nothing), and ships one
+`@oxlint/binding-<platform>` package per supported platform as an
+`optionalDependency` — nineteen of them at 1.73.0. pnpm records all nineteen
+in the lockfile and installs exactly one, the host's. Nothing compiles at
+install time; with `allowBuilds: {}` nothing could.
 
 **Why a linter is approved here but not shipped as a runtime dependency.**
 kragg-ts checks itself with its own `check --all`. That check includes the
@@ -76,20 +82,29 @@ supports (oxlint, biome, eslint). It runs only on this repository, at dev
 time, through `pnpm exec oxlint`. It is never imported by any file under
 `src/`, and it ships to nobody who installs `kragg-ts`.
 
-**The whole installed tree is four packages.** `pnpm list --depth Infinity`,
-which agrees with the entries in `pnpm-lock.yaml`'s `packages:` block:
+**The whole tree is 23 lockfile entries, of which five land on any one
+machine.** `pnpm list --depth Infinity`, which agrees with the 23 entries in
+`pnpm-lock.yaml`'s `packages:` block, with the platform bindings elided:
 
 ```
 kragg-ts@0.1.0
 │   dependencies:
 ├── typescript@6.0.3
 │   devDependencies:
-├── oxlint@1.73.0
-└─┬ @types/node@24.12.4
-  └── undici-types@7.16.0
+├─┬ @types/node@24.12.4
+│ └── undici-types@7.16.0
+└─┬ oxlint@1.73.0
+  ├── @oxlint/binding-darwin-arm64@1.73.0
+  └── … 18 more @oxlint/binding-* optional packages, one per platform
 
-4 packages
+23 packages
 ```
+
+On disk (`ls node_modules/.pnpm`) that is `typescript`, `@types/node`,
+`undici-types`, `oxlint` and the one binding for the host — five. The other
+eighteen bindings are resolved and pinned in the lockfile so every platform in
+the compatibility matrix installs the same reviewed versions; they are never
+fetched on a machine that does not match them.
 
 No bundler. No test framework. No formatter. `node:test` is the test runner
 and `tsc` is the build, and `tsc` comes from the runtime dependency above, so
@@ -188,7 +203,7 @@ These were the four dependencies this project expected to want. **None was
 adopted, and — now that the tool is complete — none turned out to be needed.**
 
 That is the strongest available evidence that this policy is workable rather
-than merely austere. The whole of `kragg check` (18 gates, 165 modules under
+than merely austere. The whole of `kragg check` (18 gates, 192 modules under
 `src/`) was built with `typescript` and the Node standard library:
 
 - the AST work that `oxc-parser` and `ts-morph` were for is done through the

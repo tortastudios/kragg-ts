@@ -245,6 +245,46 @@ a previously green run red — see [Gate additions](#gate-additions) below.
 
 ### Fixed
 
+- **TOR-1381 — documentation, the dependency inventory and scaffold
+  onboarding reconciled with what actually ships.** Every claim was checked
+  against the built CLI, the registry and the installed tree rather than
+  against another document. What was wrong, and what changed:
+  - The generated project's own cooldown (`minimumReleaseAge: 43200`,
+    strict) refuses the exact `kragg-ts` pin the scaffold writes for the
+    first month after every release — reproduced with a six-day-old exact pin
+    under the generated `pnpm-workspace.yaml`
+    (`ERR_PNPM_NO_MATURE_MATCHING_VERSION`), the state `kragg-ts@0.1.0` will
+    be in the day it is published. `kragg new` (every kind) and `kragg init`
+    now name `kragg-ts` in `minimumReleaseAgeExclude`, with the reason
+    written beside it, exactly when they write the pin; a `0.0.0` build
+    writes neither. The floor, the strict flag and every other entry are
+    untouched, and `test/scaffold.test.ts` asserts pin and exemption appear
+    together or not at all.
+  - `docs/dependency-policy.md` said the installed tree was four packages
+    and that `oxlint` had zero dependencies. `oxlint@1.73.0` declares
+    nineteen optional platform bindings; the lockfile holds 23 entries and
+    five land on any one machine. The inventory now says so, and says why
+    that is the shape rule 5 asks of a native addon. `oxlint`'s approval is
+    not revisited; no dependency was added or removed.
+  - README's `$schema` example (and the schema's own description, and the
+    TOR-1363 entry above) pointed at `node_modules/kragg/`, a directory the
+    `kragg-ts` package never creates.
+  - `KNOWN_LIMITATIONS.md` still listed Windows as untested and non-ASCII
+    changed paths as dropped under "shared with Python", both closed here by
+    TOR-1379 and TOR-1365 and contradicted elsewhere in the same file; it now
+    also states what the scaffold rows do not assert about the registry.
+  - README claimed `npm`/`yarn` installs "work the same way" while the matrix
+    asserts only pnpm; that a missing tool is always a skip, when a named
+    tool or `tsc` is exit 3; that kragg "drives seven programs" when seven is
+    the count the weekly lane checks; and never showed `--mcp-sdk official`.
+    `AGENTS.md`'s flag summary omitted `init --dry-run` and the scaffold
+    commands' own flags. Module and test-file counts in `AGENTS.md`,
+    `docs/architecture.md` and the dependency policy now match the tree
+    (192 modules, 59 test files).
+  - `kragg doctor` under `secret_scanner: "auto"` printed "install gitleaks
+    or secretlint" with no command; it now prints one `MISSING -> Fix:` line
+    per absent scanner, as it already did for the linters. No gate,
+    threshold, exclusion or wire key changed.
 - **TOR-1379: the published CLI did nothing when installed, and exited 0.**
   `node node_modules/kragg-ts/dist/cli.js --version` printed nothing and
   returned 0 — no command ran. The entry-point guard compared
@@ -633,7 +673,7 @@ a previously green run red — see [Gate additions](#gate-additions) below.
   project that declares nothing sees byte-identical output.
 - TOR-1363: `kragg.schema.json`, shipped in the package, mirrors the keys,
   types and ranges the loader enforces so an editor can validate `kragg.json`
-  (`"$schema": "./node_modules/kragg/kragg.schema.json"`); `$schema` is
+  (`"$schema": "./node_modules/kragg-ts/kragg.schema.json"`); `$schema` is
   accepted by the loader as the one non-setting key. A test keeps schema and
   loader in lockstep; no validator dependency is involved.
 - **TOR-1362:** `kragg init --dry-run` prints the exact changes `init` would

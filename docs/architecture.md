@@ -1,6 +1,6 @@
 # Architecture
 
-165 modules and roughly 32,000 lines under `src/`. This document is the map of
+192 modules and roughly 42,000 lines under `src/`. This document is the map of
 the *ideas*; `AGENTS.md`'s Project Map is the map of the files. Read this one
 first — most of the layout only makes sense once you know why the analysis is
 split in two.

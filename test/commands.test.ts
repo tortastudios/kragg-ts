@@ -295,6 +295,9 @@ describe("runDoctor", () => {
     // gitleaks is a standalone binary on PATH, so a developer machine may
     // legitimately have one; either way the line is optional, never a failure.
     assert.match(result.out, /secret scanner: (none installed — optional|ok \(gitleaks)/);
+    // Under "auto" an absent scanner still gets its own line carrying the
+    // command that installs it, as the linters do — the summary names none.
+    assert.match(result.out, /secretlint: MISSING -> .*Fix: /);
     assert.equal(result.value, EXIT_GATE_FAILURES, "…on the layout, not on the groups");
   });
 
