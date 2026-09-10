@@ -279,11 +279,11 @@ The cap applies to both emitted shapes — a block `reason` and a SessionStart
 
 The hook returns 0 on *any* internal failure — the one deliberate fail-open in
 kragg, since a broken guardrail must not become a broken editing session.
-kragg-ts additionally **records** each such failure (divergence 30): a line on
+kragg-ts additionally **records** each such failure (divergence 33): a line on
 stderr and an entry in `.kragg/hook-errors.jsonl`, which is a kragg-ts-only
 file in the journal's shape and is not read by Python. What each event checks
 is resolved by `src/commands/scope.ts`, the same resolver `check` uses
-(divergence 29). See [`src/hooks/protocol.ts`](../src/hooks/protocol.ts),
+(divergence 32). See [`src/hooks/protocol.ts`](../src/hooks/protocol.ts),
 [`src/hooks/claude.ts`](../src/hooks/claude.ts),
 [`src/hooks/session.ts`](../src/hooks/session.ts) and
 [`src/hooks/diagnostics.ts`](../src/hooks/diagnostics.ts).
