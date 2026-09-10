@@ -22,6 +22,7 @@ function values(overrides: Partial<Values>): Values {
     changed: false,
     since: undefined,
     "fail-fast": false,
+    "fast-only": false,
     all: false,
     package: undefined,
     write: false,
@@ -81,6 +82,23 @@ describe("conflict", () => {
   it("rejects --all with --limit", () => {
     assert.notEqual(conflict(values({ all: true, limit: "0" })), null);
     assert.equal(conflict(values({ all: true })), null);
+  });
+
+  it("rejects --all with --fast-only, which asks for the opposite tier", () => {
+    // TOR-1415. `--all` forces the slow tier to run after a fast failure;
+    // `--fast-only` never runs it. Silently honouring one would produce a
+    // pipeline the caller did not ask for, and the only visible sign would be
+    // which gates are in the report.
+    assert.match(
+      conflict(values({ all: true, "fast-only": true })) ?? "",
+      /--fast-only cannot be combined with --all/,
+    );
+    // Each alone is fine, and `--fast-only` clashes with nothing else here:
+    // it composes with every scope flag.
+    assert.equal(conflict(values({ "fast-only": true })), null);
+    assert.equal(conflict(values({ "fast-only": true, changed: true })), null);
+    assert.equal(conflict(values({ "fast-only": true, file: ["a.ts"] })), null);
+    assert.equal(conflict(values({ "fast-only": true, "fail-fast": true })), null);
   });
 });
 

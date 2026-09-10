@@ -105,6 +105,7 @@ const OPTIONS = {
   changed: { type: "boolean" },
   since: { type: "string" },
   "fail-fast": { type: "boolean" },
+  "fast-only": { type: "boolean" },
   all: { type: "boolean" },
   last: { type: "string" },
   write: { type: "boolean" },
@@ -125,8 +126,8 @@ type FlagTable = Readonly<Record<string, readonly string[]>>;
 // and a wrapped entry (or a comment between entries) is an unparsed line, not
 // a silently smaller flag set.
 const ALLOWED: FlagTable = {
-  check: ["file", "format", "max-violations", "no-journal", "changed", "since", "fail-fast", "all", "update-baseline", "package"],
-  security: ["file", "format", "max-violations", "no-journal", "package"],
+  check: ["file", "format", "max-violations", "no-journal", "fast-only", "changed", "since", "fail-fast", "all", "update-baseline", "package"],
+  security: ["file", "format", "max-violations", "no-journal", "fast-only", "package"],
   fix: ["file"],
   status: ["format", "last"],
   doctor: [],
@@ -383,6 +384,7 @@ function reportFlags(values: Values, root: string): ReportFlags {
       : integer(values["max-violations"], 0),
     journal: values["no-journal"] !== true,
     failFast: values["fail-fast"] === true,
+    fastOnly: values["fast-only"] === true,
     all: values.all === true,
     packages: values.package ?? [],
   };

@@ -18,7 +18,7 @@
  * `check.ts` re-exports everything here, so its importers see one module.
  */
 
-import { runGates, type GateSpec } from "../engine/gate.ts";
+import { runGates, FAST, type GateSpec } from "../engine/gate.ts";
 import { appendRun } from "../engine/journal.ts";
 import type { GateResult } from "../engine/models.ts";
 import {
@@ -50,6 +50,16 @@ export interface ReportFlags {
   /** False for `--no-journal`. */
   readonly journal: boolean;
   readonly failFast: boolean;
+  /**
+   * `--fast-only`: run the FAST tier and nothing else.
+   *
+   * NOT a variant of `--all`, and not a skip. The slow gates are removed from
+   * the pipeline before it starts, so they are ABSENT from `gates[]` rather
+   * than present with `skipped: true` — a consumer counting the gate list, or
+   * looking for `test-coverage` in it, sees a shorter pipeline and never a
+   * verdict about the tier that did not run. See {@link executePipeline}.
+   */
+  readonly fastOnly: boolean;
   /** `--all`: run the SLOW gates even after a fast gate failed. */
   readonly all: boolean;
   /**
@@ -95,6 +105,14 @@ export interface PipelineRun {
  * the MEMBER's directory: the member applies (and records) its own baseline
  * file at its own root, exactly as if `kragg` had been invoked inside it.
  *
+ * `--fast-only` (TOR-1415) is applied HERE and not in `runGates`, because the
+ * two answer different questions. `runGates` decides which gates of a pipeline
+ * to skip, and a skip is a reported state: `[SKIP] test-coverage — ...` still
+ * accounts for the gate. `--fast-only` says the slow tier is not part of this
+ * pipeline at all, so it is filtered out before the run and never reaches a
+ * result, a report, the journal or the exit code. One place, so `check`,
+ * `security` and every `--package` member cannot disagree about it.
+ *
  * The journal write is last and cannot change the outcome: telemetry must
  * never fail a check (see `journal.ts`), so a read-only checkout degrades
  * `kragg status` and nothing else. It is written under `flags.root`, which
@@ -104,7 +122,7 @@ export interface PipelineRun {
 export async function executePipeline(run: PipelineRun): Promise<CheckReport> {
   const { flags } = run;
   const startedAt = utcNow();
-  const raw = await runGates(run.specs, {
+  const raw = await runGates(flags.fastOnly ? fastTier(run.specs) : run.specs, {
     failFast: flags.failFast,
     forceSlow: flags.all,
   });
@@ -123,6 +141,34 @@ export async function executePipeline(run: PipelineRun): Promise<CheckReport> {
     appendRun(flags.root, toPayload(report), { gitDirty: await gitDirty(flags.root) });
   }
   return report;
+}
+
+/**
+ * The FAST gates of a pipeline, having SAID which ones it dropped.
+ *
+ * The wire format is frozen — no key may be added to the payload — so the
+ * report cannot carry a "this was a fast-only run" field, and a silently
+ * shorter `gates[]` reads exactly like a normal run to anyone not counting.
+ * The notice is therefore stderr, in both formats, alongside the other facts
+ * about how a run differs from a plain one (the `--changed`-promoted-to-full
+ * reason, the unchecked workspace members, the baseline accounting): stdout
+ * stays the report, and under `--format json` stays pure JSON.
+ *
+ * It NAMES the omitted gates rather than saying "the slow tier", because
+ * which gates those are depends on the pipeline (`check` drops three,
+ * `security` drops `audit` alone) and a reader must not have to know the
+ * catalog to know what this run has not looked at.
+ */
+function fastTier(specs: readonly GateSpec[]): readonly GateSpec[] {
+  const omitted = specs.filter((spec) => spec.tier !== FAST).map((spec) => spec.name);
+  if (omitted.length > 0) {
+    process.stderr.write(
+      "kragg: --fast-only: this run assembled the FAST gates only; the slow tier " +
+        `(${omitted.join(", ")}) did not run and is absent from the report, ` +
+        "which says nothing about it.\n",
+    );
+  }
+  return specs.filter((spec) => spec.tier === FAST);
 }
 
 /** Run gates, render, journal, and return the exit code. */

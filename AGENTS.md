@@ -345,8 +345,10 @@ authority; this list must match it.
 | `hook claude` | hook adapter; reads hook JSON on stdin |
 
 `check` and `security` share `--file`, `--format`, `--max-violations`,
-`--no-journal` and `--package`; of the two, only `check` takes `--changed`,
-`--since`, `--fail-fast`, `--all` and `--update-baseline`. The rest:
+`--no-journal`, `--fast-only` (the FAST tier alone; the slow gates are absent
+from the report, not skipped in it) and `--package`; of the two, only `check`
+takes `--changed`, `--since`, `--fail-fast`, `--all` and `--update-baseline`.
+The rest:
 `fix --file`; `status --format --last`; `map`/`spec --path --symbol --changed
 --limit --all --format`, plus `map --write`; `brief --since --path --limit
 --all`; `criticality --write --path`; `mutation --path --since --all
@@ -367,8 +369,10 @@ list of what it accepts — `test/cli.test.ts` walks the help text against the
 per-command table. Exit 2, never a silent no-op, for: a flag the command does
 not accept, a `--format` other than `text`/`json`, a count that is not a
 non-negative integer, a positional the command has no use for, `--file`
-alongside `--changed`/`--since`, and `criticality --write --path` (a scoped
-`criticality.json` would read downstream as "everything else is uncritical").
+alongside `--changed`/`--since`, `--fast-only` alongside `--all` (a tier
+contradiction) or `--update-baseline` (which records a full run), and
+`criticality --write --path` (a scoped `criticality.json` would read
+downstream as "everything else is uncritical").
 
 ## Conventions
 

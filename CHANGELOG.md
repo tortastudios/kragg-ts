@@ -28,6 +28,34 @@ a previously green run red — see [Gate additions](#gate-additions) below.
 
 ### Added
 
+- **TOR-1415** — `--fast-only`, on `check` and `security` both: assemble and
+  run the FAST (static) tier and nothing else. `--fail-fast` was the closest
+  thing available and it is a different question — it stops at the first
+  failure, so once every fast gate passes the slow tier (`test-coverage`,
+  `critical-coverage`, `audit`) runs as usual, and an agent iterating on lint,
+  type and metric findings paid for the suite and the advisory database on
+  every pass. `security` takes the flag too because it is not already
+  fast-only: its pipeline ends in `audit`, which talks to the network.
+
+  The slow gates are removed from the pipeline before it starts, so they are
+  **absent** from `gates[]` rather than present with `skipped: true` — a skip
+  is a reported state, and a consumer looking for `test-coverage` in the list
+  would find a gate that ran and stepped aside. The exit code is the fast
+  gates' verdict alone. **No wire key was added, renamed or retyped**: the
+  payload is the ordinary one over a shorter gate list, and `mode` still means
+  the file scope (`full`/`changed`/`file`), never the tier. Because a shorter
+  list is not self-describing, the run names the gates it did not assemble on
+  stderr — in both formats, so `--format json` stays one parseable document on
+  stdout — the way a `--changed` promoted to a full run states its reason.
+
+  The flag selects a TIER, so it composes with the flags that select FILES
+  (`--file`, `--changed`, `--since`) and with `--fail-fast`, which still halts
+  at the first failure. Two combinations are usage errors (exit 2) instead of
+  one silently overriding the other: `--all`, whose entire meaning is "run the
+  slow tier anyway", and `--update-baseline`, which records a full run and
+  would otherwise replace the baseline file without `critical-coverage`'s
+  accepted entries. Divergence row 40 in `docs/spec-conformance.md`; Python has
+  no way to ask for a tier.
 - **TOR-1378** — releases are gated on end-to-end regressions and on truthful
   self-check evidence, both against the BUILT `dist/cli.js`. 1,090 passing
   unit tests did not catch false-green behaviour between the engine, the

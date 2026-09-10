@@ -49,6 +49,16 @@ export function notACount(name: string, raw: string | undefined): string | null 
  * asking which one they meant costs one re-run and no trust.
  */
 export function conflict(values: Values): string | null {
+  return scopeConflict(values) ?? allConflict(values);
+}
+
+/**
+ * Two flags that each decide WHICH FILES a run looks at, or `null`.
+ *
+ * A run has exactly one file set, and every pair here has a loser that would
+ * be discarded in silence.
+ */
+function scopeConflict(values: Values): string | null {
   const fromGit = values.changed === true || values.since !== undefined;
   if (fromGit && values.file !== undefined) {
     return "--file cannot be combined with --changed or --since; git decides the file set";
@@ -59,9 +69,31 @@ export function conflict(values: Values): string | null {
   if (values.package !== undefined && (fromGit || values.file !== undefined)) {
     return "--package cannot be combined with --file, --changed or --since; a package run checks the whole package";
   }
-  // Same class, one level down: `--all` is the inventories' spelling of
-  // `--limit 0`, so accepting both means silently honouring one.
-  if (values.all === true && values.limit !== undefined) {
+  return null;
+}
+
+/**
+ * `--all` against the flags that already answer the question it answers.
+ *
+ * Not a scope conflict: both pairs here agree about which files to read and
+ * disagree about how much of the run to produce, which is worse to resolve
+ * quietly because the difference is invisible in the output unless someone is
+ * counting gates or entries.
+ */
+function allConflict(values: Values): string | null {
+  if (values.all !== true) {
+    return null;
+  }
+  // A tier contradiction. `--all` means "run the SLOW tier even after a fast
+  // gate failed"; `--fast-only` means "never run it". There is no reading
+  // under which both hold, and honouring either would run a pipeline the
+  // caller did not ask for.
+  if (values["fast-only"] === true) {
+    return "--fast-only cannot be combined with --all; one never runs the slow tier, the other forces it to run";
+  }
+  // One level down: `--all` is the inventories' spelling of `--limit 0`, so
+  // accepting both means silently honouring one.
+  if (values.limit !== undefined) {
     return "--all cannot be combined with --limit; --all IS the full export (--limit 0)";
   }
   return null;
