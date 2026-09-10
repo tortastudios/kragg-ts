@@ -1,0 +1,7 @@
+{
+  "source_paths": ["src"],
+  "test_paths": ["test/**/*.suite.ts"],
+  "secret_scanner": "off",
+  "test_runner": "off",
+  "max_public_symbols": 40
+}

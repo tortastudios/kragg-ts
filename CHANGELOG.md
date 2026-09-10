@@ -20,6 +20,54 @@ a previously green run red — see [Gate additions](#gate-additions) below.
 
 ### Added
 
+- **TOR-1378** — releases are gated on end-to-end regressions and on truthful
+  self-check evidence, both against the BUILT `dist/cli.js`. 1,090 passing
+  unit tests did not catch false-green behaviour between the engine, the
+  adapters, the policy and the CLI, because each of those defects lived at a
+  seam a unit test does not cross — and each was reproduced, at the time, by a
+  fake that disappeared when its issue merged. Two things are new, and one CI
+  job (`release-gate` in `.github/workflows/ci.yml`) runs both:
+  - **`pnpm run regressions`** — `test/regressions.test.ts` over real fixture
+    PROJECTS in `test/fixtures/regressions/`, one per closed defect, driven
+    through the packaged CLI as a child process. A runtime skip must not
+    silence the slow tier and a thrown gate must not destroy the consolidated
+    report (TOR-1358); an unchanged caller's compiler error must survive
+    `--changed` (TOR-1359); a crashed runner must not pass on the coverage
+    report an earlier run left at the published path (TOR-1360); twenty-five
+    critical functions must all be enforced while twenty are printed
+    (TOR-1361); `init` on a CommonJS project whose policy lives in
+    `package.json#kragg` must add no `type`/`engines`/`packageManager` and
+    write no shadowing `kragg.json` (TOR-1362); a wrong-typed policy value
+    must be exit 2 with nothing run (TOR-1363); a critical function the test
+    run never loaded must be `critical-unmeasured`, not a pass (TOR-1364); a
+    configuration-only change set must promote `--changed` to a full run
+    (TOR-1365); an edit confined to `src/coverage/` must invalidate the
+    criticality sidecar (TOR-1366); a named, uninstalled scanner must be
+    `error: true` and exit 3 (TOR-1367); a rerun sweep that discovers no tests
+    must be exit 3 and must never print "no flaky tests" (TOR-1368) — plus an
+    ordinary-success control that exits 0 having demonstrably compiled the
+    project and executed its suite. Every case asserts the process exit
+    status, the payload's own fields and the artifacts on disk
+    (`.kragg/history.jsonl`, `.kragg/criticality.json`, `CRITICALITY.md`,
+    `coverage/lcov.info`); **none records a snapshot**. Each case was
+    validated by reopening its defect in `src/` and confirming the case goes
+    red.
+  - **`pnpm run selfcheck`** — `scripts/selfcheck.ts` runs
+    `check --all --format json` on this repository and refuses the summary
+    line as evidence: it ENUMERATES every gate that did not run, with its
+    reason, on every run, and fails unless each matches a reviewed entry in
+    `scripts/selfcheck/expectations.ts`. An entry pins the gate name AND a
+    substring of the skip reason, so a gate switched off in `kragg.json`
+    cannot inherit the entry written for a missing tool; a gate that could not
+    run always fails; an entry that stops matching is a notice, not a failure,
+    since more ran than expected. One entry today — `detect-secrets` with no
+    scanner installed — and installing gitleaks in CI was considered and
+    deliberately not done. `test/selfCheck.test.ts` tests the evaluation.
+
+  No gate, threshold, exclusion or wire key changed. Fixture suites are named
+  `*.suite.js`/`*.suite.ts` (with each fixture's `test_paths` naming that
+  pattern) so this repository's own `test/**/*.{test,spec}.*` discovery cannot
+  execute a fixture's suite as if it were kragg's own.
 - **TOR-1371** — explicit tsconfig selection, honest solution-style
   reporting, and bounded package-level checks for workspaces. Three layouts
   were mishandled, each reproduced before the change: a project configured by

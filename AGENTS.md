@@ -228,8 +228,9 @@ higher one, and the `boundaries` gate enforces that on this repo.
   - `journal.ts` — `.kragg/history.jsonl`, append-only.
   - `runner.ts` — the only approved external-command wrapper, and the one
     legitimate `node:child_process` import in the repo.
-- `test/` — 58 test files using `node:test`, flat, plus `test/fixtures/`
-  and one non-test helper, `conformanceContract.ts`. `conformance.test.ts`
+- `test/` — 61 test files using `node:test`, flat, plus `test/fixtures/`
+  and three non-test helpers: `conformanceContract.ts`,
+  `regressionHarness.ts` and `regressionReport.ts`. `conformance.test.ts`
   drives the versioned fixtures under `test/fixtures/conformance/` that pin
   the cross-language contract; see `docs/spec-conformance.md`.
   `fixtures/knownDefects.ts` is the known-defect corpus for the metric gates —
@@ -237,6 +238,16 @@ higher one, and the `boundaries` gate enforces that on this repo.
   `knownDefects.test.ts`. It exists so a threshold change cannot stop detecting
   a real defect quietly; update it together with `docs/calibration.md`, never
   by deleting an assertion.
+  `regressions.test.ts` (`pnpm run regressions`) is the END-TO-END regression
+  gate: one real fixture project under `test/fixtures/regressions/` per closed
+  false-green defect, driven through the BUILT `dist/cli.js` — never
+  `src/cli.ts` — and asserting the process exit status, the JSON payload's
+  fields and the files the run left on disk. No case records a snapshot; each
+  asserts the invariant its issue restored. A fixture's own suite is named
+  `*.suite.js` / `*.suite.ts` (with its `kragg.json` naming that pattern), so
+  this repository's own `test/**/*.{test,spec}.*` discovery cannot execute a
+  fixture suite as if it were kragg's own. Add a case when a defect is closed
+  at a seam between modules; do not delete one to make a refactor green.
 - `scripts/` — maintenance tooling, not shipped (`tsconfig.build.json` compiles
   `src` only) but covered by `pnpm run typecheck`. `calibrate.ts` measures the
   metric gates against a list of sample projects; see `docs/calibration.md`.
@@ -247,7 +258,14 @@ higher one, and the `boundaries` gate enforces that on this repo.
   `.github/workflows/external-tools.yml` (advisory, weekly) run exactly these
   commands, so a red row reproduces locally. `compat/manifest.ts` is the one
   definition of "the published entry points" and `test/packaging.test.ts`
-  asserts against it on every run.
+  asserts against it on every run. `selfcheck.ts` + `selfcheck/` is the
+  release gate's second half (`pnpm run selfcheck`): it runs
+  `node dist/cli.js check --all --format json` on this repository and refuses
+  the summary line as evidence — every gate that did not run is enumerated
+  with its reason, and each must match a reviewed entry in
+  `selfcheck/expectations.ts` (gate name AND reason substring, so a gate
+  switched off in `kragg.json` cannot inherit an entry). A gate that could
+  not run always fails. `test/selfCheck.test.ts` tests the evaluation.
 - `docs/architecture.md`: the ideas behind the module layout. Read it first.
 - `docs/dependency-policy.md`: the standing supply-chain policy. Read it
   before touching `package.json`.
@@ -281,6 +299,13 @@ the same commit; `test/packaging.test.ts` fails if the two disagree.
 - Run the CLI from source: `node src/cli.ts --help`
 - Run the built CLI: `node dist/cli.js --help`
 - kragg checks itself: `node dist/cli.js check --all`
+- The release gate (needs a build first; both run in `ci.yml`'s
+  `release-gate` job, and both drive `dist/cli.js`):
+  - `pnpm run regressions` — the end-to-end fixture projects, one per closed
+    false-green defect
+  - `pnpm run selfcheck` — `check --all` on this repository, with every
+    check that did not run enumerated and matched against the reviewed
+    allowlist
 - Compatibility (needs a build first; each lane prints what it ran):
   - `node scripts/compat.ts packaged --node <path/to/node>` — pack, install
     the tarball, run the CLI and a typed consumer on THAT Node

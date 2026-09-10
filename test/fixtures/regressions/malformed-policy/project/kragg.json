@@ -1,0 +1,10 @@
+{
+  "source_paths": ["src"],
+  "test_paths": ["test"],
+  "secret_scanner": "off",
+  "test_runner": "off",
+  "max_file_lines": "120",
+  "forbidden_calls": {
+    "node:child_process": "spawn through the approved runner"
+  }
+}

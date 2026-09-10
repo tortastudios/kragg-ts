@@ -750,6 +750,8 @@ pnpm run typecheck
 pnpm run build
 pnpm run test
 pnpm run conformance             # the cross-language contract fixtures
+pnpm run regressions             # the end-to-end fixture projects (needs a build)
+pnpm run selfcheck               # kragg checks itself, and lists what did not run
 node dist/cli.js check --all     # kragg checks itself
 
 # measure the metric gates against real projects (see docs/calibration.md)
@@ -791,6 +793,37 @@ contract — this repository's `dist/cli.js` run against the Python sibling's ow
 fixtures at a pinned commit — is in
 [docs/spec-conformance.md](docs/spec-conformance.md#running-the-two-suites) and
 in CI.
+
+### The release gate
+
+`ci.yml`'s **`release-gate`** job asks two questions the unit suite cannot,
+and it asks them of `dist/cli.js` — the built artifact, never `src/cli.ts`.
+
+`pnpm run regressions` drives **one real fixture project per closed
+false-green defect** (`test/fixtures/regressions/`, `test/regressions.test.ts`)
+through the packaged CLI: a project whose linter is missing must not silence
+the slow tier; an unchanged caller's type error must survive `--changed`; a
+crashed runner must not pass on last week's coverage report; twenty-five
+critical functions must all be enforced when twenty are printed; a malformed
+policy value must be rejected rather than defaulted; and so on. Each case
+asserts the process exit status, the fields of the JSON payload and the files
+the run left in `.kragg/` and `coverage/`. **No case records a snapshot**: a
+golden proves output has not changed since it was captured, which is not the
+claim that a defect is still fixed, and its usual failure mode is to be
+re-recorded.
+
+`pnpm run selfcheck` runs `check --all` on this repository and **refuses the
+summary line as evidence**. `17 passed, 0 failed, 1 skipped` and `12 passed, 0
+failed, 6 skipped` both read as green, so the job prints every check that did
+not run, with its reason, on every run — and fails unless each one matches a
+reviewed entry in `scripts/selfcheck/expectations.ts`. An entry pins the gate
+name *and* a substring of the skip reason, so `detect-secrets` skipping
+because no scanner is installed is accepted while the same gate skipping
+because someone set `secret_scanner: "off"` is not. A gate that could not run
+(`error: true`) always fails the build. Today there is exactly one entry: a
+stock CI runner has no gitleaks and kragg bundles no scanner. Installing one
+in CI was considered and deliberately not done — it would trade a visible,
+enumerated skip for a third-party binary fetched on every run.
 
 kragg-ts passes its own `check`. That is the point: a guardrails framework
 whose own gates are red has no claim on anyone else's code.

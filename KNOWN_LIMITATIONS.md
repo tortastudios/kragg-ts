@@ -655,6 +655,33 @@ kragg-Python as of this writing.
 
 ---
 
+## What the end-to-end regression gate does and does not reach
+
+`test/regressions.test.ts` (`pnpm run regressions`, and the `release-gate` job
+in `.github/workflows/ci.yml`) pins one closed false-green defect per real
+fixture project, driven through the built `dist/cli.js`. Three limits are
+worth stating rather than discovering.
+
+- **The suite runs where `pnpm test` runs: ubuntu in CI, and whatever a
+  maintainer develops on.** It is not part of the Windows matrix.
+  `installToolchain` gives a fixture its own compiler with a `node_modules/
+  .bin/tsc` symlink, which needs Developer Mode or an elevated shell on
+  Windows; the harness reports that as an error rather than continuing
+  without a compiler, because three cases would otherwise pass for the wrong
+  reason. `.github/workflows/compat.yml` is where Windows behaviour is
+  asserted.
+- **A gate whose `run` THROWS cannot be provoked from a fixture project.**
+  Every file read, glob compile and tool probe under `src/gates/` is guarded,
+  which is the point of them, so the only way to reach `runGates`' catch is to
+  inject a fault into the source. The regression case pins the observable
+  consequence — a gate that could not run leaves the consolidated report, the
+  journal and the rest of the pipeline intact — and `test/engine.test.ts`
+  covers the throw itself at the level where it can be provoked.
+- **A case proves its own defect and nothing more.** These are regressions,
+  not a specification: a new false-green seam between modules is invisible to
+  this suite until someone adds the project that shows it. The suite's value
+  is that a defect closed once stays closed, not that no defect remains.
+
 ## What none of this covers
 
 kragg checks the properties a machine can check cheaply and deterministically.
