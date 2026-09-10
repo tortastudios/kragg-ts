@@ -582,6 +582,11 @@ describe("naming guard", () => {
     assert.equal(shadowConflict("demo-app"), null);
   });
 
+  it("flags kragg's own published names, both the tool and the npm package", () => {
+    assert.notEqual(shadowConflict("kragg"), null);
+    assert.notEqual(shadowConflict("kragg-ts"), null);
+  });
+
   it("does not flag a scoped name, which can never shadow", () => {
     assert.equal(shadowConflict("@acme/fs"), null);
   });

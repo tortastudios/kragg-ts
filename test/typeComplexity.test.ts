@@ -248,19 +248,27 @@ describe("checkTypeComplexity", () => {
     assert.deepEqual(violations, []);
   });
 
-  it("honours `// kragg: ignore` on any line the annotation spans", () => {
+  it("honours `// kragg: ignore -- <reason>` on any line the annotation spans", () => {
     const violations = check({
       "src/a.ts": [
         "export function f(",
-        "  a: Record<", // kragg: ignore is on the next line, inside the span
+        "  a: Record<", // the marker is on the next line, inside the span
         "    string,",
-        "    Record<string, string[]> // kragg: ignore",
+        "    Record<string, string[]> // kragg: ignore -- mirrors the wire format; a named type would lie",
         "  >,",
         "): void {}",
         "",
       ].join("\n"),
     });
     assert.deepEqual(violations, []);
+  });
+
+  it("does not honour a bare marker, and names it in the finding", () => {
+    const violations = check({
+      "src/a.ts": ["export function f(a: Record<string, Record<string, string[]>>): void {} // kragg: ignore", ""].join("\n"),
+    });
+    assert.equal(violations.length, 1);
+    assert.match(violations[0]?.message ?? "", /\(the `\/\/ kragg: ignore` on line 1 names no reason and is not honoured; write `\/\/ kragg: ignore -- <why this site is safe>`\)$/u);
   });
 
   it("measures the type, not the formatter", () => {

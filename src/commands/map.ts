@@ -59,6 +59,7 @@ import { criticalityCache } from "../catalog/criticalityCache.ts";
 import { EXIT_ENVIRONMENT, EXIT_OK, EXIT_USAGE } from "../engine/report.ts";
 import { readJson } from "../gates/criticality.ts";
 import { loadPolicy, PolicyError, type KraggPolicy } from "../policy/policy.ts";
+import { testScanDirectories } from "../util/testPaths.ts";
 import {
   applyBudget,
   changedSet,
@@ -171,7 +172,7 @@ async function mapReport(
     // so both contribute call-graph nodes and either can change the answer.
     // NOT the caller's `--path`: a display filter must never narrow what the
     // gates are told is critical.
-    scanPaths: [...policy.sourcePaths, ...policy.testPaths],
+    scanPaths: [...policy.sourcePaths, ...testScanDirectories(policy.testPaths)],
     analysis,
   }).ensure();
   const changed = view.changed ? await changedSet(root, policy.sourcePaths) : null;

@@ -75,6 +75,7 @@ import {
   writeStamp,
   type FunctionProfile,
 } from "../src/gates/criticality.ts";
+import { registerNode } from "../src/gates/criticality/register.ts";
 import { newScope, qualify, recordFunction } from "../src/gates/criticality/scope.ts";
 
 const temporaryRoots: string[] = [];
@@ -965,5 +966,40 @@ describe("kragg criticality --write: artifacts that could not be written", () =>
     } finally {
       chmodSync(stampPath(root), 0o600);
     }
+  });
+});
+
+/**
+ * Pass 1 on its own. The names it registers are the names `criticality.json`
+ * carries and the names `testDepth/references.ts` binds test code to, so the
+ * spelling of each declaration kind is a contract.
+ */
+describe("registerNode", () => {
+  it("names functions, arrows, members, namespaces and nothing nested", () => {
+    const source = ts.createSourceFile(
+      "src/a.ts",
+      [
+        "export function f() {}",
+        "export const g = () => {};",
+        "export class C { constructor() {} m() {} }",
+        "export namespace N { export function h() {} }",
+        "function outer() { const inner = () => {}; inner(); }",
+      ].join("\n"),
+      ts.ScriptTarget.Latest,
+      true,
+      ts.ScriptKind.TS,
+    );
+    const scope = newScope(ts);
+    ts.forEachChild(source, (node) => {
+      registerNode(scope, node, "src/a", []);
+    });
+    assert.deepEqual([...scope.names].sort(), [
+      "src/a#C.constructor",
+      "src/a#C.m",
+      "src/a#N.h",
+      "src/a#f",
+      "src/a#g",
+      "src/a#outer",
+    ]);
   });
 });

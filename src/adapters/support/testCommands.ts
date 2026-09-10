@@ -13,6 +13,7 @@ import { dirname, isAbsolute, join, resolve } from "node:path";
 
 import { missingToolMessage, resolveBin } from "../../environment/project.ts";
 import type { ProjectEnvironment } from "../../environment/project.ts";
+import { testRunnerPatterns } from "../../util/testPaths.ts";
 import type { TestRunnerName } from "./detect.ts";
 import { crashed, missingTool } from "./outcome.ts";
 import type { Unavailable } from "./outcome.ts";
@@ -214,52 +215,86 @@ export function resolveRunner(env: ProjectEnvironment, runner: TestRunnerName): 
 }
 
 /**
+ * Locate the program a `test_command` names — under the SAME rules.
+ *
+ * `test_command` is an escape hatch for the invocation, never for tool
+ * resolution: `"node"` and `"bun"` are runtimes and resolve exactly as they do
+ * above, and anything else must be an entry in the project's own
+ * `node_modules/.bin`. There is deliberately no `PATH` lookup and no global
+ * fallback — a config key that could name any executable on the machine would
+ * turn `kragg check` into "run whatever this repository says", which is a
+ * different and much worse tool. A PATH-LIKE value is refused for the same
+ * reason rather than being resolved relative to the root.
+ */
+export function resolveProgram(env: ProjectEnvironment, program: string): ResolvedRunner {
+  if (program === "node") {
+    return { ok: true, bin: process.execPath };
+  }
+  if (program === "bun") {
+    return { ok: true, bin: "bun" };
+  }
+  if (program.includes("/") || program.includes("\\")) {
+    return missingTool(
+      `test_command must start with a tool NAME, not the path ${JSON.stringify(program)}. ` +
+        "kragg resolves it from this project's node_modules/.bin (or runs `node` / `bun` " +
+        "as runtimes) and never from PATH, so that a run cannot depend on what happens to " +
+        "be installed on the machine.",
+    );
+  }
+  const bin = resolveBin(env, program);
+  return bin === null
+    ? missingTool(missingToolMessage(env, program, program))
+    : { ok: true, bin };
+}
+
+/**
  * The argv for one run. Always an array; never a shell string.
  *
- * `testPaths` is the policy's `test_paths` verbatim — the DIRECTORIES, not
- * globs. Turning them into something a runner can consume is this module's
- * job and nobody else's: every caller that built the selection itself was one
- * edit away from handing `node --test` a bare directory, which is the one
- * argument shape that silently runs nothing (see `testFileGlobs`).
+ * `prefix` is the resolved program followed by whatever arguments the project
+ * asked for through `test_command` — the loader, the setup file, the config —
+ * and is just `[bin]` when the runner was inferred. kragg then adds the flags
+ * it must control (the reporters it parses, the coverage artifacts it reads)
+ * and, for `node --test`, the file patterns from `test_paths`.
+ *
+ * THE RUN TOKEN IS kragg's TO ADD, and a `test_command` that repeats it is
+ * accepted rather than duplicated: `["node", "--import", "tsx", "--test"]` is
+ * the natural thing to write — it is the project's own script minus the files
+ * — and `vitest run run` would be read by vitest as a filename filter that
+ * matches nothing, i.e. a silent zero-test run. Only an exact repeat is
+ * dropped, and for the subcommand runners only in first position, where a
+ * subcommand is the only thing it can be.
  */
 export function buildCommand(
-  bin: string,
+  prefix: readonly string[],
   runner: TestRunnerName,
   layout: Artifacts,
   withCoverage: boolean,
   testPaths: readonly string[],
 ): readonly string[] {
+  const bin = prefix[0] ?? "";
+  const args = prefix.slice(1);
   if (runner === "vitest") {
-    return vitestCommand(bin, layout, withCoverage);
+    return vitestCommand(bin, withoutSubcommand(args, ["run", "--run"]), layout, withCoverage);
   }
   if (runner === "node") {
-    return nodeCommand(bin, layout, withCoverage, testFileGlobs(testPaths));
+    return nodeCommand(
+      bin,
+      args.filter((argument) => argument !== "--test"),
+      layout,
+      withCoverage,
+      testRunnerPatterns(testPaths),
+    );
   }
-  return bunCommand(bin, layout, withCoverage);
+  return bunCommand(bin, withoutSubcommand(args, ["test"]), layout, withCoverage);
 }
 
-/**
- * `test_paths` -> globs `node --test` can actually consume.
- *
- * A BARE DIRECTORY DOES NOT WORK, and it fails in the worst available way.
- * `node --test test` treats the argument as a module specifier and dies with
- * `Cannot find module .../test` before running anything, which the TAP reader
- * then parses as one failed test named after the directory. The caller sees a
- * complete report saying "1 test, 1 failed" — a plausible number, attached to
- * a suite that never ran. Node's runner does take globs, so each configured
- * directory becomes one.
- *
- * Brace expansion only, deliberately: `{a,b}` works on every Node this package
- * supports, while extglob (`@(a|b)`) is not guaranteed to. A glob that matches
- * nothing costs nothing here — the runner reports zero tests for it, and a
- * zero-test run is evidence of nothing, which the callers check for.
- *
- * vitest and bun ignore this list entirely and discover their own files.
- */
-const TEST_FILE_GLOB = "**/*.{test,spec}.{ts,tsx,mts,cts,js,jsx,mjs,cjs}";
-
-function testFileGlobs(testPaths: readonly string[]): readonly string[] {
-  return testPaths.map((path) => `${path.replace(/\/+$/u, "")}/${TEST_FILE_GLOB}`);
+/** Drop a leading subcommand kragg supplies itself; keep everything else. */
+function withoutSubcommand(
+  args: readonly string[],
+  tokens: readonly string[],
+): readonly string[] {
+  const first = args[0];
+  return first !== undefined && tokens.includes(first) ? args.slice(1) : args;
 }
 
 /**
@@ -283,10 +318,16 @@ function testFileGlobs(testPaths: readonly string[]): readonly string[] {
  * test — so delegating the threshold would destroy the distinction between
  * "tests fail" and "coverage slipped". kragg computes the percentage itself.
  */
-function vitestCommand(bin: string, layout: Artifacts, withCoverage: boolean): readonly string[] {
+function vitestCommand(
+  bin: string,
+  args: readonly string[],
+  layout: Artifacts,
+  withCoverage: boolean,
+): readonly string[] {
   const command = [
     bin,
     "run",
+    ...args,
     "--reporter=json",
     `--outputFile=${layout.reportFile}`,
     "--includeTaskLocation",
@@ -315,11 +356,21 @@ function vitestCommand(bin: string, layout: Artifacts, withCoverage: boolean): r
  */
 function nodeCommand(
   bin: string,
+  args: readonly string[],
   layout: Artifacts,
   withCoverage: boolean,
   globs: readonly string[],
 ): readonly string[] {
-  const command = [bin, "--test", "--test-reporter=tap", "--test-reporter-destination=stdout"];
+  // The project's own arguments come FIRST: `--import` registers a loader for
+  // everything after it, and Node applies `--test`'s discovery to modules that
+  // loader has to be able to read.
+  const command = [
+    bin,
+    ...args,
+    "--test",
+    "--test-reporter=tap",
+    "--test-reporter-destination=stdout",
+  ];
   if (withCoverage) {
     command.push(
       "--experimental-test-coverage",
@@ -339,8 +390,13 @@ function nodeCommand(
  * (`docs/dependency-policy.md`). The console output is scraped for detail in
  * `bunTestReport.ts` and the exit code decides pass/fail.
  */
-function bunCommand(bin: string, layout: Artifacts, withCoverage: boolean): readonly string[] {
-  const command = [bin, "test"];
+function bunCommand(
+  bin: string,
+  args: readonly string[],
+  layout: Artifacts,
+  withCoverage: boolean,
+): readonly string[] {
+  const command = [bin, "test", ...args];
   if (withCoverage) {
     command.push("--coverage", "--coverage-reporter=lcov", `--coverage-dir=${layout.coverageDir}`);
   }

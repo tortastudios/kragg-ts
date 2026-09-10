@@ -53,6 +53,18 @@
       "doc": "docs/spec-conformance.md#11-intentional-divergences"
     },
     {
+      "id": "SPEC-10.29",
+      "summary": "The hook checks what the equivalent `kragg check` invocation checks, resolved by `src/commands/scope.ts`: a Stop is the whole project (every `source_paths` entry), a post-edit is `check --file`, and a tool that edited no single file is `check --changed`. Python's `_stop` passes `source_paths[0]`. The stdout shapes below are unaffected, which is why this golden did not move.",
+      "spec": "crag spec/SPEC.md section 10, row 29",
+      "doc": "docs/spec-conformance.md#11-intentional-divergences"
+    },
+    {
+      "id": "SPEC-10.30",
+      "summary": "Hook internal failures still fail OPEN (exit 0, nothing blocked, nothing added to stdout) but are recorded: a stderr line and an entry in `.kragg/hook-errors.jsonl`, reported by the next SessionStart. Python leaves no trace. The `session-start` case's context is unchanged here because this fixture's cases record no failures.",
+      "spec": "crag spec/SPEC.md section 10, row 30",
+      "doc": "docs/spec-conformance.md#11-intentional-divergences"
+    },
+    {
       "id": "SPEC-11.3",
       "summary": "RECORDED DRIFT, not divergence: kragg-ts caps hook stdout at 9000 characters with an in-band marker because the harness spills longer output to a file the model never sees. Python does not truncate, so a very large failure report silently loses its blocking message. Do not remove the cap to match Python.",
       "spec": "crag spec/SPEC.md sections 7 and 11, item 3",

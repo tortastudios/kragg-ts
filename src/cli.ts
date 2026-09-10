@@ -119,8 +119,12 @@ const OPTIONS = {
 type FlagTable = Readonly<Record<string, readonly string[]>>;
 
 /** Which flags each command accepts. Anything else is a usage error. */
+// ONE LINE PER COMMAND, however long: `test/cli.test.ts` reads this table as
+// text to hold it in lockstep with the `--help` sections in `cli/usage.ts`,
+// and a wrapped entry (or a comment between entries) is an unparsed line, not
+// a silently smaller flag set.
 const ALLOWED: FlagTable = {
-  check: ["file", "format", "max-violations", "no-journal", "changed", "since", "fail-fast", "all", "package"],
+  check: ["file", "format", "max-violations", "no-journal", "changed", "since", "fail-fast", "all", "update-baseline", "package"],
   security: ["file", "format", "max-violations", "no-journal", "package"],
   fix: ["file"],
   status: ["format", "last"],
@@ -257,6 +261,7 @@ function gateCommand(
         ...reportFlags(values, root),
         changed: values.changed === true,
         since: values.since ?? null,
+        updateBaseline: values["update-baseline"] === true,
       });
     case "security":
       return runSecurity(reportFlags(values, root));

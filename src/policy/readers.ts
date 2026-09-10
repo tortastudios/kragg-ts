@@ -25,7 +25,8 @@
 
 import { readFileSync } from "node:fs";
 
-import type { ForbiddenCall } from "./policy.ts";
+import { nearestName } from "./names.ts";
+import type { CriticalDeclaration, CriticalDeclarations, ForbiddenCall } from "./policy.ts";
 
 /** A parsed JSON object. Values are `unknown` until narrowed. */
 export type Table = Readonly<Record<string, unknown>>;
@@ -140,6 +141,22 @@ export function getString(source: Source, key: string, fallback: string): string
     return fallback;
   }
   return typeof value === "string" ? value : reject(source, key, "a string", value);
+}
+
+/**
+ * A path setting: a string, and a non-empty one.
+ *
+ * `""` resolves to the root directory itself, so `tsconfig: ""` would send
+ * every type-aware surface to open a directory and report a confusing
+ * failure about it. Rejected by name instead, like every other malformed
+ * value; the schema mirrors the `minLength`.
+ */
+export function getPath(source: Source, key: string, fallback: string): string {
+  const value = getString(source, key, fallback);
+  if (value === "") {
+    throw new PolicyError(`${source.label}${key} must be a non-empty path (got "")`);
+  }
+  return value;
 }
 
 /** The accepted interval of an integer setting; `max` is unbounded when absent. */
@@ -257,6 +274,45 @@ export function getStringList(
 }
 
 /**
+ * Read an ARGV ARRAY: one command-line element per item, never a shell string.
+ *
+ * Deliberately NOT {@link getStringList}, which accepts a bare string as a
+ * one-element list. That convenience is right for a list of paths and
+ * catastrophic here: `test_command: "node --import tsx --test"` would become
+ * the single program name `"node --import tsx --test"`, and kragg spawns with
+ * `shell: false` (`engine/runner.ts`), so nothing would ever split it. A
+ * string is rejected by name, with the argv form in the message, because the
+ * alternative — splitting it ourselves — would be reimplementing a shell
+ * lexer, quoting rules and all, in the one place this codebase has promised
+ * never to have one. `[]` is the honoured empty: no explicit command.
+ */
+export function getArgv(
+  source: Source,
+  key: string,
+  fallback: readonly string[],
+): readonly string[] {
+  const value = take(source, key);
+  if (value === undefined) {
+    return fallback;
+  }
+  const expected =
+    "a list of strings, one command-line argument per element " +
+    '(e.g. ["node", "--import", "tsx", "--test"]) — never a single shell ' +
+    "string, because kragg spawns without a shell and would look for a " +
+    "program with that whole name";
+  if (!Array.isArray(value)) {
+    return reject(source, key, expected, value);
+  }
+  const argv = value.map((item, index): string =>
+    typeof item === "string" ? item : reject(source, `${key}[${index}]`, "a string", item),
+  );
+  if (argv.length > 0 && argv[0]?.trim() === "") {
+    return reject(source, `${key}[0]`, "the program to run, not an empty string", argv[0]);
+  }
+  return argv;
+}
+
+/**
  * Read `[entry, hint]` pairs from an object, or a bare list of entries.
  *
  * FAIL CLOSED, and this is the single most important behaviour in the file.
@@ -308,11 +364,69 @@ export function getStringPairs(
   return reject(source, key, "an object of banned call to fix hint, or a list of strings", value);
 }
 
-function sortPairs(pairs: readonly ForbiddenCall[]): readonly ForbiddenCall[] {
-  return [...pairs].sort((left, right) => compare(left, right));
+/**
+ * Read `{ "<module>#<name>": "<why it is critical>" }` — reviewed critical
+ * function declarations.
+ *
+ * AN OBJECT, AND ONLY AN OBJECT. `getStringPairs` accepts a bare list because
+ * a `forbidden_calls` entry means something without a hint: the ban stands and
+ * the hint is a courtesy. A declaration without a reason means nothing anybody
+ * can review — the whole point of the setting is that a HUMAN decided this
+ * low-fan-in function is high-consequence, and the reason is that decision.
+ * So a list is rejected with the shape that carries one, and an empty or
+ * non-string reason is rejected by name rather than repaired to `""`.
+ *
+ * THE NAME IS CHECKED FOR SHAPE, not for existence. `criticality.ts` names
+ * every node `"<module>#<qualified.name>"`, so a name with no `#`, or with an
+ * empty half, can never match anything and is a typo worth catching at load
+ * time. Whether the function EXISTS is a question about the analysed program,
+ * not about the config, and `gates/criticality/declared.ts` answers it — a
+ * declaration that matches no function is an error there, so a rename cannot
+ * silently drop the protection.
+ *
+ * Sorted by name, then reason, exactly like {@link getStringPairs}, so
+ * `kragg policy show` is stable regardless of key order in the file.
+ */
+export function getCriticalDeclarations(
+  source: Source,
+  key: string,
+  fallback: CriticalDeclarations,
+): CriticalDeclarations {
+  const value = take(source, key);
+  if (value === undefined) {
+    return fallback;
+  }
+  if (!isTable(value)) {
+    return reject(source, key, "an object of \"module#function\" to the reason it is critical", value);
+  }
+  const declarations = Object.entries(value).map(([name, reason]): CriticalDeclaration => {
+    const at = `${key}[${JSON.stringify(name)}]`;
+    if (typeof reason !== "string" || reason.trim() === "") {
+      return reject(source, at, "a non-empty string saying why the function is critical", reason);
+    }
+    if (!isQualifiedName(name)) {
+      return reject(source, at, "named \"<module>#<function>\", e.g. \"src/auth/login#verifyPassword\"", name);
+    }
+    return [name, reason];
+  });
+  return [...declarations].sort((left, right) => comparePair(left, right));
 }
 
-function compare(left: ForbiddenCall, right: ForbiddenCall): number {
+/** `"<module>#<name>"` with both halves non-empty, and exactly one `#` split. */
+function isQualifiedName(name: string): boolean {
+  const index = name.indexOf("#");
+  return index > 0 && index < name.length - 1;
+}
+
+function sortPairs(pairs: readonly ForbiddenCall[]): readonly ForbiddenCall[] {
+  return [...pairs].sort((left, right) => comparePair(left, right));
+}
+
+/** Order two `[entry, text]` pairs by entry, then by text; code-unit order. */
+function comparePair(
+  left: readonly [string, string],
+  right: readonly [string, string],
+): number {
   const [leftEntry, leftHint] = left;
   const [rightEntry, rightHint] = right;
   if (leftEntry !== rightEntry) {
@@ -338,49 +452,11 @@ export function rejectUnknownKeys(source: Source, extra: readonly string[]): voi
   const problems = Object.keys(source.table)
     .filter((key) => !source.consumed.has(key) && !extra.includes(key))
     .map((key) => {
-      const nearest = nearestKey(key, known);
+      const nearest = nearestName(key, known);
       const hint = nearest === undefined ? "" : ` (did you mean ${nearest}?)`;
       return `${source.label}${key} is not a kragg setting${hint}`;
     });
   if (problems.length > 0) {
     throw new PolicyError(problems.join("; "));
   }
-}
-
-/** The closest known key, or `undefined` when nothing is close enough to be obvious. */
-function nearestKey(key: string, known: readonly string[]): string | undefined {
-  const flat = (name: string): string => name.toLowerCase().replaceAll(/[-_]/gu, "");
-  const sameLetters = known.find((candidate) => flat(candidate) === flat(key));
-  if (sameLetters !== undefined) {
-    return sameLetters;
-  }
-  let best: string | undefined;
-  let bestDistance = Number.POSITIVE_INFINITY;
-  for (const candidate of known) {
-    const distance = editDistance(key, candidate);
-    if (distance < bestDistance) {
-      best = candidate;
-      bestDistance = distance;
-    }
-  }
-  return bestDistance <= 3 && bestDistance * 2 < key.length ? best : undefined;
-}
-
-/** Levenshtein distance; the inputs are short config keys, so O(n·m) is fine. */
-function editDistance(left: string, right: string): number {
-  let row = Array.from({ length: right.length + 1 }, (_, index) => index);
-  for (const [i, char] of [...left].entries()) {
-    row = nextRow(row, i + 1, char, right);
-  }
-  return row[right.length] ?? 0;
-}
-
-/** One row of the Levenshtein table: the distances after consuming `char`. */
-function nextRow(row: readonly number[], first: number, char: string, right: string): number[] {
-  const next = [first];
-  for (const [j, other] of [...right].entries()) {
-    const substitution = (row[j] ?? 0) + (char === other ? 0 : 1);
-    next.push(Math.min((row[j + 1] ?? 0) + 1, (next[j] ?? 0) + 1, substitution));
-  }
-  return next;
 }

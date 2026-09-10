@@ -44,12 +44,21 @@
  * for `it.each`, so every chained modifier (`test.prop([...]).only`) is seen
  * and nothing about test detection is reimplemented here.
  *
- * Attribution to a function is by NAME occurrence in the property test's text,
- * exactly as `spec.py` does it (`_simple_name(fn.qualname) in corpus`). It is
- * a substring signal, not a call graph: it over-credits a function whose name
- * appears in a property test that does not call it. That direction is
- * deliberate — this section is informational, it fails nothing, and a false
- * "covered" is quieter than a false "you have no property tests".
+ * ── WHAT THE SIGNAL PROVES, AND WHAT IT DOES NOT ───────────────────────────
+ * Recognition is syntactic and exact: a `test.prop(...)` callee or an `fc.*`
+ * call inside a test body IS a property-based test, and nothing else is
+ * counted as one. Attribution is not: a function is credited when its simple
+ * name occurs, on a word boundary, anywhere in the TEXT of such a test —
+ * title, comment, string or code — exactly as `spec.py` does it
+ * (`_simple_name(fn.qualname) in corpus`). So `hasPropertyTest: true` means
+ * "the project has a property-based test whose text names this function".
+ * It does not establish that the property calls the function, that the
+ * arbitraries reach its interesting inputs, that the test is not skipped, or
+ * that the property asserts anything about the result — `critical-coverage`
+ * and `kragg mutation` are the surfaces for those questions. The gates use
+ * checker-bound references for the same question (`testDepth/references.ts`);
+ * this section keeps the ported text signal because it fails nothing, and a
+ * false "covered" here is quieter than a false "you have no property tests".
  */
 
 import { readFileSync } from "node:fs";
@@ -57,13 +66,10 @@ import { join } from "node:path";
 
 import type bundledTs from "typescript";
 
-import {
-  parsedSources,
-  resolveTypeScript,
-  type TypeScriptApi,
-} from "../../analysis/sourceFile.ts";
+import { resolveTypeScript, type TypeScriptApi } from "../../analysis/sourceFile.ts";
 import { criticalFunctions } from "../../gates/testDepth/criticalFunctions.ts";
 import { calleeChain } from "../../gates/testDepth/testCases.ts";
+import { parsedTestSources } from "../../gates/testDepth/testFiles.ts";
 
 /** Package names that mean the project has adopted fast-check. */
 export const FAST_CHECK_PACKAGES: readonly string[] = [
@@ -168,7 +174,7 @@ export function usesFastCheck(
     return true;
   }
   const compiler = api ?? resolveTypeScript(root).api;
-  for (const source of parsedSources(root, testPaths, { api: compiler })) {
+  for (const source of parsedTestSources(root, testPaths, compiler)) {
     for (const specifier of source.imports.values()) {
       if (FAST_CHECK_PACKAGES.some((name) => specifier.startsWith(`${name}#`))) {
         return true;
@@ -193,7 +199,7 @@ function propertyCorpus(
   api: TypeScriptApi,
 ): string {
   const chunks: string[] = [];
-  for (const source of parsedSources(root, testPaths, { api })) {
+  for (const source of parsedTestSources(root, testPaths, api)) {
     chunks.push(...propertyChunks(source.sourceFile, api));
   }
   return chunks.join("\n");

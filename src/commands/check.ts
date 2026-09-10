@@ -19,6 +19,14 @@
  * through {@link assembleCheck}. A root run in a workspace says on stderr
  * which members it did NOT check; it never checks them by accident, and it
  * never omits them in silence.
+ *
+ * THE LEGACY-DEBT BASELINE (TOR-1377) is layered on TOP of that resolution,
+ * never inside it: the gates run exactly as configured against exactly the
+ * scope `scope.ts` resolved, and the accepted findings are subtracted from the
+ * results afterwards. `--update-baseline` re-records the file first, and is
+ * refused for anything but a full run — see {@link updateRefusal}. Both halves
+ * are decided per ROOT, so a member run applies (and records) the baseline its
+ * own effective policy names, at its own root — see `packages.ts`.
  */
 
 import { buildCheckGates } from "../catalog.ts";
@@ -28,21 +36,24 @@ import {
   reportExitCode,
   utcNow,
   EXIT_OK,
+  EXIT_USAGE,
 } from "../engine/report.ts";
 import { resolveProjectEnvironment, type ProjectEnvironment } from "../environment/project.ts";
 import { gitSha } from "../git/changes.ts";
 import { loadPolicy, type KraggPolicy } from "../policy/policy.ts";
 import { runPackages, uncheckedPackagesNotice } from "./packages.ts";
-import { runPipeline, type PipelineRun, type ReportFlags } from "./pipeline.ts";
+import { runPipeline, type PipelineBaseline, type PipelineRun, type ReportFlags } from "./pipeline.ts";
 import { resolveScope, type Scope } from "./scope.ts";
 
-export type { PipelineRun, ReportFlags } from "./pipeline.ts";
+export type { PipelineBaseline, PipelineRun, ReportFlags } from "./pipeline.ts";
 export { executePipeline, runPipeline } from "./pipeline.ts";
 
 /** Everything `check` accepts on top of the shared reporting flags. */
 export interface CheckFlags extends ReportFlags {
   readonly changed: boolean;
   readonly since: string | null;
+  /** `--update-baseline`: record this run's eligible findings as accepted debt. */
+  readonly updateBaseline?: boolean | undefined;
 }
 
 /**
@@ -94,7 +105,8 @@ export async function runCheck(flags: CheckFlags): Promise<number> {
  * one workspace member.
  *
  * Everything that can be a usage error happens here, before any gate runs:
- * an unresolvable selection, a policy `tsconfig` that does not exist. For a
+ * an unresolvable selection, a policy `tsconfig` that does not exist, an
+ * `--update-baseline` the policy or the scope cannot honour. For a
  * package run that is what lets `packages.ts` refuse the whole invocation
  * with exit 2 when any member's configuration is wrong, instead of running
  * the others and reporting the broken one as a finding.
@@ -104,6 +116,10 @@ export async function assembleCheck(
   policy: KraggPolicy,
   env: ProjectEnvironment,
 ): Promise<Assembly> {
+  const refusal = updateRefusal(flags, policy);
+  if (refusal !== null) {
+    return { ok: false, exit: EXIT_USAGE, message: refusal };
+  }
   const resolved = await resolveScope(
     { root: flags.root, targets: flags.targets, changed: flags.changed, since: flags.since },
     policy,
@@ -130,8 +146,61 @@ export async function assembleCheck(
       }),
       targets: scope.targets,
       flags,
+      baseline: plannedBaseline(flags, policy, scope),
     }),
   };
+}
+
+/**
+ * The baseline this run applies, or `null` when the policy names none.
+ *
+ * A `check` concern only: every gate `security` runs is one that can never be
+ * baselined, so `runSecurity` has nothing to apply and passes no baseline.
+ */
+function plannedBaseline(
+  flags: CheckFlags,
+  policy: KraggPolicy,
+  scope: Scope,
+): PipelineBaseline | null {
+  if (policy.baseline === undefined) {
+    return null;
+  }
+  return { path: policy.baseline, scope: scope.paths, update: flags.updateBaseline === true };
+}
+
+/**
+ * Why `--update-baseline` cannot proceed, or `null`.
+ *
+ * A baseline records a FULL run: an incremental one has not re-derived the
+ * findings outside its selection, and replacing the file from it would drop
+ * every accepted entry the run did not happen to see. And with no
+ * `kragg.json#baseline` there is nowhere to write that a later run would
+ * read — writing a file nothing consults would be a silent no-op with a
+ * success code, the class of bug the CLI refuses everywhere else.
+ *
+ * Read off the FLAGS, not off the resolved scope: `scope.ts` may promote a
+ * `--changed` run to `full` because a config file moved, and that promotion
+ * must not turn a refused `--update-baseline` into an accepted one. What the
+ * caller asked for is what is judged here.
+ *
+ * Judged PER ROOT, inside `assembleCheck`, so a `--package` run is refused for
+ * the member whose effective policy names no baseline — before any gate runs
+ * anywhere — instead of half the members recording and the rest erroring.
+ */
+function updateRefusal(flags: CheckFlags, policy: KraggPolicy): string | null {
+  if (flags.updateBaseline !== true) {
+    return null;
+  }
+  if (flags.changed || flags.since !== null || flags.targets.length > 0) {
+    return "--update-baseline records a full run; it cannot be combined with --file, --changed or --since";
+  }
+  if (policy.baseline === undefined) {
+    return (
+      'kragg.json#baseline names no file; set it (for example ".kragg/baseline.json") ' +
+      "before recording accepted legacy debt with --update-baseline"
+    );
+  }
+  return null;
 }
 
 /**

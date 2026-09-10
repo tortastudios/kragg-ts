@@ -57,14 +57,15 @@
 import type bundledTs from "typescript";
 
 import {
-  parsedSources,
   resolveTypeScript,
   type ParsedSource,
   type TypeScriptApi,
 } from "../analysis/sourceFile.ts";
 import { EXIT_ENVIRONMENT, EXIT_OK, EXIT_USAGE } from "../engine/report.ts";
 import { calleeChain, findTestCases } from "../gates/testDepth/testCases.ts";
+import { parsedTestSources } from "../gates/testDepth/testFiles.ts";
 import { loadPolicy, PolicyError, type KraggPolicy } from "../policy/policy.ts";
+import { testScanDirectories } from "../util/testPaths.ts";
 import {
   applyBudget,
   changedSet,
@@ -172,7 +173,12 @@ async function specReport(
   options: SpecOptions,
 ): Promise<number> {
   const view = specView(options);
-  const changed = view.changed ? await changedSet(root, policy.testPaths) : null;
+  // `testScanDirectories`: `changedSet` filters by directory prefix, and a
+  // pattern entry is not one. The set is intersected with the spec entries
+  // below, which `parsedTestSources` already narrowed to the pattern.
+  const changed = view.changed
+    ? await changedSet(root, testScanDirectories(policy.testPaths))
+    : null;
   if (view.changed && changed === null) {
     process.stderr.write(`${CHANGED_UNAVAILABLE}\n`);
     return EXIT_ENVIRONMENT;
@@ -252,7 +258,7 @@ export function buildSpec(
 ): readonly SpecFile[] {
   const compiler = api ?? resolveTypeScript(root).api;
   const files: SpecFile[] = [];
-  for (const source of parsedSources(root, testPaths, { api: compiler })) {
+  for (const source of parsedTestSources(root, testPaths, compiler)) {
     const spec = fileSpec(source, compiler);
     if (spec !== null) {
       files.push(spec);

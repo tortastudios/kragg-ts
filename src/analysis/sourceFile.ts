@@ -195,7 +195,7 @@ function scriptKindOf(api: TypeScriptApi, path: string): bundledTs.ScriptKind {
  * reviewer sees it, rather than in a config file where nobody does.
  */
 function hasParseErrors(sourceFile: bundledTs.SourceFile): boolean {
-  const fields = sourceFile as unknown as Readonly<Record<string, unknown>>; // kragg: ignore
+  const fields = sourceFile as unknown as Readonly<Record<string, unknown>>; // kragg: ignore -- no declared type reaches parseDiagnostics; re-narrowed with Array.isArray before use
   const diagnostics: unknown = fields["parseDiagnostics"];
   return Array.isArray(diagnostics) && diagnostics.length > 0;
 }

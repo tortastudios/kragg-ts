@@ -136,7 +136,7 @@ export async function scanChanges(root: string, since: string | null): Promise<C
   if (!inside.ok) {
     return inside;
   }
-  const base = await resolveBase(root, since);
+  const base = await diffBase(root, since);
   if (!base.ok) {
     return base;
   }
@@ -203,12 +203,31 @@ export async function gitDirty(root: string): Promise<boolean> {
  * `--changed --since main` reports what this branch changed and not what main
  * gained underneath it. An unknown ref makes `merge-base` fail, and the
  * failure propagates with git's message rather than becoming an empty diff.
+ *
+ * Exported for `kragg brief`, which reads the base revision of a file with
+ * {@link showAtRef} and must use the SAME base the change set was derived
+ * from, or the two halves of one brief describe different change sets.
  */
-async function resolveBase(root: string, since: string | null): Promise<GitResult> {
+export async function diffBase(root: string, since: string | null): Promise<GitResult> {
   if (since === null) {
     return { ok: true, stdout: "HEAD" };
   }
   return await git(root, ["merge-base", since, "HEAD"]);
+}
+
+/**
+ * The contents of a repo-relative `path` at `ref`, or `null` when the file did
+ * not exist there (or git could not answer). `ref` comes from
+ * {@link diffBase} and `path` from a change set; each lands in one argv slot.
+ *
+ * `null` and `""` are both "nothing to compare against" for the callers of
+ * this — a file that is new in the change set, and an empty one, contain the
+ * same zero markers and the same zero baseline entries — so the failure arm
+ * is flattened here rather than carried.
+ */
+export async function showAtRef(root: string, ref: string, path: string): Promise<string | null> {
+  const result = await git(root, ["show", `${ref}:${normalize(path)}`]);
+  return result.ok ? result.stdout : null;
 }
 
 /**
@@ -357,7 +376,7 @@ function normalize(value: string): string {
 }
 
 /** Stdout, or the reason git could not answer. */
-type GitResult =
+export type GitResult =
   | { readonly ok: true; readonly stdout: string }
   | { readonly ok: false; readonly message: string };
 

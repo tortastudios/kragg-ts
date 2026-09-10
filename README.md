@@ -32,7 +32,16 @@ Three properties matter more than the gate list:
 
 ## Install
 
-Not yet published. From a checkout:
+The package on npm is called `kragg-ts`. The command it installs is `kragg`.
+The name split matters: this is the TypeScript sibling of a Python tool that
+is already called `kragg` on PyPI, and the two are not the same package.
+
+```sh
+pnpm add -D kragg-ts
+pnpm exec kragg check
+```
+
+`npm` and `yarn` work the same way. From a checkout instead:
 
 ```sh
 pnpm install --ignore-scripts
@@ -111,8 +120,8 @@ character in a file, not reinstalling a tool.
 | `structure` | file-length and public-symbol budgets |
 | `forbidden-calls` | project-banned APIs, resolved through the type checker |
 | `nullable-default` | `\|\|` mis-coalescing a legitimate `0` / `""` / `false` |
-| `critical-tests` | critical functions cannot change without test changes |
-| `test-quality` | no assertion-free tests; critical functions are referenced |
+| `critical-tests` | a changed critical function needs a changed test that the type checker binds to it or to its module — an unrelated test edit does not count |
+| `test-quality` | no assertion-free tests; every critical function is bound by an identifier in a running test (never a comment, a string or a skipped test) |
 | `secret-default` | secrets given silent fallbacks — a blank key must fail at startup, not sign |
 | `detect-secrets` | gitleaks or secretlint — autodetected under `"auto"`, required when `secret_scanner` names one |
 
@@ -201,7 +210,14 @@ of ordinary per-member payloads (each the unchanged schema, with its own
 `--package`, a member whose configured tsconfig is missing, or a malformed
 member policy is exit **2** *before any gate runs* — no member runs half a
 workspace. `--package` cannot be combined with `--file`, `--changed` or
-`--since` (a member run is the whole member).
+`--since` (a member run is the whole member). The **legacy-debt baseline** is
+the member's too: a member run reads — and, under `--update-baseline`, writes —
+the file its effective policy names, at its *own* root, so a member that
+inherits the workspace's `"baseline": ".kragg/baseline.json"` keeps its
+accepted debt in `packages/a/.kragg/baseline.json` and can never absorb another
+package's findings. A member whose effective policy names no baseline refuses
+`--update-baseline` with exit **2** before any gate runs anywhere, exactly as a
+single-package project does.
 
 **A root run says what it did not check.** In a workspace root, `check` and
 `security` without `--package` check the root package and print on stderr
@@ -230,8 +246,8 @@ several deliberately ignore the selection. That is documented, not accidental:
 | `boundaries` | **whole project** | a layering violation is a property of the import graph, not of one file |
 | `forbidden-calls`, `nullable-default`, `secret-default` | the file list | per-file, type-aware |
 | `detect-secrets` | the file list, else the whole project | credentials hide in `.env` files and fixtures, not only in `src/` |
-| `critical-tests` | **whole project**, plus its own `--since` diff | it compares critical functions against test changes across the tree |
-| `test-quality` | **whole project** | it answers "does a test reference this critical function", which no selection bounds |
+| `critical-tests` | **whole project**, plus its own `--since` diff | it compares critical functions against the test changes that bind them, across the tree |
+| `test-quality` | **whole project** | it answers "does a running test bind this critical function", which no selection bounds |
 | `test-coverage`, `critical-coverage`, `audit` | **whole project**, and they skip in incremental mode | a suite or an advisory scan means nothing partially run |
 
 ## Test depth
@@ -273,10 +289,28 @@ mostly-deterministic signals:
   git-tracked, because equivalent mutants are a reviewed, shared property.
 - **what's claimed** — `kragg spec` renders `describe`/`it` strings as a
   documentation tree and flags critical functions with only example-based
-  tests (property-based tests, via fast-check, kill more mutants).
+  tests (property-based tests, via fast-check, kill more mutants). The
+  property summary is a **text** signal: a function counts as property-tested
+  when its name occurs in the text of a recognised `fc.*`/`test.prop` test —
+  title, comment or code — so it says a property test *names* the function,
+  not that the property exercises it or would catch a wrong answer.
+- **what's linked** — `critical-tests` and `test-quality` tie a critical
+  function to test code through the type checker: an identifier in a test
+  file, outside any skipped or todo test, that binds to the function (through
+  an alias, a re-export, a shared helper or a `describe`-level fixture — no
+  direct call is required) or, for `critical-tests`, to anything in its
+  module. A name in a comment, a string or a same-named unrelated symbol is
+  not a reference, and an edit to an unrelated test file does not vouch for a
+  critical change. What a bound reference proves is that the test
+  **exercises** the function; it is not proof of behavioural coverage — a
+  test can bind the name and assert nothing useful. Coverage of its lines is
+  `critical-coverage`'s question and the strength of the assertions is
+  `kragg mutation`'s. Test files outside the `tsconfig.json` program have no
+  checker view and so give no evidence; the finding names them.
 - **what's trustworthy** — `kragg flaky` mines the run journal for gates that
   flipped on an unchanged commit; `--rerun N` re-runs the suite N times under
-  the same `test_runner` and `test_paths` as `check`'s test gate and tallies
+  the same `test_runner`, `test_command` and `test_paths` as `check`'s test
+  gate — the same adapter call, so the two cannot drift — and tallies
   every test. A test whose outcome varies is flaky (exit 1); one that fails
   every time is a stable failure, reported as such (exit 1). A run that did not
   complete the intended suite — no runner, a crash, a timeout, zero tests
@@ -304,8 +338,9 @@ repo-wide with a hint naming the wrapper.
 Resolution goes through `ts.TypeChecker`, so it catches what an import-based
 banned-API linter cannot: subclass overrides, receivers with no annotation,
 re-export chains, `await`ed dynamic imports. The wrapper's own call site is the
-one legitimate use, marked with a trailing `// kragg: ignore` so the exemption
-is **visible in review** rather than invisible in a config allowlist.
+one legitimate use, marked with a trailing `// kragg: ignore -- <reason>` so
+the exemption is **visible in review** rather than invisible in a config
+allowlist.
 
 kragg dogfoods this: `node:child_process` is banned in this very repository,
 and `src/engine/runner.ts` carries the single exemption.
@@ -356,6 +391,70 @@ Scaffolding emits `AGENTS.md` as the canonical agent contract — read by Codex,
 Cursor and Gemini CLI, and by Claude Code via a `CLAUDE.md` pointer — plus
 hooks that run `kragg check --changed` after edits.
 
+## Exemptions are reviewed, never accumulated
+
+Two ways exist to not fail on a finding, and both leave a trail a reviewer can
+read.
+
+**Suppressing one site.** The native gates honour
+`// kragg: ignore -- <reason>` (or `/* kragg: ignore -- <reason> */`) on any
+line the flagged node spans. **The reason is not optional**: a bare
+`// kragg: ignore` suppresses nothing, and the gate reports the finding it was
+written over with a note naming the bare marker. The content of the reason is
+not judged — that is what review is for — and `kragg brief` lists every marker
+the change set added or removed, with its reason, under `## Suppressions`.
+
+**Adopting legacy debt.** An existing project has findings nobody will clear
+in one sitting. Name a baseline file in the policy and record them:
+
+```sh
+# kragg.json: { "baseline": ".kragg/baseline.json" }
+kragg check --update-baseline   # full runs only; add --all to reach the slow tier
+```
+
+Every finding recorded there is reported as a `baselined:` advisory of its
+gate instead of failing the run, and every finding **not** in it fails exactly
+as before, so a new regression cannot hide behind old debt. Nothing on the
+wire changes shape: the accepted findings ride in the existing `advisories`
+list and `advisory_count`. The file is git-tracked — commit it, and keep
+`.gitignore` at `.kragg/*` followed by `!.kragg/baseline.json` — and only
+`--update-baseline` ever writes it, replacing the previous one so a fixed
+finding shows up as a deletion in review.
+
+What a baseline can never hold, enforced in code: `detect-secrets`,
+`secret-default`, `forbidden-calls`, `tsc`, `typing-strictness`,
+`test-coverage`, `critical-tests` and `audit` findings, every errored gate and
+every skip. Only the metric, structure and test-quality gates (`lint`,
+`complexity`, `maintainability`, `halstead`, `type-complexity`, `boundaries`,
+`structure`, `nullable-default`, `test-quality`, `critical-coverage`) are
+eligible; `--update-baseline` names what it refused, and a hand-edited entry
+for any other gate is a config error. A baseline never loosens a threshold or
+widens an exclusion — the gates run exactly as configured and the subtraction
+happens afterwards, one recorded finding at a time.
+
+An entry is identified by gate, file, code, message and a fingerprint of the
+flagged line's text — no line number — so it survives edits above it and goes
+**stale** when the line, the message (a metric that grew) or the file name
+changes. A stale entry is reported as an advisory on its gate, never dropped
+and never re-matched: a renamed file is a re-review, with the old entries
+stale and the findings at the new path failing as new. `kragg brief` lists
+the entries a change set added, removed or left stale under `## Baseline`.
+
+`kragg hook claude` checks **what the equivalent command would check**: a Stop
+runs the whole project exactly as `kragg check` does — every `source_paths`
+entry, not the first one — a post-edit run is `check --file` on the edited
+file, and a tool that edited no single file is `check --changed`. All three go
+through the one resolver in `src/commands/scope.ts`, so the hook and the
+command cannot disagree about a project's scope.
+
+Hooks still **fail open** — any internal failure exits 0 and blocks nothing,
+because a broken guardrail must not become a broken editing session — but they
+no longer fail *invisibly*. A failure writes a line to stderr and an entry to
+`.kragg/hook-errors.jsonl` (timestamp, event, message — never the stdin
+payload), and the next `SessionStart` opens with `N kragg hook failures
+recorded since the last session`. A hook whose config broke three days ago used
+to be indistinguishable from a hook with nothing to say.
+
 ## Configuration
 
 Config is **data, not code.** There is no `kragg.config.ts` and there will not
@@ -393,6 +492,9 @@ is written.
   "secret_scanner": "auto",
   "forbidden_calls": {
     "node:child_process": "use runCommand in src/engine/runner.ts"
+  },
+  "critical_functions": {
+    "src/auth/login#verifyPassword": "authorization entrypoint"
   }
 }
 ```
@@ -403,6 +505,72 @@ package](#which-tsconfig-and-which-package). It is TypeScript-only — Python ha
 no equivalent knob — and it is a path, so `""` is rejected like any other
 malformed value. In a workspace, a member with its own `kragg.json` reads its
 own `tsconfig`; a member without one inherits the root policy's.
+
+**Reviewed critical functions.** Centrality finds what other code leans on; it
+says nothing about *consequence*. An authorization check called from one route
+handler, or a payment capture called once at the end of a checkout, has fan-in
+1 and no betweenness — bottom of the ranked table, and invisible to every
+criticality-driven gate. `critical_functions` is where a reviewer says
+otherwise: each key names a function the way the call graph does
+(`<module>#<name>`, where the module is the repo-root-relative path without its
+extension and the name is the function or `Class.method`), and each value is
+the reason, which is **required**. A declaration is *additive* — it never
+demotes a function the graph selected — and from there it flows into
+`critical-tests`, `test-quality`, `critical-coverage`, `kragg coverage` and
+mutation targeting exactly like an automatically critical one. `CRITICALITY.md`
+and the terminal table grow a `Why` column saying which is which
+(`declared: authorization entrypoint` against `fan-in 7, betweenness 0.3000`),
+and a gate that names a declared function quotes the reason in the violation.
+
+Rename the function and leave the entry behind, and kragg does **not** go
+quiet: `kragg criticality` exits **3** naming the stale entry (with the nearest
+matching function, when a rename is obvious) and writes nothing, and the three
+gates that consume the data report `error: true`. Silently returning such a
+function to "not critical" would retire a protection nobody asked to retire.
+
+**Where the tests are, and how they are run.** A `test_paths` entry is either a
+directory (`"test"`) or a pattern (`"src/**/*.test.ts"`), so a colocated suite
+is expressible: `**` matches zero or more path segments, `*` and `?` stay
+inside one, `{a,b}` alternates, and `[a-z]` is a class. The same entries decide
+what the runner is told to discover, which files `test-quality` and `kragg
+spec` read, and which changed files `critical-tests` examines for evidence —
+one answer, not three. (Whether an examined test actually vouches for a
+changed function is the checker's question, never the path's.) A directory entry still contributes everything under it (a shared
+`test/helpers.ts` is part of the suite); a pattern contributes exactly what it
+matches, so pointing at `src/**/*.test.ts` does not pull `src/` into the test
+corpus.
+
+Runner detection reads `package.json#scripts.test` to learn **which runner** a
+project uses. It does not learn the project's *command*, and it never runs that
+script: kragg builds its own argv, so a script of
+`node --import tsx --test "src/**/*.test.ts"` yields "node" and nothing else —
+the loader and the file selection are gone. When the suite needs a loader, a
+setup file or a config flag, state the invocation instead:
+
+```json
+{
+  "test_command": ["node", "--import", "tsx", "--test"],
+  "test_paths": ["src/**/*.test.ts"]
+}
+```
+
+`test_command` is an **argv array, never a shell string**. kragg spawns with
+`shell: false`, so a string would name one program with spaces in it; a string
+value is rejected with exit 2 and a message saying so. kragg appends the
+reporter and coverage flags it has to parse, plus the `test_paths` patterns,
+and does not duplicate the runner's own run token if you include it. Element 0
+is resolved exactly like every other tool — the project's `node_modules/.bin`,
+or `node` / `bun` as runtimes — never from `PATH`, never a global install, and
+never a path; when it is not `vitest`, `node` or `bun`, `test_runner` must name
+the runner whose report format it produces. Whatever ran, the gate's output
+states the argv and where it came from, so kragg's reconstruction is never
+mistaken for the project's own script.
+
+**A run that discovered no tests is an error, not a pass.** Zero failures out
+of zero tests is arithmetic, not evidence, so `test-coverage` reports
+`error: true` and exit 3, naming the argv, the patterns it searched and the
+three settings that change the answer — `test_paths`, `test_command`, and
+`"test_runner": "off"` for a project that means to skip the gate.
 
 **Editor validation.** The package ships `kragg.schema.json`, a JSON Schema
 that mirrors exactly the keys, types and ranges the loader enforces (a test
@@ -449,6 +617,7 @@ Deliberate, and documented at each site:
 | `--package` | TypeScript-only. A workspace member checked as its own run — own root, policy, tsconfig, compiler, program and journal — with one report per member and, in JSON, an array of them. Python has no workspace notion. |
 | criticality (top-20) | Python's `top_n=20` truncates the analysis, so its `criticality.json` — the input the criticality gates enforce on — never names more than twenty functions. Here twenty is a *display* limit on `CRITICALITY.md` and the terminal table only; the sidecar carries every ranked function, so the gates enforce on the whole eligible population. Same record shape, same ranking, more rows. |
 | `criticality --path` | Scopes the printed table only. Combined with `--write` it is a usage error, where Python persists the scoped result — a partial `criticality.json` reads downstream as "everything else is uncritical". |
+| `critical_functions` | Reviewed declarations make a low-fan-in function critical in *addition* to the graph's own selection. Python has no such setting; the sidecar keeps its six-key record shape either way, and the reason is re-derived from the policy rather than stored. |
 | `check --file` with `--changed`/`--since` | A usage error. Python silently prefers git's file set and discards the explicit list. |
 | `check --file <missing>` | A usage error naming the path. Python runs the pipeline over a selection that matches nothing, which reads as a clean pass. |
 | `--changed` after a config-only edit | Runs a **full** check and reports `mode: "full"`. Python resolves an empty Python-file selection and exits 0 without running a gate, even though the edit changed what every gate would conclude. |
@@ -460,11 +629,19 @@ Deliberate, and documented at each site:
 | a gate that throws | Reported as that gate's `error: true` — the rest of the pipeline still runs and the consolidated report survives. Python lets the exception kill the process. |
 | config validation | Python degrades a mismatched value to its default and ignores unknown keys; kragg-ts rejects both with exit 2, naming the setting. Strictly narrower: every config Python accepts *and reads as written* loads identically here. |
 | criticality-dependent gates | Derived on demand when the data is missing or stale, so `critical-tests` and `test-quality` run; Python skips them visibly instead. |
+| test evidence for critical functions | `critical-tests` accepts a changed test only when the checker binds it (or a test-tree module it imports) to the changed function or its module; Python passes on any change under `tests/`. `test-quality`'s `critical-untested` requires an identifier bound to the function outside a skipped test; Python's is a substring search of the test text. Both fail as `error: true` when the program cannot be built, and a test file outside the program is named as unresolvable rather than text-matched. |
 | SessionStart hook | Emits the `hookSpecificOutput` envelope, which is what injects `additionalContext`; Python prints plain-text context lines. |
-| hook output | Capped at 9000 characters with an in-band marker, because the harness spills longer output to a file the model never sees. Python does not cap. |
+| hook output | Capped at 9000 characters with an in-band marker, because the harness spills longer output to a file the model never sees. Python does not cap. The cap applies to a block `reason` and to a SessionStart `additionalContext` alike, and truncates the text, never the JSON envelope. |
+| Stop hook scope | The same full check `kragg check` runs — every `source_paths` entry — resolved by the same `src/commands/scope.ts`. Python's `_stop` passes `source_paths[0]`, so in a project with more than one source directory the hook's per-file tools never open the rest and a turn can end green over them. Post-edit runs go through the same resolver as `check --file` and `check --changed`. |
+| hook internal failures | Still fail open — exit 0, nothing blocked — but recorded: a stderr line, an entry in `.kragg/hook-errors.jsonl` (timestamp, event, message; never the stdin payload), and a first line in the next SessionStart context saying how many failures happened since the last session. Python leaves no trace, so a hook that has stopped working looks exactly like one with nothing to say. |
+| test discovery | A `test_paths` entry may be a pattern (`src/**/*.test.ts`) as well as a directory, and one rule answers "is this file part of the suite" for the runner, the test-depth gates and `critical-tests` alike. Python's `test_paths` are directories, and its pytest invocation does not pass them at all — pytest discovers by its own rootdir convention. |
+| test invocation | `test_command` states the exact argv, as an array; a shell string is rejected. Python has no counterpart and needs none: it builds one `pytest` command, and pytest reads Python without a loader flag. Runner detection here concludes only *which runner*, never an equivalent command. |
+| a zero-test run | `error: true` and exit 3, naming the argv and the settings that change it: a completed run that discovered nothing verifies nothing. Python passes `--cov-fail-under` to pytest and reads its exit code, so the case is not distinguished as its own outcome. |
 | test evidence | Python reads `.kragg/coverage.json` from a fixed path. kragg-ts gives every invocation its own `.kragg/runs/` directory, refuses anything incomplete, and hands `critical-coverage` the coverage in memory. Same gates, same wire format; only the provenance rule differs. |
 | unmeasured critical functions | Python's `critical-coverage` passes a critical function the report never mentions (`measured=False`), reasoning that a missing entry is a measurement-key mismatch. kragg-ts hands the gate the document its own run wrote, so a missing file was never loaded: the function fails under the additive code `critical-unmeasured`, with the cause in the message. |
 | coverage denominator | Python's `pytest --cov=src` instruments every file under `src`, loaded or not. The JavaScript runners report only what the run loaded, so kragg-ts reconciles the number against `source_paths` itself: unloaded files count as uncovered by their statement lines, and files outside the source paths do not count. |
+| `// kragg: ignore` | Requires a reason: `// kragg: ignore -- <reason>`. A bare marker is not honoured and is reported on the finding it tried to hide. Python's `# kragg: ignore` needs none. |
+| legacy-debt baseline | `kragg.json#baseline` plus `check --update-baseline` records accepted findings of the metric, structure and test-quality gates; they become `baselined:` advisories and new findings still fail. Python has no equivalent; no wire key is added. `brief` gains `## Suppressions` and `## Baseline`. |
 
 Each row is pinned by a fixture or a unit test, and the full list — with the
 `spec/SPEC.md` row it corresponds to — is in
@@ -472,10 +649,11 @@ Each row is pinned by a fixture or a unit test, and the full list — with the
 
 ## Supply chain
 
-**One runtime dependency** (`typescript` — you cannot parse TypeScript without
-the TypeScript compiler) and **one dev dependency** (`@types/node`), both
-pinned to exact versions. No bundler, no test framework: `tsc` emits and
-`node:test` runs.
+**One runtime dependency** (`typescript`. You cannot parse TypeScript without
+the TypeScript compiler) and **two dev dependencies** (`@types/node`, and
+`oxlint` for kragg-ts's own self-check), all pinned to exact versions. No
+bundler, no test framework: `tsc` emits and `node:test` runs. See
+[docs/dependency-policy.md](docs/dependency-policy.md) for the full reasoning.
 
 Installs run with dependency lifecycle scripts disabled, no package may run a
 build script, and a **30-day minimum release age** is enforced mechanically —
@@ -541,6 +719,27 @@ whose own gates are red has no claim on anyone else's code.
 
 `AGENTS.md` is the contract for agents working in this repository, including
 the hard rules that are not open to interpretation.
+
+## Releases
+
+A release is a git tag of the form `vX.Y.Z` that matches
+`package.json#version`. Pushing the tag runs
+[`.github/workflows/release.yml`](.github/workflows/release.yml): typecheck,
+build, test, the local conformance fixtures, then `npm publish` and a GitHub
+release with generated notes. There is no manual publish step and no
+separate version bump commit; the tag and the version are the same fact.
+
+To cut a release:
+
+```sh
+# bump package.json#version first, commit it, then:
+git tag v0.1.0
+git push origin v0.1.0
+```
+
+`CHANGELOG.md` follows Keep a Changelog. Move the `## [Unreleased]` bullets
+into a new `## [X.Y.Z] - YYYY-MM-DD` section as part of the version bump
+commit, so the tagged commit and the changelog agree about what shipped.
 
 ## License
 

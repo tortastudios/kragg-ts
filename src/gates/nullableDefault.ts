@@ -90,7 +90,7 @@
  * differently, the rules to revisit are 3 and 4, in that order.
  *
  * A residual false positive on a safe internal value is suppressed with a
- * trailing `// kragg: ignore`, visible in review at the site it applies to.
+ * trailing `// kragg: ignore -- <reason>`, visible in review at the site it applies to.
  */
 
 import { relative } from "node:path";
@@ -104,7 +104,7 @@ import {
 } from "../analysis/program.ts";
 import type { TypeScriptApi } from "../analysis/sourceFile.ts";
 import type { Violation } from "../engine/models.ts";
-import { suppressed } from "../util/suppress.ts";
+import { suppression, unhonouredMessage } from "../util/suppress.ts";
 import { falsyCoalesceFinding } from "./nullableDefault/falsyCoalesce.ts";
 import type { NullableFinding } from "./nullableDefault/finding.ts";
 import { untypedPayloadFinding } from "./nullableDefault/untypedPayload.ts";
@@ -208,11 +208,12 @@ function toViolation(
 ): Violation | null {
   const start = file.getLineAndCharacterOfPosition(finding.node.getStart(file));
   const end = file.getLineAndCharacterOfPosition(finding.node.getEnd());
-  if (suppressed(lines, start.line + 1, end.line + 1)) {
+  const marker = suppression(lines, start.line + 1, end.line + 1);
+  if (marker.kind === "honoured") {
     return null;
   }
   return {
-    message: finding.message,
+    message: unhonouredMessage(finding.message, marker),
     file: relativePath,
     line: start.line + 1,
     column: start.character + 1,

@@ -229,15 +229,28 @@ export function renderGaps(gaps: readonly CriticalCoverageGap[]): string[] {
 function gapLine(row: CriticalCoverageGap): string {
   const first = row.missingLines[0] ?? 1;
   return (
-    `  ${row.file}:${first} ${row.qualname} (fan-in ${row.fanIn}) ` +
+    `  ${row.file}:${first} ${row.qualname} (${why(row)}) ` +
     `— uncovered: ${formatLines(row.missingLines)}`
   );
 }
 
 /** An unmeasured row names its cause; Python prints "no test imports it". */
 function unmeasuredLine(row: CriticalCoverageGap): string {
-  const where = row.line === undefined ? row.file : `${row.file}:${row.line}`;
-  return `  ${where} ${row.qualname} (fan-in ${row.fanIn}) — unmeasured: ${row.reason ?? ""}`;
+  const where = row.line === undefined ? row.file : `${row.file}:${String(row.line)}`;
+  return `  ${where} ${row.qualname} (${why(row)}) — unmeasured: ${row.reason ?? ""}`;
+}
+
+/**
+ * What makes this function worth the strictest bar in the tool.
+ *
+ * A reviewer's `critical_functions` reason where there is one, and the fan-in
+ * otherwise. A declared authorization entrypoint printed as `(fan-in 1)` reads
+ * as noise, which is how a report like this gets ignored.
+ */
+function why(row: CriticalCoverageGap): string {
+  return row.declaredReason === undefined
+    ? `fan-in ${String(row.fanIn)}`
+    : `declared: ${row.declaredReason}`;
 }
 
 /** `3, 4, 9, +7 more` — capped, because a 200-line list is not a pointer. */

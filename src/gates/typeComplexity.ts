@@ -92,7 +92,7 @@
  * in a file you do not write. A hand-authored `.d.ts` is a real gap and is
  * documented as one rather than being papered over with a heuristic.
  *
- * A reviewed-safe annotation is silenced with `// kragg: ignore` on any line
+ * A reviewed-safe annotation is silenced with `// kragg: ignore -- <reason>` on any line
  * it spans. Python's gate has no suppression hook; this one follows the
  * repo-wide convention in `util/suppress.ts` instead, because a gate with no
  * escape valve gets its budget raised for everyone by the first person who
@@ -109,7 +109,7 @@ import {
   type TypeScriptApi,
 } from "../analysis/sourceFile.ts";
 import type { Violation } from "../engine/models.ts";
-import { suppressed } from "../util/suppress.ts";
+import { suppression, unhonouredMessage } from "../util/suppress.ts";
 import { functionBlockLabel, isFunctionBlock } from "./halstead.ts";
 
 /** `Violation.code` for every finding this gate produces. */
@@ -269,11 +269,15 @@ function judge(site: Site, source: ParsedSource, limits: Limits): Violation | nu
     site.type.getStart(source.sourceFile),
   );
   const end = source.sourceFile.getLineAndCharacterOfPosition(site.type.getEnd());
-  if (suppressed(source.lines, start.line + 1, end.line + 1)) {
+  const marker = suppression(source.lines, start.line + 1, end.line + 1);
+  if (marker.kind === "honoured") {
     return null;
   }
   return {
-    message: `${site.context}: annotation \`${text}\` (depth=${depth}, length=${length})`,
+    message: unhonouredMessage(
+      `${site.context}: annotation \`${text}\` (depth=${depth}, length=${length})`,
+      marker,
+    ),
     file: source.relative,
     line: start.line + 1,
     column: start.character + 1,

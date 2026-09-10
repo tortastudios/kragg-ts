@@ -79,7 +79,7 @@
  *    coverage is not walked — see `included.ts`;
  *  - `.d.ts` files, which `parsedSources` excludes. A hand-authored
  *    declaration file full of `any` is invisible here;
- *  - anything a `// kragg: ignore` covers, by design.
+ *  - anything a `// kragg: ignore -- <reason>` covers, by design.
  */
 
 import {

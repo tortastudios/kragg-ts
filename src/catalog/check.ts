@@ -237,6 +237,7 @@ function dataAndTestGates(ctx: CatalogContext): readonly GateSpec[] {
             root: ctx.root,
             sourcePaths: policy.sourcePaths,
             testPaths: policy.testPaths,
+            program: ctx.program,
             since: ctx.since ?? null,
             api: ctx.api,
           }),
@@ -260,6 +261,7 @@ function dataAndTestGates(ctx: CatalogContext): readonly GateSpec[] {
             root: ctx.root,
             testPaths: policy.testPaths,
             sourcePaths: policy.sourcePaths,
+            program: ctx.program,
             api: ctx.api,
           }),
         );
@@ -283,6 +285,7 @@ function slowGates(ctx: CatalogContext): readonly GateSpec[] {
           coverageReportPath: policy.coverageReportPath,
           maxViolations: policy.maxViolationsPerGate,
           testPaths: policy.testPaths,
+          testCommand: policy.testCommand,
           sourcePaths: policy.sourcePaths,
           api: ctx.api,
         });

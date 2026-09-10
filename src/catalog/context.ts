@@ -47,6 +47,7 @@ import { projectTsconfig, type ProjectEnvironment } from "../environment/project
 import { criticalityFreshness, STALE_CRITICALITY_REASON } from "../gates/criticality.ts";
 import { NO_CRITICALITY_REASON } from "../gates/testDepth/outcome.ts";
 import type { KraggPolicy } from "../policy/policy.ts";
+import { testScanDirectories } from "../util/testPaths.ts";
 import { criticalityCache, type CriticalityCache } from "./criticalityCache.ts";
 
 /** Everything a caller must decide before a pipeline can be assembled. */
@@ -138,7 +139,10 @@ export function catalogContext(options: CatalogOptions): CatalogContext {
       root,
       // Sources AND tests: both are in the program, so both contribute
       // call-graph nodes, and an edit to either can change the answer.
-      scanPaths: [...options.policy.sourcePaths, ...options.policy.testPaths],
+      scanPaths: [
+        ...options.policy.sourcePaths,
+        ...testScanDirectories(options.policy.testPaths),
+      ],
       analysis: program,
     }),
   };

@@ -149,11 +149,42 @@ describe("kragg.schema.json mirrors the loader", () => {
         rejects(key, ["a", 1], /#forbidden_calls\[1\] must be a string/u);
         rejects(key, "a.b", /#forbidden_calls must be an object/u);
       });
+    } else if (key === "critical_functions") {
+      it(`${key}: the loader reads a name-to-reason object and requires both`, () => {
+        // The schema's own shape, probed against the loader: an object of
+        // string values (`additionalProperties`), each key matching
+        // `propertyNames.pattern`, each value non-empty (`minLength`).
+        assert.deepEqual(shown(key, { "src/auth/login#verifyPassword": "authorization" }), {
+          "src/auth/login#verifyPassword": "authorization",
+        });
+        assert.deepEqual(shown(key, {}), {});
+        rejects(key, { "src/a#f": 1 }, /#critical_functions\["src\/a#f"\] must be a non-empty string/u);
+        rejects(key, { "src/a#f": "" }, /#critical_functions\["src\/a#f"\] must be a non-empty string/u);
+        // The pattern in `propertyNames`: both halves of `module#name` present.
+        const pattern = table(property["propertyNames"], "propertyNames")["pattern"];
+        assert.equal(typeof pattern, "string");
+        assert.ok(typeof pattern === "string" && !new RegExp(pattern, "u").test("verifyPassword"));
+        rejects(key, { verifyPassword: "why" }, /#critical_functions\["verifyPassword"\] must be named/u);
+        rejects(key, ["src/a#f"], /#critical_functions must be an object of "module#function"/u);
+      });
     } else if (JSON.stringify(property["type"]) === '["string","null"]') {
       it(`${key}: the loader reads a string or null`, () => {
         assert.equal(shown(key, "x"), "x");
         assert.equal(shown(key, null), null);
         rejects(key, 1, new RegExp(`#${key} must be a string or null`, "u"));
+      });
+    } else if (
+      property["type"] === "array" &&
+      JSON.stringify(property["items"]) === '{"type":"string"}'
+    ) {
+      it(`${key}: the loader reads an argv array, never a shell string`, () => {
+        assert.deepEqual(shown(key, []), []);
+        assert.deepEqual(shown(key, ["node", "--import", "tsx"]), ["node", "--import", "tsx"]);
+        // The whole point of the type: kragg spawns with `shell: false`, so a
+        // string would name one program with spaces in it, not a command.
+        rejects(key, "node --import tsx", new RegExp(`#${key} must be a list of strings`, "u"));
+        rejects(key, ["node", 1], new RegExp(`#${key}\\[1\\] must be a string`, "u"));
+        rejects(key, { run: "node" }, new RegExp(`#${key} must be a list of strings`, "u"));
       });
     } else if (property["type"] === "string") {
       it(`${key}: the loader reads a string`, () => {

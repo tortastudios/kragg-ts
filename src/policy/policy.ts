@@ -41,22 +41,21 @@
  * narrowed explicitly. No casts, no assertions, no trusting the shape.
  */
 
-import { join } from "node:path";
-
 import {
+  getArgv,
+  getCriticalDeclarations,
   getEnum,
   getInt,
   getOptionalString,
+  getPath,
   getString,
   getStringList,
   getStringPairs,
-  isTable,
-  own,
   PolicyError,
-  readTable,
   rejectUnknownKeys,
   type Source,
 } from "./readers.ts";
+import { loadSource } from "./source.ts";
 
 /**
  * Raised when a config file exists but cannot be used.
@@ -67,8 +66,43 @@ import {
  */
 export { PolicyError } from "./readers.ts";
 
+/**
+ * The "did you mean" helper, re-exported for the one consumer outside this
+ * directory: `gates/criticality/declared.ts`, which asks the same question of
+ * a `critical_functions` entry that names no function in the program.
+ */
+export { nearestName } from "./names.ts";
+
+/**
+ * Serialize a policy for `kragg policy show`. Lives in `serialize.ts`; kept on
+ * this module's surface because the policy is what a caller has in hand.
+ */
+export { policyAsDict } from "./serialize.ts";
+
+/**
+ * Whether a project declares a policy of its own — see `./source.ts`.
+ *
+ * Re-exported because `policy.ts` is the module callers import; a workspace
+ * member run asks this before deciding to inherit the root's rules.
+ */
+export { declaresPolicy } from "./source.ts";
+
 /** One `[callExpression, whyItIsBannedAndWhatToUseInstead]` entry. */
 export type ForbiddenCall = readonly [entry: string, fixHint: string];
+
+/**
+ * One reviewed critical-function declaration:
+ * `["<module>#<qualified.name>", "why it is critical"]`.
+ *
+ * The name is the same `module#name` the call graph and
+ * `.kragg/criticality.json` use. The reason is REQUIRED and is shown wherever
+ * the function is named — the report, the table and the violation messages —
+ * because a manual override that cannot be explained is one nobody can review.
+ */
+export type CriticalDeclaration = readonly [name: string, reason: string];
+
+/** Every reviewed declaration a project made, sorted by name. */
+export type CriticalDeclarations = readonly CriticalDeclaration[];
 
 /**
  * Tool-selection vocabularies.
@@ -134,6 +168,17 @@ export interface KraggPolicy {
   /** Banned call targets, each with the hint that says what to use instead. */
   readonly forbiddenCalls: readonly ForbiddenCall[];
   /**
+   * Functions a REVIEWER declared critical, each with the reason.
+   *
+   * Additive to the call-graph selection and never subtractive: a declaration
+   * makes a function critical, and nothing here can make an automatically
+   * critical function stop being one. It exists for the consequential
+   * function the graph cannot see — an authorization or payment entrypoint
+   * with one caller has low fan-in and no betweenness, and is exactly where a
+   * missing test costs the most.
+   */
+  readonly criticalFunctions: CriticalDeclarations;
+  /**
    * Identifier suffixes that mark a binding as holding a secret. A secret
    * given a fallback default never fails loudly — it runs unconfigured and
    * signs with an empty key — so the secret-default gate flags the idiom.
@@ -143,6 +188,16 @@ export interface KraggPolicy {
   readonly lintTool: LintToolSetting;
   /** Which test runner the coverage gate drives. */
   readonly testRunner: TestRunnerSetting;
+  /**
+   * The exact argv that runs this project's suite, WITHOUT file patterns —
+   * `["node", "--import", "tsx", "--test"]`. Empty (the default) means kragg
+   * infers the runner and builds the argv itself, which cannot carry a loader
+   * or setup flag it was never told about. kragg appends its own reporter and
+   * coverage flags and the `test_paths` patterns; element 0 is resolved like
+   * every other tool (the project's `node_modules/.bin`, or `node` / `bun` as
+   * runtimes) and is never looked up on `PATH`.
+   */
+  readonly testCommand: readonly string[];
   /** Which secret scanner the `detect-secrets` gate drives. */
   readonly secretScanner: SecretScannerSetting;
   /**
@@ -150,6 +205,12 @@ export interface KraggPolicy {
    * means none. The two scanners' formats are NOT interchangeable.
    */
   readonly secretBaseline: string | undefined;
+  /**
+   * Reviewed legacy-debt baseline, root-relative; `undefined` means none.
+   * Written only by `kragg check --update-baseline`, read by every `check`.
+   * See `policy/baseline.ts` for what may and may not be recorded in it.
+   */
+  readonly baseline: string | undefined;
   /** Advisories below this severity are counted but not reported. */
   readonly auditSeverity: AuditSeverity;
   /** Where the test runner writes its istanbul JSON, relative to the root. */
@@ -193,6 +254,13 @@ export const DEFAULT_POLICY: KraggPolicy = {
   mutationExclude: [],
   forbiddenCalls: [],
   /**
+   * NO PYTHON COUNTERPART, and empty by default: every critical function is
+   * one the call graph found until a reviewer says otherwise. See
+   * `docs/spec-conformance.md` for what an implementation that does not know
+   * this key reads out of a sidecar written with one.
+   */
+  criticalFunctions: [],
+  /**
    * DIVERGES from Python's `("_secret", "_token", ...)` in CASING ONLY: the
    * suffixes exist to match the tail of an identifier, and JavaScript
    * identifiers are camelCase, so `hmacSecret` needs `Secret` where Python's
@@ -226,8 +294,10 @@ export const DEFAULT_POLICY: KraggPolicy = {
   ],
   lintTool: "auto",
   testRunner: "auto",
+  testCommand: [],
   secretScanner: "auto",
   secretBaseline: undefined,
+  baseline: undefined,
   auditSeverity: "high",
   coverageReportPath: "coverage/coverage-final.json",
 };
@@ -255,7 +325,38 @@ export function loadPolicy(root: string): KraggPolicy {
     ...readTools(source),
   };
   rejectUnknownKeys(source, NON_SETTING_KEYS);
+  requireKnownRunner(source, policy);
   return policy;
+}
+
+/** Programs whose report format kragg recognises from the program name alone. */
+const RUNNER_PROGRAMS: readonly string[] = ["vitest", "node", "bun"];
+
+/**
+ * A `test_command` kragg could run but could not READ is rejected at load.
+ *
+ * kragg does not just spawn the suite, it parses the suite's report, and the
+ * three runners produce three unrelated formats. When `test_runner` is
+ * `"auto"` the only evidence of which format to expect is the program name,
+ * so a `test_command` starting with anything else — `tsx`, a wrapper script —
+ * has to say so with `test_runner`. Rejecting here, at exit 2 before any gate
+ * runs, rather than at gate time: the project can fix a config error it is
+ * told about immediately, and there is no run for the mistake to hide in.
+ */
+function requireKnownRunner(source: Source, policy: KraggPolicy): void {
+  const program = policy.testCommand[0];
+  if (program === undefined || policy.testRunner !== "auto") {
+    return;
+  }
+  const name = program.replaceAll("\\", "/").split("/").at(-1) ?? program;
+  if (RUNNER_PROGRAMS.includes(name)) {
+    return;
+  }
+  throw new PolicyError(
+    `${source.label}test_command runs ${JSON.stringify(program)}, and kragg cannot tell ` +
+      "which runner's report format that produces. Set `test_runner` to the runner it " +
+      `drives (${RUNNER_PROGRAMS.join(", ")}), or start the command with one of them.`,
+  );
 }
 
 /** The settings naming WHERE kragg looks: paths, layers and glob scopes. */
@@ -284,12 +385,15 @@ type PolicyBudgets = Pick<
 >;
 
 /** The settings that enumerate what a gate looks FOR. */
-type PolicyRules = Pick<KraggPolicy, "forbiddenCalls" | "secretNameSuffixes" | "secretBaseline">;
+type PolicyRules = Pick<
+  KraggPolicy,
+  "forbiddenCalls" | "criticalFunctions" | "secretNameSuffixes" | "secretBaseline" | "baseline"
+>;
 
 /** Which external tool each gate drives, and how strict it is. */
 type PolicyTools = Pick<
   KraggPolicy,
-  "lintTool" | "testRunner" | "secretScanner" | "auditSeverity"
+  "lintTool" | "testRunner" | "testCommand" | "secretScanner" | "auditSeverity"
 >;
 
 function readScopes(source: Source): PolicyScopes {
@@ -341,8 +445,14 @@ function readRules(source: Source): PolicyRules {
   const base = DEFAULT_POLICY;
   return {
     forbiddenCalls: getStringPairs(source, "forbidden_calls", base.forbiddenCalls),
+    criticalFunctions: getCriticalDeclarations(
+      source,
+      "critical_functions",
+      base.criticalFunctions,
+    ),
     secretNameSuffixes: getStringList(source, "secret_name_suffixes", base.secretNameSuffixes),
     secretBaseline: getOptionalString(source, "secret_baseline", base.secretBaseline),
+    baseline: getOptionalString(source, "baseline", base.baseline),
   };
 }
 
@@ -351,119 +461,10 @@ function readTools(source: Source): PolicyTools {
   return {
     lintTool: getEnum(source, "lint_tool", LINT_TOOLS, base.lintTool),
     testRunner: getEnum(source, "test_runner", TEST_RUNNERS, base.testRunner),
+    testCommand: getArgv(source, "test_command", base.testCommand),
     secretScanner: getEnum(source, "secret_scanner", SCANNERS, base.secretScanner),
     auditSeverity: getEnum(source, "audit_severity", SEVERITIES, base.auditSeverity),
   };
 }
 
-/**
- * Serialize a policy for `kragg policy show`.
- *
- * The Python analogue is `KraggPolicy.as_dict()`. Keys are snake_case and the
- * order matches the Python dataclass field order, so the two implementations
- * produce byte-identical JSON for an identical policy and a conformance test
- * can diff them directly. Pairs serialize as two-element arrays, which is
- * what `dataclasses.asdict` yields for a tuple of tuples.
- *
- * Arrays are copied rather than aliased so a caller cannot mutate the frozen
- * `DEFAULT_POLICY` through the returned object.
- */
-export function policyAsDict(policy: KraggPolicy): Record<string, unknown> {
-  return {
-    profile: policy.profile,
-    source_paths: [...policy.sourcePaths],
-    test_paths: [...policy.testPaths],
-    coverage_fail_under: policy.coverageFailUnder,
-    type_max_nesting_depth: policy.typeMaxNestingDepth,
-    type_max_length: policy.typeMaxLength,
-    max_violations_per_gate: policy.maxViolationsPerGate,
-    layers: [...policy.layers],
-    max_file_lines: policy.maxFileLines,
-    max_public_symbols: policy.maxPublicSymbols,
-    structure_exclude: [...policy.structureExclude],
-    mutation_include: [...policy.mutationInclude],
-    mutation_exclude: [...policy.mutationExclude],
-    forbidden_calls: policy.forbiddenCalls.map(([entry, hint]) => [entry, hint]),
-    secret_name_suffixes: [...policy.secretNameSuffixes],
-    // TypeScript-only tail: these settings have no Python counterpart (they
-    // name JavaScript tools), so they sort AFTER every shared field. A
-    // conformance diff can therefore compare the common prefix key-for-key.
-    lint_tool: policy.lintTool,
-    test_runner: policy.testRunner,
-    secret_scanner: policy.secretScanner,
-    secret_baseline: policy.secretBaseline ?? null,
-    audit_severity: policy.auditSeverity,
-    coverage_report_path: policy.coverageReportPath,
-    tsconfig: policy.tsconfig,
-  };
-}
 
-/**
- * A path setting: a string, and a non-empty one.
- *
- * `""` resolves to the root directory itself, so `tsconfig: ""` would send
- * every type-aware surface to open a directory and report a confusing
- * failure about it. Rejected by name instead, like every other malformed
- * value; the schema mirrors the `minLength`.
- */
-function getPath(source: Source, key: string, fallback: string): string {
-  const value = getString(source, key, fallback);
-  if (value === "") {
-    throw new PolicyError(`${source.label}${key} must be a non-empty path (got "")`);
-  }
-  return value;
-}
-
-/**
- * Whether `root` carries a policy of its own — a `kragg.json`, or a
- * `package.json` with a `kragg` key.
- *
- * For a workspace member under `--package`: a member that declares nothing
- * inherits the ROOT's policy rather than the defaults, because the root's
- * `kragg.json` is where a workspace writes its rules once. A member that
- * declares anything at all is on its own, exactly as `loadPolicy` treats a
- * standalone project — there is no merge, and a malformed member policy is
- * still a `PolicyError` here.
- */
-export function declaresPolicy(root: string): boolean {
-  if (readTable(join(root, "kragg.json")) !== null) {
-    return true;
-  }
-  const pkg = readTable(join(root, "package.json"));
-  return pkg !== null && own(pkg, "kragg") !== undefined;
-}
-
-/**
- * Read the raw config table and where it came from; an empty table when the
- * project configures nothing.
- *
- * A `package.json#kragg` that is present but not an object is REJECTED, not
- * read as "unconfigured" (which is what Python's `isinstance(kragg, dict)`
- * guard does): the project wrote a policy block, and running the defaults in
- * its place would be the silent fall-back this module refuses everywhere
- * else. A `kragg.json` that is not an object is already rejected by
- * `readTable`.
- */
-function loadSource(root: string): Source {
-  const standalonePath = join(root, "kragg.json");
-  const standalone = readTable(standalonePath);
-  if (standalone !== null) {
-    return { table: standalone, label: `${standalonePath}#`, consumed: new Set() };
-  }
-  const pkgPath = join(root, "package.json");
-  const pkg = readTable(pkgPath);
-  const label = `${pkgPath}#kragg.`;
-  if (pkg === null) {
-    return { table: {}, label, consumed: new Set() };
-  }
-  const kragg = own(pkg, "kragg");
-  if (kragg === undefined) {
-    return { table: {}, label, consumed: new Set() };
-  }
-  if (!isTable(kragg)) {
-    throw new PolicyError(
-      `${pkgPath}#kragg must be a JSON object of kragg settings (got ${JSON.stringify(kragg)})`,
-    );
-  }
-  return { table: kragg, label, consumed: new Set() };
-}

@@ -14,7 +14,7 @@
  * call to a banned path is a violation carrying the configured hint as its fix;
  * an empty hint degrades to `DEFAULT_FIX_HINT`, never to "no ban". The approved
  * wrapper's own call site is the one place the raw API is legitimate — mark it
- * with a trailing `// kragg: ignore`, which is a visible, reviewable exemption
+ * with a trailing `// kragg: ignore -- <reason>`, which is a visible, reviewable exemption
  * rather than a loophole.
  *
  * WHY THIS IS THE TYPE-AWARE GATE. The Python sibling

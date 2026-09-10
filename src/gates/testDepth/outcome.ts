@@ -49,11 +49,15 @@ export function skipped(reason: string): TestDepthOutcome {
 /**
  * The gate could not run because something is broken.
  *
- * NO CURRENT PATH RETURNS THIS, and that is worth stating rather than leaving
- * a reader to discover it: all three gates are syntax-tier, so there is no
- * program to fail to build the way `forbiddenCalls` can. The variant exists so
- * a caller can handle every gate through one shape, and so a future
- * type-aware check here has somewhere honest to report from.
+ * TWO PATHS RETURN THIS. One is a `critical_functions` declaration that names
+ * no function the analysis found: the reviewer's protection is missing, the
+ * gate would otherwise report green over a population smaller than the one
+ * it was asked to enforce, and `error: true` (exit 3) is the only honest
+ * answer. See `declarationProblem` in `criticalFunctions.ts`. The other is
+ * the run's program refusing to build when `critical-tests` or `test-quality`
+ * needs the checker to bind test code to a critical function — the same
+ * failure `forbiddenCalls` reports, and for the same reason: evidence that
+ * could not be resolved is not evidence of anything. See `references.ts`.
  */
 export function failed(message: string): TestDepthOutcome {
   return { ok: false, message };

@@ -83,6 +83,12 @@
         { "type": "array", "items": { "type": "string" } }
       ]
     },
+    "critical_functions": {
+      "type": "object",
+      "additionalProperties": { "type": "string", "minLength": 1 },
+      "description": "Functions a reviewer declared critical, on top of the ones the call graph selects: each key names a function as \"<module>#<name>\" (repo-root-relative module path, then the function or Class.method, e.g. \"src/auth/login#verifyPassword\") and each value says why it is critical. The reason is required and must be a non-empty string. A declaration never demotes an automatically critical function, and one that matches no function in the analysed program is an error (exit 3), so a rename cannot silently drop the protection. {} is an explicit empty list. Default: {}.",
+      "propertyNames": { "pattern": "^[^#]+#.+$" }
+    },
     "secret_name_suffixes": {
       "$ref": "#/definitions/stringList",
       "description": "Identifier suffixes that mark a binding as holding a secret, for the secret-default gate. Default: [\"Secret\", \"Token\", \"Password\", \"Passphrase\", \"ApiKey\", \"SigningKey\", \"SecretKey\", \"PrivateKey\", \"AccessKey\", \"ServiceKey\"]."
@@ -94,6 +100,11 @@
     "test_runner": {
       "enum": ["auto", "vitest", "node", "bun", "off"],
       "description": "Which test runner the coverage gate drives. Default: \"auto\"."
+    },
+    "test_command": {
+      "type": "array",
+      "items": { "type": "string" },
+      "description": "The exact argv that runs the suite, without file patterns — e.g. [\"node\", \"--import\", \"tsx\", \"--test\"]. One command-line argument per element; a single shell string is rejected, because kragg spawns without a shell. kragg appends its own reporter and coverage flags and the test_paths patterns. Element 0 is resolved from the project's node_modules/.bin (or is \"node\"/\"bun\" as runtimes), never from PATH; when it is not vitest/node/bun, test_runner must name the runner whose report format it produces. Empty means kragg infers the runner and builds the argv itself. Default: []."
     },
     "secret_scanner": {
       "enum": ["auto", "gitleaks", "secretlint", "off"],
@@ -110,6 +121,10 @@
     "coverage_report_path": {
       "type": "string",
       "description": "Where the test runner writes its istanbul JSON, relative to the project root. Default: \"coverage/coverage-final.json\"."
+    },
+    "baseline": {
+      "type": ["string", "null"],
+      "description": "Reviewed legacy-debt baseline, relative to the project root (conventionally \".kragg/baseline.json\"). Written only by `kragg check --update-baseline`; findings recorded in it are reported as advisories instead of failing the run. Security, compiler and evidence gates can never be baselined. null means none. Default: null."
     },
     "tsconfig": {
       "type": "string",

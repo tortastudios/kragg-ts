@@ -347,6 +347,31 @@ describe("runDoctor", () => {
     assert.match(result.out, /test runner: ok \(node — a runtime/);
   });
 
+  it("checks the program `test_command` names, not the runner it implies", async () => {
+    // The gate spawns `test_command[0]`, so that is the tool that has to be
+    // there. Reporting `ok (node — a runtime)` while the argv starts with an
+    // absent `tsx` is a green diagnostic for a run that will exit 3.
+    const root = project({
+      "package.json": '{"name":"a","packageManager":"pnpm@9.0.0"}',
+      "kragg.json": '{"test_runner":"node","test_command":["tsx","--test"]}',
+    });
+    const result = capture(() => runDoctor(root));
+    assert.equal(result.value, EXIT_GATE_FAILURES);
+    assert.match(result.out, /test_command: tsx --test/);
+    assert.match(result.out, /MISSING -> required by test_command\[0\] = "tsx"/);
+    assert.match(result.out, /pnpm add -D tsx/);
+  });
+
+  it("treats a `test_command` that starts with a runtime as present", async () => {
+    const root = project({
+      "package.json": '{"name":"a","packageManager":"pnpm@9.0.0"}',
+      "kragg.json": '{"test_command":["node","--import","./setup.mjs","--test"]}',
+    });
+    const result = capture(() => runDoctor(root));
+    assert.match(result.out, /test_command: node --import \.\/setup\.mjs --test/);
+    assert.match(result.out, /ok \(node — a runtime/);
+  });
+
   it("passes a project that has its layout and its compiler", async () => {
     const root = project({
       "package.json": '{"name":"a","packageManager":"pnpm@9.0.0"}',

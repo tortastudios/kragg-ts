@@ -30,16 +30,9 @@
 import { statSync } from "node:fs";
 
 import type { CompletedCommand, Violation } from "../../engine/models.ts";
-import {
-  missingTool as missingToolName,
-  missingToolMessage,
-  remediation,
-} from "../../environment/project.ts";
-import type { ProjectEnvironment } from "../../environment/project.ts";
+import { testRunnerPatterns } from "../../util/testPaths.ts";
 import type { ProjectTotals } from "./coverage.ts";
-import type { RunnerDetection, TestRunnerName } from "./detect.ts";
-import { missingTool } from "./outcome.ts";
-import type { Unavailable } from "./outcome.ts";
+import type { TestRunnerName } from "./detect.ts";
 import type { Artifacts } from "./testCommands.ts";
 
 /** `code` for the coverage threshold, distinct from any test failure. */
@@ -88,6 +81,47 @@ function unloadedNote(totals: ProjectTotals): string {
     `; ${totals.unloaded.length} of ${totals.sourceFiles} source files never loaded by ` +
     `the test run, counted as uncovered (${lines} statement lines read from the source): ` +
     `${shown.join(", ")}${more > 0 ? `, +${more} more` : ""}`
+  );
+}
+
+/**
+ * The runner completed and found NOTHING to run.
+ *
+ * A third refusal, and the one that hid in plain sight the longest: a report
+ * saying "0 tests, 0 failed" parses cleanly, so the gate passed and the run
+ * was green. It is not a pass. Nothing was executed, nothing was verified, and
+ * the two ordinary causes are both configuration a reader can fix in one line
+ * — the tests are colocated and `test_paths` names only `test/`, or the suite
+ * needs a loader the reconstructed argv does not carry. The message therefore
+ * shows the argv that searched, what it searched for, and the three settings
+ * that change the answer, INCLUDING the one that says "I meant it, skip this
+ * gate" — a refusal with no way to opt out gets suppressed some other way.
+ */
+export function noTestsMessage(
+  runner: TestRunnerName,
+  note: string,
+  testPaths: readonly string[],
+): string {
+  return (
+    "the run completed and discovered NO TESTS, so it is evidence of nothing: " +
+    "kragg will not report a gate green because zero tests failed.\n" +
+    `${note}\n` +
+    `${searched(runner, testPaths)}\n` +
+    "Fix one of: point `test_paths` at the tests (an entry may be a directory or a " +
+    "pattern, so `src/**/*.test.ts` selects a colocated suite); set `test_command` to the " +
+    "argv that runs them, if the suite needs a loader, a setup file or a config flag; or " +
+    'set `test_runner` to "off" to skip this gate deliberately.'
+  );
+}
+
+/** What the runner was actually pointed at, in its own terms. */
+function searched(runner: TestRunnerName, testPaths: readonly string[]): string {
+  if (runner === "node") {
+    return `searched: ${testRunnerPatterns(testPaths).join(", ")}`;
+  }
+  return (
+    `searched: whatever ${runner} discovers from its own config — kragg does not pass ` +
+    "`test_paths` to it, so an empty result is that config's file selection"
   );
 }
 
@@ -161,67 +195,4 @@ function tail(text: string, maxLines = 20): string {
   return lines.length <= maxLines
     ? text
     : [`… ${lines.length - maxLines} earlier lines`, ...lines.slice(-maxLines)].join("\n");
-}
-
-/**
- * Was the RUNNER ITSELF missing?
- *
- * The `_is_tool_module` twin. `missingToolName` reports whatever name the
- * output said could not be found; only when that name IS the runner does this
- * become an environment failure. A test file that cannot import
- * `./helpers.ts` produces the same class of message and is a test failure —
- * reported through the normal parse path, against the file that failed.
- */
-export function runnerMissing(
-  gate: string,
-  env: ProjectEnvironment,
-  runner: TestRunnerName,
-  stdout: string,
-  stderr: string,
-): Unavailable | undefined {
-  const missing = missingToolName({
-    name: gate,
-    command: [],
-    cwd: env.root,
-    returncode: 127,
-    stdout,
-    stderr,
-  });
-  if (missing === null) {
-    return undefined;
-  }
-  const binName = runner === "vitest" ? "vitest" : runner;
-  if (missing !== binName && !missing.endsWith(`/${binName}`)) {
-    return undefined;
-  }
-  if (runner === "vitest") {
-    return missingTool(missingToolMessage(env, "vitest", "vitest"));
-  }
-  return missingTool(
-    `${binName} could not be started, so no tests ran.\n` +
-      (runner === "bun"
-        ? "Install bun (https://bun.com) or set `test_runner` to a runner this project has."
-        : "kragg runs `node --test` on its own interpreter; this should not happen.") +
-      `\n${remediation(env.packageManager, binName)}`,
-  );
-}
-
-/** Why no runner ran, with the commands that would make one available. */
-export function skipReason(detection: RunnerDetection, env: ProjectEnvironment): string {
-  if (detection.source.startsWith("policy:")) {
-    return `${detection.source} — the test gate is switched off in kragg.json`;
-  }
-  if (detection.unsupported !== undefined) {
-    return (
-      `this project's test script runs ${detection.unsupported}, which kragg does not ` +
-      "drive yet. Nothing was checked — set `test_runner` explicitly if one of " +
-      "vitest / node / bun can run this suite."
-    );
-  }
-  return (
-    "no test runner detected (looked at package.json#scripts.test, vitest.config.*, " +
-    "a vitest dependency, and bunfig.toml). No tests were run, so nothing was verified.\n" +
-    `${remediation(env.packageManager, "vitest @vitest/coverage-v8")}\n` +
-    "or use Node's built-in runner: set `\"test\": \"node --test\"` in package.json."
-  );
 }

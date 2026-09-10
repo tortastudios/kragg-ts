@@ -69,6 +69,10 @@ Options for check only:
   --since <ref>          only files changed since <ref>
   --fail-fast            stop at the first failing gate
   --all                  run slow gates even after a fast gate failed
+  --update-baseline      record this run's findings from the metric, structure
+                         and test-quality gates as reviewed legacy debt in the
+                         file kragg.json#baseline names (full runs only; the
+                         security, compiler and evidence gates are refused)
 
 --changed and --since run a FULL check instead when the change set includes a
 configuration or dependency input (kragg.json, tsconfig*.json, package.json, a

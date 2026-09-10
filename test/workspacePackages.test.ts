@@ -169,7 +169,10 @@ describe("runPackages over canned gates", () => {
   }
 
   /** An `assemble` that records its inputs and answers with `outcomeFor(root)`. */
-  function canned(seen: Seen[], outcomeFor: (root: string) => "pass" | "fail" | "error"): Assemble {
+  function canned(
+    seen: Seen[],
+    outcomeFor: (root: string) => "pass" | "fail" | "error",
+  ): Assemble<ReportFlags> {
     return async (flags, policy, env) => {
       seen.push({ root: flags.root, policy, packageManager: env.packageManager, source: env.source });
       const outcome = outcomeFor(flags.root);
@@ -239,7 +242,7 @@ describe("runPackages over canned gates", () => {
     const root = workspace();
     const seen: Seen[] = [];
     let gatesRan = 0;
-    const assemble: Assemble = async (flags, policy, env) => {
+    const assemble: Assemble<ReportFlags> = async (flags, policy, env) => {
       seen.push({ root: flags.root, policy, packageManager: env.packageManager, source: env.source });
       if (flags.root.endsWith("b")) {
         return { ok: false, exit: EXIT_USAGE, message: "the policy's `tsconfig` setting names nope.json, which does not exist" };
@@ -404,5 +407,50 @@ describe("the CLI end to end", () => {
     const forbidden = payloads[0]?.gates.find((gate) => gate.name === "forbidden-calls");
     assert.equal(forbidden?.passed, false);
     assert.equal(forbidden?.violations[0]?.file, "src/index.ts");
+  });
+
+  it("applies and records the baseline at the MEMBER's own root", async () => {
+    // The seam between TOR-1371 and TOR-1377. A member run is a full run of
+    // that member, so it is eligible to record — but every path in it is the
+    // member's, so the file it writes and reads is the member's, never the
+    // root's. Recording under the root would let one package's accepted debt
+    // silence another's findings.
+    const root = workspace();
+    put(root, "kragg.json", `${POLICY.slice(0, -1)},"baseline":".kragg/baseline.json","max_file_lines":1}`);
+    const recorded = await run(
+      ["check", "--no-journal", "--package", "@ws/a", "--update-baseline"],
+      root,
+    );
+    assert.match(recorded.err, /recorded \d+ findings as accepted legacy debt in \.kragg\/baseline\.json/u);
+    assert.ok(
+      existsSync(join(root, "packages", "a", ".kragg", "baseline.json")),
+      "the member records under its own root",
+    );
+    assert.ok(
+      !existsSync(join(root, ".kragg", "baseline.json")),
+      "and never under the workspace root",
+    );
+    // Applied on the next run of the SAME member: `structure` is now clean…
+    const applied = await run(["check", "--no-journal", "--package", "@ws/a"], root);
+    assert.match(applied.err, /baseline \.kragg\/baseline\.json: [1-9]\d* findings accepted/u);
+    const structure = applied.out.split("\n").find((line) => line.includes("] structure"));
+    assert.match(structure ?? "", /\[PASS\] structure/u);
+    // …and NOT for the member that recorded nothing.
+    const other = await run(["check", "--no-journal", "--package", "@ws/b"], root);
+    assert.match(other.out, /\[FAIL\] structure/u);
+  });
+
+  it("refuses --update-baseline for a member whose policy names no baseline, before any gate runs", async () => {
+    // Judged per root inside `assembleCheck`, so the whole invocation is exit
+    // 2 rather than half the members recording and the rest erroring.
+    const root = workspace();
+    put(root, "packages/b/kragg.json", POLICY);
+    const result = await run(
+      ["check", "--no-journal", "--package", "@ws/b", "--update-baseline"],
+      root,
+    );
+    assert.equal(result.code, EXIT_USAGE, result.err);
+    assert.match(result.err, /packages\/b: kragg\.json#baseline names no file/u);
+    assert.ok(!existsSync(join(root, "packages", "b", ".kragg", "baseline.json")));
   });
 });

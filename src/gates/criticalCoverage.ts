@@ -87,6 +87,7 @@ import { parseLcov } from "../adapters/support/lcov.ts";
 import type { Violation } from "../engine/models.ts";
 import {
   criticalFunctions,
+  declarationProblem,
   hasCriticalityData,
   simpleName,
   type CriticalFunction,
@@ -151,6 +152,8 @@ export interface CriticalCoverageGap {
   readonly reason?: string | undefined;
   /** The declaration's 1-based line in the source, when the source states it. */
   readonly line?: number | undefined;
+  /** Why a reviewer declared it critical, when one did; see the policy. */
+  readonly declaredReason?: string;
 }
 
 /** Return violations for critical functions with uncovered or unmeasured lines. */
@@ -159,6 +162,12 @@ export function checkCriticalCoverage(
 ): TestDepthOutcome {
   if (!hasCriticalityData(options.root)) {
     return skipped(NO_CRITICALITY_REASON);
+  }
+  // A `critical_functions` entry that names nothing means this gate would
+  // measure a population a reviewer believes is larger. Error, not silence.
+  const stale = declarationProblem(options.root);
+  if (stale !== null) {
+    return failed(stale);
   }
   const coverage = coverageModel(options);
   if (coverage === null) {
@@ -363,8 +372,14 @@ class Row {
   }
 
   private base(): RowBase {
-    const { qualname, file, fanIn } = this.#critical;
-    return { qualname, file, fanIn, line: this.#line };
+    const { qualname, file, fanIn, declaredReason } = this.#critical;
+    return {
+      qualname,
+      file,
+      fanIn,
+      line: this.#line,
+      ...(declaredReason === undefined ? {} : { declaredReason }),
+    };
   }
 }
 
@@ -374,6 +389,8 @@ interface RowBase {
   readonly file: string;
   readonly fanIn: number;
   readonly line: number | undefined;
+  /** Why a reviewer declared it critical; absent when the graph selected it. */
+  readonly declaredReason?: string;
 }
 
 /** The span the report itself states — istanbul's `loc`; lcov states none. */
@@ -437,9 +454,13 @@ function recordFor(
 function toViolation(gap: CriticalCoverageGap): Violation {
   const simple = simpleName(gap.qualname);
   const preview = gap.missingLines.slice(0, PREVIEW_LIMIT).join(", ");
+  // A declared function is named with the reviewer's reason, for the same
+  // purpose as in `critical-tests`: "fan-in 1, why is this gated" is the
+  // question the message has to answer before anybody acts on it.
+  const why = gap.declaredReason === undefined ? "" : ` (declared: ${gap.declaredReason})`;
   return {
     message:
-      `critical function ${gap.qualname} has ` +
+      `critical function ${gap.qualname}${why} has ` +
       `${gap.missingLines.length} uncovered lines`,
     file: gap.file,
     line: gap.missingLines[0] ?? 1,
@@ -451,8 +472,12 @@ function toViolation(gap: CriticalCoverageGap): Violation {
 /** An unmeasured function: its own code, and the cause in the message. */
 function unmeasuredViolation(gap: CriticalCoverageGap): Violation {
   const simple = simpleName(gap.qualname);
+  // Same reason `toViolation` quotes it: a declared function is gated because
+  // a reviewer said so, and a reader asked to write a test for a fan-in-1
+  // function needs to be told that before deciding it is a false positive.
+  const why = gap.declaredReason === undefined ? "" : ` (declared: ${gap.declaredReason})`;
   return {
-    message: `critical function ${gap.qualname} has no coverage data: ${gap.reason ?? ""}`,
+    message: `critical function ${gap.qualname}${why} has no coverage data: ${gap.reason ?? ""}`,
     file: gap.file,
     line: gap.line ?? 1,
     code: CRITICAL_UNMEASURED_CODE,

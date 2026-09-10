@@ -20,6 +20,12 @@
  *    at the top. Never a merge, and never the defaults for a member of a repo
  *    that configured something.
  *  - TSCONFIG: the member policy's `tsconfig`, through `projectTsconfig`.
+ *  - BASELINE: the member policy's `baseline`, read and (under
+ *    `--update-baseline`) written at the MEMBER's root. A member that inherits
+ *    the root's policy therefore keeps its accepted debt in its own
+ *    `<member>/.kragg/baseline.json`, at the same relative path the root uses
+ *    for its own — one reviewed file per root, never one root's file silently
+ *    absorbing another root's findings.
  *  - COMPILER: `resolveTypeScript(member)` — the member's own `typescript`,
  *    or the one hoisted to the workspace root, resolved the way the member's
  *    code resolves it. Never the root's when the member has its own, and
@@ -64,9 +70,16 @@ import { declaresPolicy, loadPolicy, type KraggPolicy } from "../policy/policy.t
 import type { Assembly } from "./check.ts";
 import { executePipeline, type PipelineRun, type ReportFlags } from "./pipeline.ts";
 
-/** Builds one root's pipeline: `assembleCheck` or `assembleSecurity`. */
-export type Assemble = (
-  flags: ReportFlags,
+/**
+ * Builds one root's pipeline: `assembleCheck` or `assembleSecurity`.
+ *
+ * Generic in the flag record so a command's own flags reach the member run
+ * with their types intact — `check` passes `--update-baseline` through here,
+ * and a `ReportFlags`-typed seam would have dropped it from the type while
+ * the spread kept carrying it at runtime.
+ */
+export type Assemble<F extends ReportFlags> = (
+  flags: F,
   policy: KraggPolicy,
   env: ProjectEnvironment,
 ) => Promise<Assembly>;
@@ -92,7 +105,10 @@ type Selection = { readonly ok: true; readonly members: readonly WorkspacePackag
 type Preparation = { readonly ok: true; readonly members: readonly PreparedMember[] } | Refusal;
 
 /** Run the pipeline once per selected member and return the worst exit code. */
-export async function runPackages(flags: ReportFlags, assemble: Assemble): Promise<number> {
+export async function runPackages<F extends ReportFlags>(
+  flags: F,
+  assemble: Assemble<F>,
+): Promise<number> {
   const prepared = await prepareMembers(flags, assemble);
   if (!prepared.ok) {
     process.stderr.write(`kragg: ${prepared.message}\n`);
@@ -121,7 +137,10 @@ export async function runPackages(flags: ReportFlags, assemble: Assemble): Promi
  * Phase 1: resolve every selector and assemble every member's pipeline —
  * every usage error there is, before any gate runs anywhere.
  */
-async function prepareMembers(flags: ReportFlags, assemble: Assemble): Promise<Preparation> {
+async function prepareMembers<F extends ReportFlags>(
+  flags: F,
+  assemble: Assemble<F>,
+): Promise<Preparation> {
   const rootEnv = resolveProjectEnvironment(flags.root);
   const rootPolicy = loadPolicy(flags.root);
   const selected = selectMembers(flags, rootEnv);
@@ -131,7 +150,7 @@ async function prepareMembers(flags: ReportFlags, assemble: Assemble): Promise<P
   const members: PreparedMember[] = [];
   for (const member of selected.members) {
     const policy = declaresPolicy(member.root) ? loadPolicy(member.root) : rootPolicy;
-    const memberFlags: ReportFlags = { ...flags, root: member.root, targets: [], packages: [] };
+    const memberFlags: F = { ...flags, root: member.root, targets: [], packages: [] };
     const assembled = await assemble(memberFlags, policy, memberEnvironment(rootEnv, member));
     if (!assembled.ok) {
       return { ok: false, exit: assembled.exit, message: `${member.path}: ${assembled.message}` };

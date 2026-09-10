@@ -63,6 +63,7 @@
 import {
   analyze,
   criticalityPath,
+  declaredCritical,
   writeJson,
   writeStamp,
   criticalityFreshness,
@@ -106,7 +107,15 @@ export function criticalityCache(input: CriticalityCacheInput): CriticalityCache
       if (criticalityFreshness(input.root) === "fresh") {
         return;
       }
-      const result = analyze({ analysis: input.analysis });
+      // The policy's reviewed declarations are read HERE, at the derivation,
+      // so the file this writes says `is_critical: true` for a declared
+      // function like every other critical one. `readJson` applies them again
+      // when the file is read, which is what makes a declaration added after
+      // the last derivation take effect immediately; see `declared.ts`.
+      const result = analyze({
+        analysis: input.analysis,
+        declared: declaredCritical(input.root),
+      });
       if (!result.ok) {
         return;
       }

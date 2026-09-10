@@ -20,7 +20,14 @@ import { join } from "node:path";
 import { fileURLToPath } from "node:url";
 import { after, describe, it } from "node:test";
 
-import { DEFAULT_POLICY, loadPolicy, policyAsDict, PolicyError } from "../src/policy/policy.ts";
+import {
+  DEFAULT_POLICY,
+  declaresPolicy,
+  loadPolicy,
+  policyAsDict,
+  PolicyError,
+} from "../src/policy/policy.ts";
+import { readTable } from "../src/policy/readers.ts";
 import { kraggConfig } from "../src/scaffold/guardrails.ts";
 
 const REPO = fileURLToPath(new URL("..", import.meta.url));
@@ -206,5 +213,122 @@ describe("loadPolicy: the error names the file", () => {
     assert.throws(() => loadPolicy(root), {
       message: new RegExp(`^${join(root, "kragg.json").replaceAll(/[.\\/]/gu, "\\$&")}#max_file_lines `, "u"),
     });
+  });
+});
+
+describe("loadPolicy: test_command is an argv array kragg can read the output of", () => {
+  it("accepts the argv form and keeps every element separate", () => {
+    const policy = loadPolicy(
+      configured({ test_command: ["node", "--import", "tsx", "--test"] }),
+    );
+    assert.deepEqual(policy.testCommand, ["node", "--import", "tsx", "--test"]);
+    assert.deepEqual(policyAsDict(policy)["test_command"], [
+      "node",
+      "--import",
+      "tsx",
+      "--test",
+    ]);
+  });
+
+  it("rejects a shell string, and says why an argv array is required", () => {
+    assert.throws(
+      () => loadPolicy(configured({ test_command: "node --import tsx --test" })),
+      (error: unknown) => {
+        assert.ok(error instanceof PolicyError);
+        assert.match(error.message, /test_command must be a list of strings/u);
+        // The reason, not just the rule: kragg spawns with `shell: false`, so
+        // a string is one program name with spaces in it.
+        assert.match(error.message, /never a single shell string/u);
+        assert.match(error.message, /spawns without a shell/u);
+        return true;
+      },
+    );
+  });
+
+  it("rejects a non-string element by index rather than dropping it", () => {
+    assert.throws(
+      () => loadPolicy(configured({ test_command: ["node", 7] })),
+      /test_command\[1\] must be a string/u,
+    );
+  });
+
+  it("rejects an empty program name", () => {
+    assert.throws(
+      () => loadPolicy(configured({ test_command: ["", "--test"] })),
+      /test_command\[0\] must be the program to run/u,
+    );
+  });
+
+  it("honours `[]` as the explicit `kragg builds the argv itself`", () => {
+    assert.deepEqual(loadPolicy(configured({ test_command: [] })).testCommand, []);
+    assert.deepEqual(DEFAULT_POLICY.testCommand, []);
+  });
+
+  it("refuses a command whose report format it could not read, naming test_runner", () => {
+    // kragg parses the runner's report, and the three formats are unrelated.
+    // Exit 2 at load beats discovering it after a suite has run.
+    assert.throws(
+      () => loadPolicy(configured({ test_command: ["tsx", "--test"] })),
+      (error: unknown) => {
+        assert.ok(error instanceof PolicyError);
+        assert.match(error.message, /test_command runs "tsx"/u);
+        assert.match(error.message, /Set `test_runner`/u);
+        return true;
+      },
+    );
+    // …and accepts it once the project says which format it produces.
+    assert.deepEqual(
+      loadPolicy(configured({ test_command: ["tsx", "--test"], test_runner: "node" }))
+        .testCommand,
+      ["tsx", "--test"],
+    );
+  });
+});
+
+describe("readTable: absent is the ONLY silent outcome", () => {
+  // The one file-reading primitive under every policy source, and the one
+  // place "the project did not configure kragg" is distinguished from "the
+  // project configured kragg and I could not read it". `declaresPolicy` and
+  // `loadSource` both lean on that distinction — a workspace member whose
+  // malformed `kragg.json` read as `null` would silently inherit the root's
+  // rules — so it is asserted directly rather than through a loader.
+
+  it("returns null for a file that is not there, and the parsed object when it is", () => {
+    const root = project({ "kragg.json": '{"profile":"strict"}' });
+    assert.equal(readTable(join(root, "nope.json")), null);
+    // ENOTDIR, not ENOENT: a path THROUGH a file is still "not there".
+    assert.equal(readTable(join(root, "kragg.json", "deeper.json")), null);
+    assert.deepEqual(readTable(join(root, "kragg.json")), { profile: "strict" });
+  });
+
+  it("throws PolicyError for invalid JSON and for a non-object top level", () => {
+    const broken = project({ "kragg.json": "{not json" });
+    assert.throws(
+      () => readTable(join(broken, "kragg.json")),
+      (error: unknown) => {
+        assert.ok(error instanceof PolicyError);
+        assert.match(error.message, /kragg\.json is not valid JSON/u);
+        return true;
+      },
+    );
+    const array = project({ "kragg.json": "[1, 2]" });
+    assert.throws(
+      () => readTable(join(array, "kragg.json")),
+      (error: unknown) => {
+        assert.ok(error instanceof PolicyError);
+        assert.match(error.message, /must contain a JSON object at the top level/u);
+        return true;
+      },
+    );
+  });
+
+  it("is what declaresPolicy asks, so a member's own config is never missed", () => {
+    // TOR-1371 + TOR-1372: `--package` inherits the root's policy only when
+    // the member declares NONE. Both spellings count, and neither is read
+    // through a defaulting path.
+    assert.equal(declaresPolicy(project({ "kragg.json": "{}" })), true);
+    assert.equal(declaresPolicy(project({ "package.json": '{"kragg":{}}' })), true);
+    assert.equal(declaresPolicy(project({ "package.json": '{"name":"m"}' })), false);
+    assert.equal(declaresPolicy(project({})), false);
   });
 });

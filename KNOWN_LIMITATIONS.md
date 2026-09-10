@@ -370,9 +370,37 @@ deliberately does not cover, each detected and reported rather than guessed:
   from another file is not followed**, so a test whose only assertion lives in
   a shared helper module is a false positive. Local helpers *are* followed,
   transitively.
-- `critical-untested` asks only whether a test **references** the function. It
-  cannot tell a real test from `assert.equal(typeof f, "function")`. The gate
-  is a floor, and a trivially gameable one.
+- `critical-untested` asks whether a running test **binds** the function: an
+  identifier in a test-tree file, outside any `it.skip`/`test.todo`/
+  `describe.skip`, whose symbol the type checker resolves — through imports,
+  `as` aliases, re-exports and shared helpers — to the function's declaration.
+  A comment, a string, a test title, a same-named local or a fake's method is
+  not a reference. That is a **floor**, not coverage: a bound reference is
+  evidence the test *exercises* the function, and says nothing about whether
+  the assertions would catch a wrong answer. `assert.equal(typeof f,
+  "function")` still binds `f` and still satisfies it; `expectAuth(f)` passing
+  the function to a helper that never calls it satisfies it too, because the
+  gate does not follow what the helper does with its argument.
+- The binding is by **declaration**, so a value typed as the class resolves
+  its methods even when the runtime object is a stub: `const c = {} as
+  Client; c.send()` binds `Client.send`. A call through an *interface*-typed
+  receiver resolves to the interface member, not the implementation, so it
+  does not count — the same blind spot the call graph has.
+- Test files the project's `tsconfig.json` does **not** include have no
+  checker view and yield no evidence. They are named in the finding as
+  unresolvable rather than text-matched. The fix is to include the test paths
+  in `tsconfig.json`; a gate that cannot resolve a file will not guess about
+  it.
+- A shared helper under the test paths counts wherever it binds the function,
+  whether or not any running test calls the helper; the gate reasons about
+  files, not about a call graph of the test tree.
+- `kragg spec`'s property-based summary is a different, weaker signal, kept
+  as the Python port has it: a function is credited when its simple name
+  occurs, on a word boundary, in the **text** of a recognised
+  `fc.*`/`test.prop` test — title, comment, string or code, skipped or not.
+  It establishes that a property test *names* the function, not that the
+  property calls it, reaches its interesting inputs or asserts about its
+  result. It fails nothing, and it is never a substitute for the gates.
 
 ### `critical-coverage` and `kragg coverage`
 
@@ -390,6 +418,24 @@ deliberately does not cover, each detected and reported rather than guessed:
 
 ### `critical-tests` and criticality data
 
+- A changed test file vouches for a changed critical function only when the
+  checker binds an identifier in it — or in a test-tree module it imports —
+  to the function **or to anything in the function's module**, outside a
+  skipped test. The module clause is deliberate: a module's test that
+  constructs its class is the test a reviewer expects to see edited, and
+  demanding the function by name would reject it. It also means a changed
+  test that binds *any* export of a module vouches for *every* critical
+  function in that module, and a helper that imports many source modules
+  makes every test importing it relevant to all of them. The link is still a
+  checker-resolved binding, never a path, a name or an unrelated edit.
+- The gate says a relevant test was **changed**, not that it is adequate:
+  whitespace inside a test that binds the function still counts as a change
+  to it. What the assertions are worth is `test-quality`'s and `kragg
+  mutation`'s question.
+- The helper closure follows `import`/`export ... from` specifiers by path
+  arithmetic (`analysis/imports.ts`), so a helper reached through a
+  `tsconfig` `paths` alias or an `export *` barrel is not followed; the test
+  file's own bindings are still resolved by the checker.
 - The call graph resolves through the checker and **never guesses**. A call
   through an *interface*-typed receiver resolves to the signature, not to any
   implementation, so no edge is drawn. Python has the identical blind spot.

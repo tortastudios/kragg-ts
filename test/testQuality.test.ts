@@ -26,6 +26,7 @@ import { after, describe, it } from "node:test";
 
 import ts from "typescript";
 
+import { analysisProgram } from "../src/analysis/program.ts";
 import type { Violation } from "../src/engine/models.ts";
 import { writeStamp } from "../src/gates/criticality.ts";
 import { calleeChain, type CalleeChain } from "../src/gates/testDepth/testCases.ts";
@@ -34,7 +35,18 @@ import {
   CRITICAL_UNTESTED_CODE,
   NO_ASSERT_CODE,
   NO_ASSERT_FIX_HINT,
+  SKIPPED_ONLY_NOTE,
 } from "../src/gates/testQuality.ts";
+import {
+  failed as failedOutcome,
+  ran as ranOutcome,
+  skipped as skippedOutcome,
+} from "../src/gates/testDepth/outcome.ts";
+import {
+  isUnderAny,
+  normalizePath,
+  OUTSIDE_PROGRAM_NOTE,
+} from "../src/gates/testDepth/references.ts";
 
 const roots: string[] = [];
 
@@ -44,9 +56,24 @@ after(() => {
   }
 });
 
+/** Includes the test tree, so the checker can bind what the tests name. */
+const TSCONFIG = JSON.stringify({
+  compilerOptions: {
+    target: "es2022",
+    module: "nodenext",
+    moduleResolution: "nodenext",
+    strict: true,
+    allowImportingTsExtensions: true,
+    noEmit: true,
+    types: [],
+  },
+  include: ["src", "test", "tests"],
+});
+
 function project(files: Readonly<Record<string, string>>): string {
   const root = mkdtempSync(join(tmpdir(), "kragg-test-quality-"));
   roots.push(root);
+  writeFileSync(join(root, "tsconfig.json"), TSCONFIG);
   for (const [name, contents] of Object.entries(files)) {
     const path = join(root, name);
     mkdirSync(dirname(path), { recursive: true });
@@ -72,9 +99,10 @@ function violationsIn(files: Readonly<Record<string, string>>): readonly Violati
     root,
     testPaths: ["test", "tests"],
     sourcePaths: ["src"],
+    program: analysisProgram({ root, api: ts }),
     api: ts,
   });
-  assert.equal(outcome.ok, true, "the gate should have run");
+  assert.equal(outcome.ok, true, outcome.ok ? "the gate should have run" : outcome.message);
   assert.equal(outcome.skipped, false, "the gate should not have skipped");
   return outcome.ok && !outcome.skipped ? outcome.violations : [];
 }
@@ -291,14 +319,28 @@ describe("test-quality: what is not a broken test", () => {
     assert.deepEqual(violationsFor(`const ok = test(pattern, input);`), []);
   });
 
-  it("honours a suppression comment on the flagged site", () => {
+  it("honours a suppression comment with a reason on the flagged site", () => {
     assert.deepEqual(
-      violationsFor(`it("known gap", () => { setup(); }); // kragg: ignore`),
+      violationsFor(`it("known gap", () => { setup(); }); // kragg: ignore -- smoke test: setup throwing is the assertion`),
       [],
     );
   });
+
+  it("reports a test whose bare marker names no reason, saying so", () => {
+    const violations = violationsFor(`it("known gap", () => { setup(); }); // kragg: ignore`);
+    assert.equal(violations.length, 1);
+    assert.match(violations[0]?.message ?? "", /^known gap has no assertions \(the `\/\/ kragg: ignore` on line 1 names no reason/u);
+  });
 });
 
+/**
+ * The reference check. A critical function is referenced when an identifier
+ * in the test tree, outside a skipped or todo test, BINDS to it through the
+ * checker — an alias, a re-export, a helper wrapper and a `describe`-level
+ * fixture all qualify, so a valid indirect test is never rejected for
+ * lacking a direct call. A comment, a string, a same-named local and a
+ * skipped test do not, because none of them exercises the function.
+ */
 describe("test-quality: critical references", () => {
   const CRITICALITY = JSON.stringify([
     { name: "src/client#Client.send", fan_in: 9, is_critical: true },
@@ -314,61 +356,207 @@ describe("test-quality: critical references", () => {
     function helper() {}
   `;
 
-  it("flags a public critical function no test mentions", () => {
-    const violations = violationsIn({
+  const IMPORT_CLIENT = 'import { Client } from "../src/client.ts";\n';
+
+  /** The gate over the fixture sources plus the given test-tree files. */
+  function referencesIn(tests: Readonly<Record<string, string>>): readonly Violation[] {
+    return violationsIn({
       ".kragg/criticality.json": CRITICALITY,
       "src/client.ts": SOURCE,
-      "test/sample.test.ts": `it("builds", () => { expect(new Client()).toBeTruthy(); });`,
+      ...tests,
+    });
+  }
+
+  it("flags a public critical function no test binds", () => {
+    const violations = referencesIn({
+      "test/sample.test.ts": `${IMPORT_CLIENT}it("builds", () => { expect(new Client()).toBeTruthy(); });`,
     });
     assert.equal(violations.length, 1);
     const violation = violations[0];
     assert.ok(violation !== undefined);
     assert.equal(violation.message, "no test references critical function src/client#Client.send");
     assert.equal(violation.code, CRITICAL_UNTESTED_CODE);
-    assert.equal(violation.fixHint, "add a test exercising send directly");
+    assert.equal(violation.fixHint, "add a test that exercises send, directly or through a helper");
     assert.equal(violation.file, undefined);
   });
 
-  it("is satisfied by a mention anywhere in the test tree", () => {
+  it("is satisfied by a direct call", () => {
     assert.deepEqual(
-      violationsIn({
-        ".kragg/criticality.json": CRITICALITY,
-        "src/client.ts": SOURCE,
-        "test/helpers.ts": `export const call = (c) => c.send();`,
-        "test/sample.test.ts": `it("builds", () => { expect(call(c)).toBe(1); });`,
+      referencesIn({
+        "test/sample.test.ts": `${IMPORT_CLIENT}it("sends", () => { expect(new Client().send()).toBe(undefined); });`,
       }),
       [],
+    );
+  });
+
+  it("is not satisfied by the name in a comment or a string", () => {
+    const violations = referencesIn({
+      "test/sample.test.ts": [
+        IMPORT_CLIENT,
+        "// TODO: send",
+        'it("send works", () => { expect(new Client()).toBeTruthy(); });',
+      ].join("\n"),
+    });
+    assert.deepEqual(codes(violations), [CRITICAL_UNTESTED_CODE]);
+  });
+
+  it("is not satisfied by a same-named symbol on another type", () => {
+    const violations = referencesIn({
+      "test/sample.test.ts": [
+        "class Fake { send() { return 1; } }",
+        'it("fakes", () => { expect(new Fake().send()).toBe(1); });',
+      ].join("\n"),
+    });
+    assert.deepEqual(codes(violations), [CRITICAL_UNTESTED_CODE]);
+  });
+
+  it("is satisfied by a typed helper anywhere in the test tree", () => {
+    assert.deepEqual(
+      referencesIn({
+        "test/helpers.ts": `${IMPORT_CLIENT}export const call = (c: Client) => c.send();`,
+        "test/sample.test.ts": `${IMPORT_CLIENT}import { call } from "./helpers.ts";\nit("calls", () => { expect(call(new Client())).toBe(undefined); });`,
+      }),
+      [],
+    );
+  });
+
+  it("follows an alias through a re-exporting barrel", () => {
+    assert.deepEqual(
+      referencesIn({
+        "src/auth.ts": "export function verifyPassword(given: string): boolean { return given.length > 3; }\n",
+        "test/barrel.ts": 'export { verifyPassword as vp } from "../src/auth.ts";\n',
+        "test/sample.test.ts": 'import { vp } from "./barrel.ts";\nit("aliases", () => { expect(vp("abcd")).toBe(true); });',
+        ".kragg/criticality.json": JSON.stringify([
+          { name: "src/auth#verifyPassword", fan_in: 5, is_critical: true },
+        ]),
+      }),
+      [],
+    );
+  });
+
+  it("is satisfied by the function passed to a helper, not called", () => {
+    assert.deepEqual(
+      referencesIn({
+        "src/auth.ts": "export function verifyPassword(given: string): boolean { return given.length > 3; }\n",
+        "test/sample.test.ts": [
+          'import { verifyPassword } from "../src/auth.ts";',
+          "function expectAuth(check: (given: string) => boolean): void { assert.ok(check('abcd')); }",
+          'it("indirect", () => { expectAuth(verifyPassword); });',
+        ].join("\n"),
+        ".kragg/criticality.json": JSON.stringify([
+          { name: "src/auth#verifyPassword", fan_in: 5, is_critical: true },
+        ]),
+      }),
+      [],
+    );
+  });
+
+  it("is satisfied by a describe-level fixture", () => {
+    assert.deepEqual(
+      referencesIn({
+        "test/sample.test.ts": [
+          IMPORT_CLIENT,
+          'describe("Client", () => {',
+          "  const client = new Client();",
+          "  const send = () => client.send();",
+          '  it("sends", () => { expect(send()).toBe(undefined); });',
+          "});",
+        ].join("\n"),
+      }),
+      [],
+    );
+  });
+
+  it("does not count a reference inside a skipped or todo test, and says so", () => {
+    const violations = referencesIn({
+      "test/sample.test.ts": [
+        IMPORT_CLIENT,
+        'it.skip("later", () => { expect(new Client().send()).toBe(undefined); });',
+        'test("pending", { todo: "soon" }, () => { new Client().send(); });',
+        'describe.skip("group", () => { it("x", () => { new Client().send(); }); });',
+        'it("real", () => { expect(new Client()).toBeTruthy(); });',
+      ].join("\n"),
+    });
+    assert.deepEqual(
+      violations.map((violation) => violation.message),
+      [`no test references critical function src/client#Client.send (${SKIPPED_ONLY_NOTE})`],
     );
   });
 
   it("exempts a critical function the module does not export", () => {
     // `helper` is critical and carries no underscore, but nothing outside
     // `src/client.ts` can reach it, so no test could reference it.
-    const violations = violationsIn({
-      ".kragg/criticality.json": CRITICALITY,
-      "src/client.ts": SOURCE,
-      "test/sample.test.ts": `it("sends", () => { expect(c.send()).toBe(1); });`,
-    });
-    assert.deepEqual(violations, []);
-  });
-
-  it("says nothing without criticality data", () => {
     assert.deepEqual(
-      violationsIn({
-        "src/client.ts": SOURCE,
-        "test/sample.test.ts": `it("x", () => { expect(1).toBe(1); });`,
+      referencesIn({
+        "test/sample.test.ts": `${IMPORT_CLIENT}it("sends", () => { expect(new Client().send()).toBe(undefined); });`,
       }),
       [],
     );
+  });
+
+  it("names the test files the program does not contain", () => {
+    const violations = referencesIn({
+      "tsconfig.json": JSON.stringify({
+        compilerOptions: { strict: true, noEmit: true, types: [] },
+        include: ["src"],
+      }),
+      "test/sample.test.ts": `${IMPORT_CLIENT}it("sends", () => { expect(new Client().send()).toBe(undefined); });`,
+    });
+    assert.deepEqual(
+      violations.map((violation) => violation.message),
+      [
+        "no test references critical function src/client#Client.send " +
+          `(1 test file is ${OUTSIDE_PROGRAM_NOTE}: test/sample.test.ts)`,
+      ],
+    );
+  });
+
+  it("errors when the program cannot be built", () => {
+    const root = project({
+      ".kragg/criticality.json": CRITICALITY,
+      "src/client.ts": SOURCE,
+      "tsconfig.json": "{ not json",
+      "test/sample.test.ts": 'it("x", () => { expect(1).toBe(1); });',
+    });
+    writeStamp(root, ["src", "test", "tests"]);
+    const outcome = checkTestQuality({
+      root,
+      testPaths: ["test", "tests"],
+      sourcePaths: ["src"],
+      program: analysisProgram({ root, api: ts }),
+      api: ts,
+    });
+    assert.equal(outcome.ok, false);
+    assert.match(outcome.ok ? "" : outcome.message, /tsconfig\.json/u);
+  });
+
+  it("does not load the program without a critical function to look for", () => {
+    const root = project({
+      "src/client.ts": SOURCE,
+      "tsconfig.json": "{ not json",
+      "test/sample.test.ts": 'it("x", () => { expect(1).toBe(1); });',
+    });
+    const program = analysisProgram({ root, api: ts });
+    const outcome = checkTestQuality({
+      root,
+      testPaths: ["test", "tests"],
+      sourcePaths: ["src"],
+      program,
+      api: ts,
+    });
+    assert.equal(outcome.ok && !outcome.skipped && outcome.violations.length, 0);
+    assert.equal(program.loaded(), false);
   });
 });
 
 describe("test-quality: when it cannot run", () => {
   it("skips visibly rather than passing on a repo with no tests", () => {
+    const root = project({ "src/a.ts": "export const a = 1;\n" });
     const outcome = checkTestQuality({
-      root: project({ "src/a.ts": "export const a = 1;\n" }),
+      root,
       testPaths: ["test", "tests"],
       sourcePaths: ["src"],
+      program: analysisProgram({ root, api: ts }),
       api: ts,
     });
     assert.equal(outcome.ok, true);
@@ -446,5 +634,31 @@ describe("calleeChain", () => {
     assert.equal(chainOf("this.it"), null);
     assert.equal(chainOf('"it".valueOf'), null);
     assert.equal(chainOf("runners[0].it"), null);
+  });
+});
+
+/** The three states the test-depth gates report, built by their constructors. */
+describe("test-depth outcomes", () => {
+  it("builds the three distinguishable states", () => {
+    assert.deepEqual(ranOutcome([]), { ok: true, skipped: false, violations: [] });
+    assert.deepEqual(skippedOutcome("no data"), { ok: true, skipped: true, reason: "no data" });
+    assert.deepEqual(failedOutcome("boom"), { ok: false, message: "boom" });
+  });
+});
+
+/** The path arithmetic the evidence rule keys its lookups on. */
+describe("references: path helpers", () => {
+  it("normalises to repo-relative POSIX", () => {
+    assert.equal(normalizePath("./test\\a.ts"), "test/a.ts");
+    assert.equal(normalizePath("test/"), "test");
+    assert.equal(normalizePath("/"), "/");
+  });
+
+  it("matches prefixes by segment", () => {
+    assert.equal(isUnderAny("test/a.ts", ["test"]), true);
+    assert.equal(isUnderAny("testing/a.ts", ["test"]), false);
+    assert.equal(isUnderAny("test", ["test"]), true);
+    assert.equal(isUnderAny("anything.ts", ["."]), true);
+    assert.equal(isUnderAny("src/a.ts", []), false);
   });
 });
