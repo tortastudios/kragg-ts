@@ -18,6 +18,8 @@ a previously green run red — see [Gate additions](#gate-additions) below.
 
 ## [Unreleased]
 
+## [0.2.0] — 2026-09-10
+
 ### Fixed
 
 - **TOR-1414** — a compiler diagnostic is no longer mistaken for a missing

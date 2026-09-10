@@ -1,6 +1,6 @@
 {
   "name": "@tortastudios/kragg-ts",
-  "version": "0.1.0",
+  "version": "0.2.0",
   "description": "Opinionated guardrails framework and CLI for AI-assisted TypeScript projects.",
   "keywords": [
     "guardrails",
