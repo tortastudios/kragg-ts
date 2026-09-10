@@ -224,17 +224,17 @@ describe("createNewProject", () => {
 
   /**
    * The tool's own pin is the other exemption, and it is tied to the pin: a
-   * released kragg writes `"kragg-ts": "<version>"` into every generated
-   * `package.json`, and that version is younger than the generated 30-day
-   * cooldown for its first month, so without the exemption the project's very
-   * first `pnpm install` fails (reproduced: an exact six-day-old pin under
-   * the generated `pnpm-workspace.yaml` is refused with
+   * released kragg writes `"@tortastudios/kragg-ts": "<version>"` into every
+   * generated `package.json`, and that version is younger than the generated
+   * 30-day cooldown for its first month, so without the exemption the
+   * project's very first `pnpm install` fails (reproduced: an exact
+   * six-day-old pin under the generated `pnpm-workspace.yaml` is refused with
    * `ERR_PNPM_NO_MATURE_MATCHING_VERSION`). A build with no released version
    * writes neither the pin nor the exemption. Asserted on every kind AND on
    * `init`, because the pin is written for all of them, and on both branches
    * of the generator directly, since this build carries only one version.
    */
-  it("exempts kragg-ts from the cooldown exactly when it pins kragg-ts", () => {
+  it("exempts @tortastudios/kragg-ts from the cooldown exactly when it pins @tortastudios/kragg-ts", () => {
     const workspace = (root: string): string =>
       readFileSync(join(root, "pnpm-workspace.yaml"), "utf8");
     const initRoot = temporaryRoot();
@@ -248,10 +248,10 @@ describe("createNewProject", () => {
     ];
     for (const root of roots) {
       const dev = readJson(root, "package.json")["devDependencies"] as Record<string, unknown>;
-      const pinned = typeof dev["kragg-ts"] === "string";
+      const pinned = typeof dev["@tortastudios/kragg-ts"] === "string";
       const yaml = workspace(root);
       assert.equal(
-        /^ {2}- "kragg-ts"$/m.test(yaml),
+        /^ {2}- "@tortastudios\/kragg-ts"$/m.test(yaml),
         pinned,
         `${root}: exemption without the pin, or the pin without the exemption`,
       );
@@ -262,17 +262,17 @@ describe("createNewProject", () => {
 
     const unpinned = pnpmWorkspace("cli", "fastmcp", false);
     assert.match(unpinned, /^minimumReleaseAgeExclude: \[\]$/m);
-    assert.equal(unpinned.includes("kragg-ts"), false);
+    assert.equal(unpinned.includes("@tortastudios/kragg-ts"), false);
 
     const initPinned = pnpmWorkspace(null, "fastmcp", true);
     assert.match(initPinned, /^minimumReleaseAgeExclude:$/m);
-    assert.match(initPinned, /^ {2}- "kragg-ts"$/m);
+    assert.match(initPinned, /^ {2}- "@tortastudios\/kragg-ts"$/m);
     assert.equal(initPinned.includes("@prefecthq/fastmcp-ts"), false);
     // An exemption has to carry its reason, as `// kragg: ignore` must.
     assert.match(initPinned, /the kragg that generated this project/);
 
     const both = pnpmWorkspace("mcp", "fastmcp", true);
-    assert.match(both, /^ {2}- "kragg-ts"$/m);
+    assert.match(both, /^ {2}- "@tortastudios\/kragg-ts"$/m);
     assert.match(both, /^ {2}- "@prefecthq\/fastmcp-ts"$/m);
     assert.match(both, /REMOVE/);
   });

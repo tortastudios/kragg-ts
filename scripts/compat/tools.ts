@@ -133,7 +133,7 @@ async function runRow(environment: LaneEnvironment, spec: RowSpec): Promise<RowO
     "kragg check --all",
     [
       environment.nodeUnderTest,
-      join(root, "node_modules", "kragg-ts", "dist", "cli.js"),
+      join(root, "node_modules", "@tortastudios", "kragg-ts", "dist", "cli.js"),
       "check",
       "--all",
       "--format",

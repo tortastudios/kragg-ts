@@ -20,7 +20,7 @@
   "properties": {
     "$schema": {
       "type": "string",
-      "description": "Editor validation pointer, e.g. \"./node_modules/kragg-ts/kragg.schema.json\". Not a setting."
+      "description": "Editor validation pointer, e.g. \"./node_modules/@tortastudios/kragg-ts/kragg.schema.json\". Not a setting."
     },
     "profile": {
       "type": "string",

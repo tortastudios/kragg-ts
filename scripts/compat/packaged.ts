@@ -120,7 +120,7 @@ async function installedChecks(
     return ranRow(ROW, checks);
   }
 
-  const packageRoot = join(root, "node_modules", "kragg-ts");
+  const packageRoot = join(root, "node_modules", "@tortastudios", "kragg-ts");
   for (const entry of publishedEntryPoints(manifest)) {
     checks.push(
       check(
@@ -308,7 +308,7 @@ function fixtureFiles(tarball: string): Readonly<Record<string, string>> {
         type: "module",
         devDependencies: {
           "@types/node": "24.12.4",
-          "kragg-ts": tarballSpecifier(tarball),
+          "@tortastudios/kragg-ts": tarballSpecifier(tarball),
           oxlint: FIXTURE_OXLINT,
           typescript: FIXTURE_TYPESCRIPT,
         },
@@ -349,10 +349,10 @@ function fixtureFiles(tarball: string): Readonly<Record<string, string>> {
  * broken `.d.ts` fails at compile time rather than producing an `any` that
  * silently typechecks — `noImplicitAny` alone would not catch a missing
  * declaration file, but `moduleResolution: nodenext` refusing to resolve
- * `kragg-ts` would.
+ * `@tortastudios/kragg-ts` would.
  */
-const CONSUMER = `import { buildReport, FAST, gateResult, runGates, SCHEMA_VERSION, toPayload } from "kragg-ts";
-import type { GateResult, GateSpec, ReportPayload } from "kragg-ts";
+const CONSUMER = `import { buildReport, FAST, gateResult, runGates, SCHEMA_VERSION, toPayload } from "@tortastudios/kragg-ts";
+import type { GateResult, GateSpec, ReportPayload } from "@tortastudios/kragg-ts";
 
 const spec: GateSpec = {
   name: "compat-smoke",

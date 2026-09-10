@@ -32,17 +32,19 @@ Three properties matter more than the gate list:
 
 ## Install
 
-The package on npm is called `kragg-ts`. The command it installs is `kragg`.
-The name split matters: this is the TypeScript sibling of a Python tool that
-is already called `kragg` on PyPI, and the two are not the same package.
+The package on npm is called `@tortastudios/kragg-ts`. The command it
+installs is `kragg`. It carries the org scope because the TypeScript sibling
+of a Python tool that is already called `kragg` on PyPI cannot use that bare
+name too, and the two are not the same package.
 
 ```sh
-pnpm add -D kragg-ts
+pnpm add -D @tortastudios/kragg-ts
 pnpm exec kragg check
 ```
 
-`npm install --save-dev kragg-ts` and `yarn add --dev kragg-ts` install the
-same tarball, but only pnpm installs are exercised by CI — see
+`npm install --save-dev @tortastudios/kragg-ts` and
+`yarn add --dev @tortastudios/kragg-ts` install the same tarball, but only
+pnpm installs are exercised by CI — see
 [KNOWN_LIMITATIONS.md](KNOWN_LIMITATIONS.md#platform-and-runtime-support-is-asserted-only-where-the-matrix-runs).
 From a checkout instead:
 
@@ -90,7 +92,7 @@ the argv it builds is right, on every host; only a Windows row proves
 both SDKs — `--mcp-sdk fastmcp`, the default, and `--mcp-sdk official`) is
 generated, installed with `--ignore-scripts`, and made to pass its own
 `pnpm exec kragg check` on every pull request and every push to `main` —
-`node scripts/compat.ts scaffolds` locally. The lane installs the `kragg-ts`
+`node scripts/compat.ts scaffolds` locally. The lane installs the `@tortastudios/kragg-ts`
 the scaffold pins from the tarball it just packed, so it proves the scaffold
 and not the registry; the scaffolding section of
 [KNOWN_LIMITATIONS.md](KNOWN_LIMITATIONS.md#scaffolding) says what that
@@ -538,7 +540,7 @@ is written.
 
 ```json
 {
-  "$schema": "./node_modules/kragg-ts/kragg.schema.json",
+  "$schema": "./node_modules/@tortastudios/kragg-ts/kragg.schema.json",
   "source_paths": ["src"],
   "test_paths": ["test"],
   "tsconfig": "tsconfig.json",

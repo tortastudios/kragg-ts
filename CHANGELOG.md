@@ -18,6 +18,14 @@ a previously green run red — see [Gate additions](#gate-additions) below.
 
 ## [Unreleased]
 
+### Changed
+
+- The npm package is now `@tortastudios/kragg-ts`, not the bare `kragg-ts`
+  this project shipped a few commits earlier. The org owns the scope on
+  npm, so the package lives there too. The command it installs is still
+  `kragg`, and every scaffold's self-pin, the `$schema` example, and the
+  compatibility lanes' install paths were updated to match.
+
 ### Added
 
 - **TOR-1378** — releases are gated on end-to-end regressions and on truthful

@@ -80,14 +80,14 @@ point of dogfooding the tool on itself. `oxlint` was the pick: no
 dependencies, a single Rust binary, and the fastest of the three linters kragg
 supports (oxlint, biome, eslint). It runs only on this repository, at dev
 time, through `pnpm exec oxlint`. It is never imported by any file under
-`src/`, and it ships to nobody who installs `kragg-ts`.
+`src/`, and it ships to nobody who installs `@tortastudios/kragg-ts`.
 
 **The whole tree is 23 lockfile entries, of which five land on any one
 machine.** `pnpm list --depth Infinity`, which agrees with the 23 entries in
 `pnpm-lock.yaml`'s `packages:` block, with the platform bindings elided:
 
 ```
-kragg-ts@0.1.0
+@tortastudios/kragg-ts@0.1.0
 │   dependencies:
 ├── typescript@6.0.3
 │   devDependencies:

@@ -17,7 +17,7 @@
  * different entry points.
  *
  * ── THE ONE SUBSTITUTION, AND WHY IT IS HONEST ─────────────────────────────
- * `guardrails.ts` pins `kragg-ts` in the generated `devDependencies` as soon
+ * `guardrails.ts` pins `@tortastudios/kragg-ts` in the generated `devDependencies` as soon
  * as this build carries a released version number — which 0.1.0 is, and which
  * is not on npm yet. Left alone, every row here would fail with an
  * `ERR_PNPM_FETCH_404` that says nothing about the scaffold. So the lane
@@ -104,7 +104,7 @@ async function runRow(environment: LaneEnvironment, spec: ScaffoldSpec): Promise
   }
   note(`scaffold at ${root}`);
 
-  checks.push(check("the generated manifest pins kragg-ts", substituteTarball(root, environment.tarball), "rewritten to the packed tarball for this run"));
+  checks.push(check("the generated manifest pins @tortastudios/kragg-ts", substituteTarball(root, environment.tarball), "rewritten to the packed tarball for this run"));
 
   const installed = await install(environment, root);
   checks.push(
@@ -207,7 +207,7 @@ function gatesIn(report: Record<string, unknown> | null): readonly Record<string
   return records;
 }
 
-/** Point the generated `kragg-ts` devDependency at this run's tarball. */
+/** Point the generated `@tortastudios/kragg-ts` devDependency at this run's tarball. */
 function substituteTarball(root: string, tarball: string): boolean {
   const path = join(root, "package.json");
   const parsed: unknown = JSON.parse(readFileSync(path, "utf8"));
@@ -220,8 +220,8 @@ function substituteTarball(root: string, tarball: string): boolean {
     return false;
   }
   const devDependencies = dev as Record<string, unknown>;
-  const pinned = typeof devDependencies["kragg-ts"] === "string";
-  devDependencies["kragg-ts"] = tarballSpecifier(tarball);
+  const pinned = typeof devDependencies["@tortastudios/kragg-ts"] === "string";
+  devDependencies["@tortastudios/kragg-ts"] = tarballSpecifier(tarball);
   writeFileSync(path, `${JSON.stringify(manifest, null, 2)}\n`, "utf8");
   return pinned;
 }

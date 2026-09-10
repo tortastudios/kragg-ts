@@ -7,7 +7,7 @@
  * bottom of `src/cli.ts` was only ever exercised through a path with no
  * symlink in it. Both gaps shipped a real defect:
  *
- *   $ node node_modules/kragg-ts/dist/cli.js --version
+ *   $ node node_modules/@tortastudios/kragg-ts/dist/cli.js --version
  *   $ echo $?
  *   0
  *

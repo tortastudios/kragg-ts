@@ -79,7 +79,7 @@ export function toolFixtureFiles(tarball: string, spec: RowSpec): Readonly<Recor
 function manifest(tarball: string, spec: RowSpec): string {
   const devDependencies: Record<string, string> = {
     "@types/node": pin("@types/node"),
-    "kragg-ts": tarballSpecifier(tarball),
+    "@tortastudios/kragg-ts": tarballSpecifier(tarball),
     typescript: pin("typescript"),
   };
   if (spec.runner === "vitest") {
