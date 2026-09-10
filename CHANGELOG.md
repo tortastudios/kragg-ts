@@ -80,6 +80,42 @@ a previously green run red — see [Gate additions](#gate-additions) below.
   the stamp sidecar keeps its keys. `KNOWN_LIMITATIONS.md` lists what remains
   unsupported (nested workspaces are not expanded from the root, `--changed`
   per member, glob/YAML syntax outside the grammar, non-TypeScript members).
+- **TOR-1379** — the packaged CLI, the published API, the scaffolds and the
+  real external tools are executed, on the runtimes and platforms
+  `package.json` claims. `pnpm test` imports `src/*.ts` on the single Node in
+  `.node-version`, on one operating system: it never built, never packed,
+  never installed, and so `engines.node: ">=20"`, `bin`/`main`/`types`/
+  `exports`, and the Windows branch in `src/engine/runner.ts` had **no**
+  executable evidence behind any of them. `scripts/compat.ts` adds three
+  lanes, and CI runs exactly the commands a maintainer runs by hand:
+  - **`packaged`** — build, `pnpm pack`, install the **tarball** into a
+    throwaway project, then on the row's Node run `--version`, `--help`, the
+    installed `node_modules/.bin` shim, a real `kragg check` whose `tsc` and
+    `lint` gates must *spawn* the fixture's own binaries (on Windows, `.cmd`
+    batch shims), and a TypeScript consumer compiled against the packed
+    `.d.ts` and then executed. `.github/workflows/compat.yml` runs it on
+    ubuntu **and windows** across Node **20, 22 and 24**.
+  - **`scaffolds`** — every `kragg new --kind` output (`cli`, `api`, `mcp`
+    with both SDKs) is generated, installed with `--ignore-scripts` and made
+    to pass its own `pnpm exec kragg check`.
+  - **`tools`** — the real vitest, `node --test`, bun, oxlint, biome, ESLint
+    and secretlint at pinned versions, asserting each adapter turns that
+    tool's *current* output into a located, rule-identified violation and
+    that the runner's own coverage report was read and published. It lives in
+    `.github/workflows/external-tools.yml`: weekly and on demand,
+    `continue-on-error`, **never a required check**, because external version
+    drift must not turn an unrelated pull request red — the same reasoning
+    that already keeps the conformance job out of `check`.
+
+  A lane never reports a skip as a pass: a row whose tool is missing prints
+  `SKIP` with the reason, and `--strict` (how the advisory workflow runs)
+  makes that a failure. `test/packaging.test.ts` asserts the always-true half
+  on every run — every published entry point maps to a source file the build
+  compiles, `files` allowlists it, and `engines.node`'s floor is in the
+  matrix. README and `KNOWN_LIMITATIONS.md` now state, row by row, which
+  platform/runtime combinations are **asserted** and which are merely claimed
+  (macOS, ARM, odd-numbered Node, `npm`/`yarn` installs: not asserted). **No
+  wire key, code, threshold or exclusion changes.**
 
 - **TOR-1373** — the evidence linking a critical change to a test is a
   checker-bound reference, and the limits of the static signals are stated.
@@ -209,6 +245,26 @@ a previously green run red — see [Gate additions](#gate-additions) below.
 
 ### Fixed
 
+- **TOR-1379: the published CLI did nothing when installed, and exited 0.**
+  `node node_modules/kragg-ts/dist/cli.js --version` printed nothing and
+  returned 0 — no command ran. The entry-point guard compared
+  `import.meta.url`, which Node resolves through symlinks, against
+  `pathToFileURL(process.argv[1])`, which it does not; pnpm's
+  `node_modules/<name>` → `.pnpm/…` store link makes the two differ, as do npm
+  and yarn workspace links and `/var` → `/private/var` on macOS. A CLI that
+  silently succeeds at nothing is the exact fail-open outcome this codebase
+  exists to refuse. `src/cli/entry.ts` now compares **real** paths, so an
+  invocation through any link runs and an `import` from a test still does not;
+  `test/packaging.test.ts` covers both, including an end-to-end spawn through
+  a symlink.
+- **TOR-1379: two of the four scaffolds failed their own first
+  `kragg check`.** `kragg new --kind api` produced three type errors and
+  `--kind mcp --mcp-sdk official` one, all inside `node_modules`: hono's and
+  the MCP SDK's declarations reference `MessageEvent`, `BinaryType` and
+  `HeadersInit`, the generated `tsconfig.json` sets `skipLibCheck` false (on
+  purpose), and `lib` was `["es2023"]` for every kind. The generated `lib` is
+  now per-kind — `["es2023", "dom"]` for `api` and `mcp`, unchanged for `cli`
+  and `kragg init`, which depend on nothing that needs it.
 - **TOR-1372: the test gate runs a command the project can state, over files
   it can name — and a run that discovered nothing is not a pass.** Runner
   detection reads `package.json#scripts.test` to learn WHICH RUNNER a project

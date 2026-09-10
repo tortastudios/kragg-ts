@@ -102,7 +102,7 @@ failed task, not a judgement call.
 
 ## Project Map
 
-190 modules under `src/`, listed top-down in the order `kragg.json`'s
+191 modules under `src/`, listed top-down in the order `kragg.json`'s
 `layers` declares — a module may import its own layer or a lower one, never a
 higher one, and the `boundaries` gate enforces that on this repo.
 
@@ -228,7 +228,7 @@ higher one, and the `boundaries` gate enforces that on this repo.
   - `journal.ts` — `.kragg/history.jsonl`, append-only.
   - `runner.ts` — the only approved external-command wrapper, and the one
     legitimate `node:child_process` import in the repo.
-- `test/` — 57 test files using `node:test`, flat, plus `test/fixtures/`
+- `test/` — 58 test files using `node:test`, flat, plus `test/fixtures/`
   and one non-test helper, `conformanceContract.ts`. `conformance.test.ts`
   drives the versioned fixtures under `test/fixtures/conformance/` that pin
   the cross-language contract; see `docs/spec-conformance.md`.
@@ -240,6 +240,14 @@ higher one, and the `boundaries` gate enforces that on this repo.
 - `scripts/` — maintenance tooling, not shipped (`tsconfig.build.json` compiles
   `src` only) but covered by `pnpm run typecheck`. `calibrate.ts` measures the
   metric gates against a list of sample projects; see `docs/calibration.md`.
+  `compat.ts` + `compat/` is the compatibility harness: it packs the package,
+  installs the TARBALL and exercises the CLI, the published API, the four
+  scaffolds and the real external tools. `.github/workflows/compat.yml`
+  (blocking; ubuntu + windows × Node 20/22/24) and
+  `.github/workflows/external-tools.yml` (advisory, weekly) run exactly these
+  commands, so a red row reproduces locally. `compat/manifest.ts` is the one
+  definition of "the published entry points" and `test/packaging.test.ts`
+  asserts against it on every run.
 - `docs/architecture.md`: the ideas behind the module layout. Read it first.
 - `docs/dependency-policy.md`: the standing supply-chain policy. Read it
   before touching `package.json`.
@@ -259,7 +267,10 @@ Update this section when the repo structure changes.
 Development requires **Node 24** (see `.node-version`): the tests import
 `.ts` files directly and rely on Node's native type stripping, so there is no
 build step in the test loop. The *published* package is compiled JavaScript
-and supports Node 20+.
+and supports Node 20+ — asserted, not assumed: `.github/workflows/compat.yml`
+installs the packed tarball and runs it on ubuntu and windows across Node 20,
+22 and 24. Widening or narrowing `engines.node` means changing that matrix in
+the same commit; `test/packaging.test.ts` fails if the two disagree.
 
 ### Development
 
@@ -270,6 +281,14 @@ and supports Node 20+.
 - Run the CLI from source: `node src/cli.ts --help`
 - Run the built CLI: `node dist/cli.js --help`
 - kragg checks itself: `node dist/cli.js check --all`
+- Compatibility (needs a build first; each lane prints what it ran):
+  - `node scripts/compat.ts packaged --node <path/to/node>` — pack, install
+    the tarball, run the CLI and a typed consumer on THAT Node
+  - `node scripts/compat.ts scaffolds` — every `kragg new --kind` output
+    installs and passes its own `pnpm exec kragg check`
+  - `node scripts/compat.ts tools` — the real vitest/node/bun and
+    oxlint/biome/eslint/secretlint against the adapters. Advisory lane; see
+    the header of `scripts/compat/tools.ts` for why it is not blocking.
 
 Use the narrowest relevant command first. Run typecheck and test before
 claiming completion.

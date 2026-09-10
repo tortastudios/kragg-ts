@@ -1,0 +1,199 @@
+name: External tools (advisory)
+
+# ── WHY THIS IS A SEPARATE, NON-BLOCKING WORKFLOW ─────────────────────────
+# kragg drives seven external programs it does not ship: three test runners
+# (vitest, node, bun), three linters (oxlint, biome, eslint) and a secret
+# scanner (secretlint). The unit suite feeds their adapters RECORDED output,
+# which is the right way to test a parser and is not evidence about the tool:
+# a frozen fixture keeps passing forever after biome renames a JSON field or
+# ESLint changes which files flat config lints. This workflow installs each
+# tool for real and asserts kragg turns its CURRENT output into a located,
+# rule-identified violation.
+#
+# Everything it asserts therefore depends on software this repository does not
+# control. A tool ships a breaking change, a registry has a bad five minutes,
+# a platform-specific optional dependency does not resolve — and a required
+# check would turn every unrelated pull request red for something no author
+# can fix. That is how a check becomes something people re-run until it goes
+# green, which is worse than not having the check. So:
+#
+#   * it is NOT part of `ci.yml`'s `check` job and must never be made a
+#     required status check;
+#   * every job carries `continue-on-error: true`, so a red row is a
+#     maintenance ticket ("bump the pin, fix the parser"), not a blocked merge;
+#   * it runs on a weekly schedule and on demand, not on every push.
+#
+# `ci.yml` already keeps the conformance job separate from `check` for the
+# same reason: two jobs that answer different questions should be able to
+# disagree visibly.
+#
+# ── RUNNING IT ────────────────────────────────────────────────────────────
+# From the Actions tab ("Run workflow"), or locally, which is identical:
+#
+#     pnpm install --ignore-scripts && pnpm run build
+#     node scripts/compat.ts tools                     # every row
+#     node scripts/compat.ts tools --only vitest+biome  # one row
+#     node scripts/compat.ts scaffolds --strict         # advisories fail
+#
+# A bun row SKIPS with a reason when bun is not installed — bun's npm package
+# fetches its binary from a lifecycle script, which this repository does not
+# run, so the runner installs bun separately. A skip is never a pass;
+# `--strict` (used below) makes one a failure so this lane cannot go quietly
+# green having tested nothing.
+#
+# ── PINS ──────────────────────────────────────────────────────────────────
+# The tool versions live in `VERSIONS` in `scripts/compat/toolFixture.ts`,
+# exact and unranged. They are NOT dependencies of kragg: they are installed
+# into throwaway fixtures under the OS temp directory and never enter
+# `package.json` or `pnpm-lock.yaml`. Bumping one is this lane's entire
+# maintenance ritual, and a bump that turns a row red is the lane working.
+
+on:
+  schedule:
+    # Mondays, 07:00 UTC. Weekly is the right cadence for drift: often enough
+    # that a break is found before a release, rare enough that nobody starts
+    # ignoring the notification.
+    - cron: "0 7 * * 1"
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+concurrency:
+  group: external-tools-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  # One row per (test runner × linter), plus the scanner. Each installs the
+  # real tool at its pinned version, runs `kragg check --all` against a fixture
+  # containing exactly one lint finding, and asserts the adapter produced a
+  # violation with that file and that rule id — plus, for the runner, that the
+  # coverage report the runner itself wrote was read and published.
+  adapters:
+    name: ${{ matrix.runner }} + ${{ matrix.linter }}
+    runs-on: ubuntu-latest
+    timeout-minutes: 25
+    continue-on-error: true
+
+    strategy:
+      fail-fast: false
+      matrix:
+        runner: [vitest, node, bun]
+        linter: [oxlint, biome, eslint]
+
+    env:
+      npm_config_ignore_scripts: "true"
+
+    steps:
+      # EVERY `uses:` HERE IS PINNED TO A FULL COMMIT SHA. See the note at the
+      # top of `ci.yml` for why, and for how to resolve and verify one.
+      - name: Checkout
+        uses: actions/checkout@fbc6f3992d24b796d5a048ff273f7fcc4a7b6c09 # v5.1.0
+        with:
+          persist-credentials: false
+
+      - name: Enable corepack
+        run: corepack enable
+
+      - name: Setup Node
+        uses: actions/setup-node@a0853c24544627f65ddf259abe73b1d18a591444 # v5.0.0
+        with:
+          node-version-file: .node-version
+          cache: pnpm
+
+      # bun is a RUNTIME, not a project dependency: `adapters/support/
+      # testCommands.ts` resolves it from the environment the way the package
+      # managers are resolved. Its npm package would install the binary from a
+      # postinstall script, which this repository does not run, so it comes
+      # from the action instead.
+      - name: Install bun
+        if: matrix.runner == 'bun'
+        uses: oven-sh/setup-bun@0c5077e51419868618aeaa5fe8019c62421857d6 # v2.2.0
+        with:
+          bun-version: latest
+
+      - name: Install dependencies
+        run: pnpm install --frozen-lockfile --ignore-scripts
+
+      - name: Build
+        run: pnpm run build
+
+      # `--strict`: on this runner every tool IS installed, so a row that
+      # reports a skip has failed to test what it claims to test.
+      - name: Adapters against the real tools
+        run: node scripts/compat.ts tools --strict --only ${{ matrix.runner }}+${{ matrix.linter }}
+
+  scanner:
+    name: secretlint
+    runs-on: ubuntu-latest
+    timeout-minutes: 25
+    continue-on-error: true
+
+    env:
+      npm_config_ignore_scripts: "true"
+
+    steps:
+      - name: Checkout
+        uses: actions/checkout@fbc6f3992d24b796d5a048ff273f7fcc4a7b6c09 # v5.1.0
+        with:
+          persist-credentials: false
+
+      - name: Enable corepack
+        run: corepack enable
+
+      - name: Setup Node
+        uses: actions/setup-node@a0853c24544627f65ddf259abe73b1d18a591444 # v5.0.0
+        with:
+          node-version-file: .node-version
+          cache: pnpm
+
+      - name: Install dependencies
+        run: pnpm install --frozen-lockfile --ignore-scripts
+
+      - name: Build
+        run: pnpm run build
+
+      # gitleaks, the other supported scanner, is a Go binary and not an npm
+      # package (`src/gates/secrets/lookup.ts` explains why it is the one
+      # documented `PATH` exception). It is NOT covered here; see
+      # KNOWN_LIMITATIONS.md.
+      - name: secretlint against a planted credential
+        run: node scripts/compat.ts tools --strict --only secretlint
+
+  # The same scaffolds `compat.yml` builds, but with advisories promoted to
+  # failures. `compat.yml` blocks on everything kragg GENERATES and lets the
+  # `audit` gate warn, because an advisory against a transitive dependency of
+  # a pinned SDK is third-party state on a 30-day cooldown. Here it is a
+  # failure — the right place to learn that a scaffold's pin needs bumping.
+  scaffold-advisories:
+    name: scaffold dependency advisories
+    runs-on: ubuntu-latest
+    timeout-minutes: 25
+    continue-on-error: true
+
+    env:
+      npm_config_ignore_scripts: "true"
+
+    steps:
+      - name: Checkout
+        uses: actions/checkout@fbc6f3992d24b796d5a048ff273f7fcc4a7b6c09 # v5.1.0
+        with:
+          persist-credentials: false
+
+      - name: Enable corepack
+        run: corepack enable
+
+      - name: Setup Node
+        uses: actions/setup-node@a0853c24544627f65ddf259abe73b1d18a591444 # v5.0.0
+        with:
+          node-version-file: .node-version
+          cache: pnpm
+
+      - name: Install dependencies
+        run: pnpm install --frozen-lockfile --ignore-scripts
+
+      - name: Build
+        run: pnpm run build
+
+      - name: Scaffolds, advisories strict
+        run: node scripts/compat.ts scaffolds --strict

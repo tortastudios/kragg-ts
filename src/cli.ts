@@ -46,8 +46,8 @@
  */
 
 import { parseArgs } from "node:util";
-import { pathToFileURL } from "node:url";
 
+import { isEntryPoint } from "./cli/entry.ts";
 import { USAGE } from "./cli/usage.ts";
 import { inventoryOptions } from "./commands/inventory.ts";
 import { runAudit } from "./commands/audit.ts";
@@ -492,8 +492,9 @@ function messageOf(error: unknown): string {
   return error instanceof Error ? error.message : String(error);
 }
 
-/* Only run when invoked as the entry point, so tests can import `main`. */
-const entry = process.argv[1];
-if (entry !== undefined && import.meta.url === pathToFileURL(entry).href) {
+/* Only run when invoked as the entry point, so tests can import `main`.
+   The comparison happens on REAL paths — see `cli/entry.ts` for the installed
+   layouts that a URL-string comparison silently turned into a no-op. */
+if (isEntryPoint(import.meta.url, process.argv[1])) {
   process.exitCode = await main(process.argv.slice(2));
 }

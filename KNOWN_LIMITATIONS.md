@@ -470,8 +470,19 @@ Every external tool adapter (`lint`, `tsc`, `test-coverage`, `audit`,
   checking anything.
 - **biome's JSON reporter is self-declared experimental** ("may change in
   patch releases"). It is the highest schema risk of the three linters.
-- No adapter has been run against a live binary in CI. Parsers are validated
-  against recorded fixtures.
+- Drift is now **detected rather than waited for**, but only weekly and only
+  for some adapters. `.github/workflows/external-tools.yml` installs the real
+  vitest, `node --test`, bun, oxlint, biome, ESLint and secretlint at pinned
+  versions and asserts each adapter turns that tool's *current* output into a
+  located, rule-identified violation (`node scripts/compat.ts tools`). It is
+  **advisory** — `continue-on-error`, never a required check — because a break
+  there is caused by software this repository does not control. The unit
+  suite's recorded fixtures remain the only check that runs on every commit.
+- **What no live row covers.** `tsc`'s *diagnostic* parser: the compatibility
+  rows run a real `tsc` that succeeds, so the clean path is exercised and the
+  error path is not. `audit`: only the **pnpm** parser is exercised live (by
+  the scaffold rows, which really do surface published advisories); npm, yarn
+  and bun audit remain fixture-only. knip and Stryker: nothing live at all.
 
 ### Specific to `mutation`
 
@@ -492,20 +503,118 @@ Every external tool adapter (`lint`, `tsc`, `test-coverage`, `audit`,
 ## Scaffolding
 
 - `kragg new` templates for **hono**, **fastmcp** and
-  **@modelcontextprotocol/sdk** are **not compile-verified**. Package existence
-  and versions were checked against the registry; the API surfaces used
-  (`new FastMCP({...})`, `addTool`, `McpServer.registerTool`,
-  `StdioServerTransport`, `serve({fetch, hostname, port})`) are the documented
-  shapes but were not executed. **The first `pnpm install` in a scaffolded
-  project is the verification step.**
-- The generated `tsconfig.json` **is** verified: a test scaffolds each kind and
-  runs `typing-strictness` against it, asserting zero violations and zero
-  advisories.
+  **@modelcontextprotocol/sdk** are now **install- and compile-verified**:
+  `.github/workflows/compat.yml`'s `scaffolds` job generates each kind, runs
+  `pnpm install --ignore-scripts`, and requires the generated project to pass
+  its own `pnpm exec kragg check` — which type-checks the templates against the
+  real SDKs. That is what caught the `api` and `mcp --mcp-sdk official`
+  scaffolds failing their own first check: hono's and the MCP SDK's
+  declarations reference `MessageEvent`, `BinaryType` and `HeadersInit`, which
+  need the `dom` lib, and the generated `tsconfig.json` sets `skipLibCheck`
+  false. The generated `lib` is now per-kind.
+- **Still not verified: that the templates DO anything.** Nothing starts the
+  generated server, connects an MCP client or issues a request. `serve({fetch,
+  hostname, port})`, `addTool` and `McpServer.registerTool` compile against the
+  pinned SDKs; they have not been executed.
+- The generated `tsconfig.json` **is** verified twice: a unit test scaffolds
+  each kind and runs `typing-strictness` against it, and the compatibility job
+  runs the whole pipeline against a real install.
 - The MCP test does not drive an MCP client; it exercises the tool through the
   service the tool delegates to.
-- `kragg` is deliberately absent from generated `devDependencies` while this
-  package is unpublished, since pinning a nonexistent version would break the
-  first install.
+- **A generated project can fail its own `audit` gate on day one, and no
+  change here can prevent it.** The scaffold pins its direct dependencies
+  exactly, but their transitives float, and the generated
+  `pnpm-workspace.yaml` deliberately sets `minimumReleaseAge` to 30 days — so
+  when an advisory lands against a transitive, the *fix* is held back by the
+  cooldown that is protecting the project. `compat.yml` reports this as an
+  advisory warning rather than a blocking failure, and
+  `external-tools.yml`'s `scaffold-advisories` job asserts it strictly, where
+  "bump the pin" is the right response. At the time of writing,
+  `--kind mcp --mcp-sdk official` is in exactly this state (four `fast-uri`
+  advisories, fixed in a release younger than the cooldown).
+- **The generated `devDependencies` pin `kragg-ts` at this build's version**
+  once it is a released number, which 0.1.0 is — and until that version is
+  actually on npm, a scaffolded project's first `pnpm install` fails with
+  `ERR_PNPM_FETCH_404`. The compatibility job substitutes the tarball it just
+  packed for that one dependency (and reports the substitution as its own
+  check), so the rows prove the scaffold, not the registry.
+
+---
+
+## Platform and runtime support is asserted only where the matrix runs
+
+`engines.node: ">=20"` and "works on Windows" are claims. What backs them is
+[`.github/workflows/compat.yml`](.github/workflows/compat.yml), which packs the
+package, installs **the tarball**, and exercises the CLI, the `.bin` shim, a
+real `kragg check` and a compiled TypeScript consumer on each row. Everything
+outside that matrix is claimed and not asserted:
+
+- **Asserted:** Linux x64 and Windows x64, on Node 20, 22 and 24 — the packed
+  CLI's `--version`/`--help`, the installed `node_modules/.bin` shim, a
+  `kragg check` in which the `tsc` and `lint` gates really spawn the fixture's
+  own binaries, and a `.ts` consumer compiled against the packed `.d.ts` and
+  then run.
+- **Not asserted: macOS.** No macOS row exists. The code paths it takes are the
+  POSIX ones Linux also takes, so the risk is low, but "low" is not "checked".
+- **Not asserted: any 32-bit or ARM runner.** GitHub's hosted x64 images are
+  the whole matrix.
+- **Not asserted: Node 21, 23, or any odd-numbered release**, and not Deno or
+  bun as a *host* for kragg itself. bun is supported as a test runner the
+  adapters drive, never as the runtime kragg runs on.
+- **Not asserted: `npm install` or `yarn install` of the tarball.** Every row
+  installs with pnpm, whose store-link layout is the harder case (it is what
+  exposed the entry-point bug described below). The `.bin` shims npm and yarn
+  write are the same `cmd-shim` output, but no row runs them.
+
+### What the Windows rows do and do not prove
+
+`src/engine/runner.ts` has a Windows-only branch: a `node_modules/.bin` entry
+is a `.cmd` batch shim there, `execFile` refuses to spawn one without a shell,
+and kragg will not use a shell — so it reads the shim and runs the script it
+names. `test/runner.test.ts` injects `platform: "win32"` and therefore proves,
+on every host, that the argv kragg *builds* is right. Only the Windows rows
+prove `CreateProcess` accepts it, and they do so for exactly two shims: the
+`tsc.cmd` and `oxlint.cmd` the fixture installs. A tool whose installer writes
+a different shim shape is not covered.
+
+### Running kragg on Node 20 is not the same as testing TypeScript on it
+
+The compatibility fixture has no test files, deliberately, and the reason is a
+measured one rather than a tidy one.
+
+`test-coverage` resolves the `node` runner to `process.execPath` — the Node
+kragg is itself running on — and hands it the project's test files. On Node 20
+that fails for a TypeScript suite, because Node 20 has no type stripping:
+
+```
+TypeError [ERR_UNKNOWN_FILE_EXTENSION]: Unknown file extension ".ts"
+```
+
+which kragg reports as `error: true`, exit 3, "node exited 1 without a complete
+test report for this run, so kragg cannot say whether the tests passed" —
+correctly, and never as a pass. (Verified by running
+`node scripts/compat.ts tools --only node+oxlint --node <node20>`; the
+`--test-reporter=lcov` and `--experimental-test-coverage` flags kragg passes
+are themselves accepted by Node 20.)
+
+So `engines.node: ">=20"` is the floor for *installing and running* kragg,
+which the matrix asserts. It is **not** a claim that the built-in `node` runner
+can execute a TypeScript suite on 20; that needs a Node with type stripping
+(22.6+ behind a flag, 24 unflagged), or `test_command` pointing at a loader, or
+vitest. Folding this into the packaged rows would have turned "the packed CLI
+works on Node 20" into "Node 20 can run TypeScript", which is a different
+question with a different answer.
+
+### The bug this matrix existed to find
+
+Before it existed, `node node_modules/kragg-ts/dist/cli.js --version` printed
+nothing and exited 0. The entry-point guard compared `import.meta.url` (which
+Node resolves through symlinks) against `pathToFileURL(process.argv[1])` (which
+it does not), and pnpm's `node_modules/<name>` → `.pnpm/…` store link makes
+those differ — as do npm and yarn workspace links, and `/var` → `/private/var`
+on macOS. The fix is in `src/cli/entry.ts`; the regression test is in
+`test/packaging.test.ts`. It is recorded here because it is the clearest
+possible statement of what a green source-only suite does not know.
 
 ---
 

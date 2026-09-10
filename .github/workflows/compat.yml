@@ -1,0 +1,164 @@
+name: Compatibility
+
+# What `ci.yml` does NOT answer, and this does.
+#
+# The `check` job builds and tests the SOURCE tree on the one Node in
+# `.node-version`, on ubuntu. `package.json` claims more than that:
+# `engines.node: ">=20"`, four published entry points that only exist after a
+# build, a `bin`, and a subprocess wrapper with a Windows-only branch. Until
+# this workflow existed none of those had been executed anywhere — a green CI
+# was compatible with a CLI that silently did nothing when installed (it was:
+# see `src/cli/entry.ts`), with a `dist/index.d.ts` that never got emitted, and
+# with a floor of 20 that had never seen a Node 20.
+#
+# Both jobs run `scripts/compat.ts`, so a maintainer reproduces a red row
+# locally with the command the log prints — no logic lives in this file that
+# cannot be run by hand.
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+concurrency:
+  group: compat-${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  # ---------------------------------------------------------------------
+  # Build it, pack it, INSTALL THE TARBALL, and use it — on every runtime
+  # and operating system `engines.node` and the README claim to support.
+  #
+  # Six rows, and every one of them really runs. Nothing here is asserted
+  # from a table: `scripts/compat.ts` prints the Node it tested and the
+  # platform it tested on, at the top of every row's log.
+  # ---------------------------------------------------------------------
+  packaged:
+    name: packed package (node ${{ matrix.node }}, ${{ matrix.os }})
+    runs-on: ${{ matrix.os }}
+    timeout-minutes: 20
+
+    strategy:
+      # One red row is a fact about that row. Cancelling its siblings would
+      # throw away the information that says whether it is the Node version
+      # or the platform that broke.
+      fail-fast: false
+      matrix:
+        # 20 is `engines.node`'s floor, 24 is `.node-version` (what the suite
+        # runs on), and 22 is the LTS in between — the version most consumers
+        # are actually on, and the one a floor-plus-ceiling matrix would miss.
+        node: ["20", "22", "24"]
+        os: [ubuntu-latest, windows-latest]
+
+    env:
+      npm_config_ignore_scripts: "true"
+
+    steps:
+      # EVERY `uses:` IN THIS FILE IS PINNED TO A FULL COMMIT SHA. See the long
+      # note at the top of `ci.yml` for why, and for the `gh api` incantations
+      # that resolve and verify one. Do not replace one with a tag.
+      - name: Checkout
+        uses: actions/checkout@fbc6f3992d24b796d5a048ff273f7fcc4a7b6c09 # v5.1.0
+        with:
+          persist-credentials: false
+
+      - name: Enable corepack
+        run: corepack enable
+
+      # THE NODE UNDER TEST, installed first and then recorded by absolute
+      # path. It is deliberately NOT the Node that runs the harness: Node 20
+      # cannot execute a `.ts` file, and `scripts/compat.ts` is TypeScript. So
+      # the harness stays on the development Node and hands this interpreter to
+      # the packed CLI, the compiled consumer and nothing else.
+      - name: Install the Node under test
+        uses: actions/setup-node@a0853c24544627f65ddf259abe73b1d18a591444 # v5.0.0
+        with:
+          node-version: ${{ matrix.node }}
+
+      - name: Record the Node under test
+        shell: bash
+        run: |
+          echo "NODE_UNDER_TEST=$(node -p 'process.execPath')" >> "$GITHUB_ENV"
+          node --version
+
+      # The development Node, installed second so it wins the PATH. `cache:
+      # pnpm` needs corepack's shim to already exist, which it does.
+      - name: Install the development Node
+        uses: actions/setup-node@a0853c24544627f65ddf259abe73b1d18a591444 # v5.0.0
+        with:
+          node-version-file: .node-version
+          cache: pnpm
+
+      - name: Install dependencies
+        run: pnpm install --frozen-lockfile --ignore-scripts
+
+      # `pnpm pack` publishes what `files` allows, so the tarball the harness
+      # installs is the artifact a consumer gets. Building first is what makes
+      # `dist/` exist for it to include.
+      - name: Build
+        run: pnpm run build
+
+      # Packs, installs the tarball into a throwaway fixture, then on
+      # NODE_UNDER_TEST runs `--version`, `--help`, the `.bin` shim, a real
+      # `kragg check` (whose `tsc` and `lint` gates must SPAWN the fixture's
+      # own binaries — on Windows, a `.cmd` batch shim) and a TypeScript
+      # consumer compiled against the packed `.d.ts` and then executed.
+      - name: Packaged smoke test
+        shell: bash
+        run: node scripts/compat.ts packaged --node "$NODE_UNDER_TEST"
+
+  # ---------------------------------------------------------------------
+  # Every `kragg new` output installs and passes the gates it ships with.
+  #
+  # `test/scaffold.test.ts` asserts which files the scaffold WRITES. It has
+  # never installed one and never run its gates, which are the two ways a
+  # scaffold breaks in a user's hands. One row per kind, and `mcp` counts
+  # twice because its two SDKs are two different projects.
+  # ---------------------------------------------------------------------
+  scaffolds:
+    name: scaffold ${{ matrix.kind }}
+    runs-on: ubuntu-latest
+    timeout-minutes: 20
+
+    strategy:
+      fail-fast: false
+      matrix:
+        kind: [cli, api, mcp-fastmcp, mcp-official]
+
+    env:
+      npm_config_ignore_scripts: "true"
+
+    steps:
+      - name: Checkout
+        uses: actions/checkout@fbc6f3992d24b796d5a048ff273f7fcc4a7b6c09 # v5.1.0
+        with:
+          persist-credentials: false
+
+      - name: Enable corepack
+        run: corepack enable
+
+      - name: Setup Node
+        uses: actions/setup-node@a0853c24544627f65ddf259abe73b1d18a591444 # v5.0.0
+        with:
+          node-version-file: .node-version
+          cache: pnpm
+
+      - name: Install dependencies
+        run: pnpm install --frozen-lockfile --ignore-scripts
+
+      - name: Build
+        run: pnpm run build
+
+      # NOT `--strict`: the generated projects pin third-party SDKs whose
+      # TRANSITIVE dependencies pick up published advisories, and the
+      # scaffold's own `minimumReleaseAge` cooldown deliberately holds the fix
+      # back for 30 days. That is a maintenance signal, not a reason to block
+      # an unrelated pull request, so the `audit` gate is reported as an
+      # advisory warning here and asserted strictly in `external-tools.yml`.
+      # Everything that judges the code kragg GENERATED is blocking.
+      - name: Scaffold install and self-check
+        run: node scripts/compat.ts scaffolds --only ${{ matrix.kind }}

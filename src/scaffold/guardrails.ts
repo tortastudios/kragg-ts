@@ -56,7 +56,7 @@ export function guardrailFiles(identity: ProjectIdentity): Record<string, string
     ".npmrc": NPMRC,
     "pnpm-workspace.yaml": pnpmWorkspace(identity.kind, identity.mcpSdk),
     "package.json": `${JSON.stringify(packageJson(identity), null, 2)}\n`,
-    "tsconfig.json": TSCONFIG,
+    "tsconfig.json": tsconfig(identity.kind),
     "tsconfig.build.json": TSCONFIG_BUILD,
     "kragg.json": `${JSON.stringify(kraggConfig(identity.kind), null, 2)}\n`,
     ".github/workflows/quality.yml": GITHUB_WORKFLOW,
@@ -234,6 +234,25 @@ coverage/
 `;
 
 /**
+ * The libraries a kind's PINNED DEPENDENCIES need declared.
+ *
+ * `skipLibCheck` is `false` here on purpose, so every `.d.ts` in the tree is
+ * checked — and a server dependency's declarations reference web platform
+ * types that Node's own do not declare. hono's websocket helper needs
+ * `MessageEvent` and `BinaryType`; `@modelcontextprotocol/sdk` needs
+ * `HeadersInit`. Without `dom` the generated `api` and `mcp` projects failed
+ * their own `pnpm exec kragg check` on the first run, in a project the user
+ * had not touched, with three errors inside `node_modules`.
+ *
+ * `cli` (and `kragg init`, which has no skeleton) deliberately does NOT get
+ * `dom`: nothing it depends on needs it, and adding it would let `document`
+ * and `window` typecheck in a program that has neither.
+ */
+function libFor(kind: Kind | null): readonly string[] {
+  return kind === "api" || kind === "mcp" ? ["es2023", "dom"] : ["es2023"];
+}
+
+/**
  * The type-checking config, and the strictness floor the `typing-strictness`
  * gate verifies.
  *
@@ -241,11 +260,12 @@ coverage/
  * gate reads this file with its `extends` chain resolved, so loosening a flag
  * to pass a typecheck fails a different gate instead.
  */
-const TSCONFIG = `{
+function tsconfig(kind: Kind | null): string {
+  return `{
   "$schema": "https://json.schemastore.org/tsconfig",
   "compilerOptions": {
     "target": "es2023",
-    "lib": ["es2023"],
+    "lib": [${libFor(kind).map((name) => JSON.stringify(name)).join(", ")}],
 
     /* Real Node ESM resolution. */
     "module": "nodenext",
@@ -291,6 +311,7 @@ const TSCONFIG = `{
   "exclude": ["node_modules", "dist"]
 }
 `;
+}
 
 const TSCONFIG_BUILD = `{
   "extends": "./tsconfig.json",

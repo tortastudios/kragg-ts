@@ -49,6 +49,54 @@ pnpm run build
 node dist/cli.js check
 ```
 
+## Supported runtimes and platforms
+
+`package.json#engines.node` says `>=20`. A claim about a runtime is worth
+exactly as much as the matrix that runs it, so here is the matrix — and the
+line between what is **asserted** and what is merely claimed.
+
+[`.github/workflows/compat.yml`](.github/workflows/compat.yml) builds the
+package, runs `pnpm pack`, installs **the tarball** into a throwaway project,
+and then, on that row's Node and operating system, runs `kragg --version`,
+`kragg --help`, the `node_modules/.bin` shim, a real `kragg check` whose `tsc`
+and `lint` gates have to spawn that project's own binaries, and a TypeScript
+consumer compiled against the packed `.d.ts` and then executed.
+
+| Runtime | Linux x64 | Windows x64 | macOS |
+| --- | --- | --- | --- |
+| Node 20 (the floor) | asserted | asserted | not in CI |
+| Node 22 | asserted | asserted | not in CI |
+| Node 24 (the dev runtime) | asserted | asserted | not in CI |
+
+Reproduce any row locally, on any Node you have installed:
+
+```sh
+pnpm install --ignore-scripts && pnpm run build
+node scripts/compat.ts packaged --node /path/to/node20/bin/node
+```
+
+Windows is in the matrix for a concrete reason. A `node_modules/.bin` entry is
+a `.cmd` batch shim there, and since the CVE-2024-27980 fix Node refuses to
+spawn a batch file without a shell — which kragg will not use, because a shell
+would interpret the filenames gates pass as arguments. `src/engine/runner.ts`
+reads the shim and runs the script it names directly instead. Unit tests prove
+the argv it builds is right, on every host; only a Windows row proves
+`CreateProcess` accepts it.
+
+**Scaffolds.** Each `kragg new --kind` output (`cli`, `api`, and `mcp` with
+both SDKs) is generated, installed with `--ignore-scripts`, and made to pass
+its own `pnpm exec kragg check` on every push — `node scripts/compat.ts
+scaffolds` locally.
+
+**External tools.** kragg drives seven programs it does not ship. Which of
+them still produce output its adapters can read is checked weekly by
+[`.github/workflows/external-tools.yml`](.github/workflows/external-tools.yml),
+deliberately **not** as a required check — see
+[Development](#development) for why, and for how to run it.
+
+What is **not** asserted anywhere is listed in
+[KNOWN_LIMITATIONS.md](KNOWN_LIMITATIONS.md#platform-and-runtime-support-is-asserted-only-where-the-matrix-runs).
+
 ## Commands
 
 ```sh
@@ -706,7 +754,37 @@ node dist/cli.js check --all     # kragg checks itself
 
 # measure the metric gates against real projects (see docs/calibration.md)
 node scripts/calibrate.ts kragg-ts=. 'app=../some-app:src,lib'
+
+# compatibility: the PACKED package, the scaffolds, the real external tools
+node scripts/compat.ts packaged --node "$(command -v node)"
+node scripts/compat.ts scaffolds
+node scripts/compat.ts tools --only vitest+biome
 ```
+
+`scripts/compat.ts` is the whole of the compatibility evidence, and CI runs
+exactly these commands — so a red matrix row is reproduced locally by copying
+the command out of its log. Each run prints the Node it tested, the platform it
+tested on and the tarball it installed, because a compatibility report whose
+log does not name what it ran is a report nobody can check.
+
+The three lanes are governed differently on purpose:
+
+- `packaged` and `scaffolds` are **blocking**
+  ([`compat.yml`](.github/workflows/compat.yml)). They assert things this
+  repository controls.
+- `tools` is **advisory**
+  ([`external-tools.yml`](.github/workflows/external-tools.yml)): weekly and
+  on demand, `continue-on-error`, never a required check. It installs the real
+  vitest / node / bun / oxlint / biome / eslint / secretlint at pinned versions
+  and asserts the adapters parse their *current* output. Everything it checks
+  depends on software this repository does not control, so a break there is a
+  maintenance ticket — bump the pin in `VERSIONS` in `scripts/compat/toolFixture.ts`,
+  fix the parser — and must not turn an unrelated pull request red. `ci.yml`
+  keeps the conformance job separate from `check` for the same reason.
+
+A lane never reports a skip as a pass: a row whose tool is missing prints
+`SKIP` with the reason, and `--strict` (how the advisory workflow runs) turns
+that into a failure.
 
 `pnpm run conformance` is also part of `pnpm test`. The other half of the
 contract — this repository's `dist/cli.js` run against the Python sibling's own
