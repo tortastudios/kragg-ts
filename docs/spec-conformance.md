@@ -273,10 +273,20 @@ nowhere else:
 
 Output is truncated at 9000 characters with an in-band marker, because the
 harness spills over-long hook output to a file where the model never sees it.
+The cap applies to both emitted shapes — a block `reason` and a SessionStart
+`additionalContext` — and it truncates the TEXT, never the envelope, so the
+`decision` field always survives.
+
 The hook returns 0 on *any* internal failure — the one deliberate fail-open in
-kragg, since a broken guardrail must not become a broken editing session. See
-[`src/hooks/protocol.ts`](../src/hooks/protocol.ts) and
-[`src/hooks/claude.ts`](../src/hooks/claude.ts).
+kragg, since a broken guardrail must not become a broken editing session.
+kragg-ts additionally **records** each such failure (divergence 30): a line on
+stderr and an entry in `.kragg/hook-errors.jsonl`, which is a kragg-ts-only
+file in the journal's shape and is not read by Python. What each event checks
+is resolved by `src/commands/scope.ts`, the same resolver `check` uses
+(divergence 29). See [`src/hooks/protocol.ts`](../src/hooks/protocol.ts),
+[`src/hooks/claude.ts`](../src/hooks/claude.ts),
+[`src/hooks/session.ts`](../src/hooks/session.ts) and
+[`src/hooks/diagnostics.ts`](../src/hooks/diagnostics.ts).
 
 ### 8. Configuration
 
@@ -355,7 +365,7 @@ A conformance runner must not flag these; a suite that diffs the two
 implementations naively will flag every one. Rows 1–9 are this repository's
 original table, re-verified against both trees while the spec was written; rows
 10–12 were added by that verification and are also SPEC.md section 10's rows
-10–12; rows 13–31 were introduced by TOR-1358, TOR-1363, TOR-1361, TOR-1369, TOR-1375, TOR-1364, TOR-1365, TOR-1374 and TOR-1377 on this branch. Fixtures that exercise a row carry a `divergences` entry naming its id.
+10–12; rows 13–33 were introduced by TOR-1358, TOR-1363, TOR-1361, TOR-1369, TOR-1375, TOR-1364, TOR-1365, TOR-1374, TOR-1377 and TOR-1370 on this branch. Fixtures that exercise a row carry a `divergences` entry naming its id.
 
 | # | Divergence | Why it is intentional |
 | --- | --- | --- |
@@ -390,6 +400,8 @@ original table, re-verified against both trees while the spec was written; rows
 | 29 | reviewed `critical_functions` declarations make a function critical | Python has no such setting: its `is_critical` is `fan_in >= 3 or betweenness >= 0.1` and nothing else. A declaration is ADDITIVE (it never demotes a graph-selected function) and reaches the sidecar as an ordinary record with `is_critical: true` — **no key is added** to the six-key record shape, and the reason is re-derived from the policy wherever it is shown, never stored. Python's reader therefore consumes such a file unchanged; the only observable difference is that one more record says `true` than Python's own thresholds would produce, in a repo whose `kragg.json` says so. A declaration that matches no analysed function is exit 3 from `kragg criticality` and `error: true` from the three gates, so a rename cannot silently drop the protection. Fixtures declare nothing, so every golden is unaffected. |
 | 30 | `// kragg: ignore` requires a reason | Python's `# kragg: ignore` (`gates/suppress.py`) is honoured bare. kragg-ts honours only `// kragg: ignore -- <reason>`; a bare marker suppresses nothing and the finding is reported with a note naming it (`src/util/suppress.ts`). Pinned by the gate unit tests; no wire change. |
 | 31 | the legacy-debt baseline (`kragg.json#baseline`, `check --update-baseline`) | Python has no violation baseline. kragg-ts records accepted findings of the metric, structure and test-quality gates — never security, compiler or evidence gates, errors or skips — and reports them as `baselined:` entries in the existing `advisories` list of their gate, so `passed`, `exit_code`, `violation_count` and the journal describe the post-baseline results and **no key is added** to any payload. Stale entries are advisories too. `kragg.json#baseline` is a TypeScript-only policy key (see section 8). Pinned by `test/baseline.test.ts` and `test/cli.test.ts`; the cross-language fixtures configure no baseline and are unaffected. |
+| 32 | the hook checks what the equivalent `kragg check` invocation checks, through the same resolver | Python's `_stop` runs `_run_check(root, (policy.source_paths[0],), incremental=False)`, so in a project declaring `["src", "lib"]` the Stop hook's per-file tools — the linter, the secret scanner — are pointed at `src` only, and a turn ends green over `lib` because nothing looked at it. kragg-ts's hook now states an INTENT (`full` / `file` / `changed`) and `src/commands/scope.ts` resolves it exactly as it does for `check`, `check --file` and `check --changed`, so the command and the hook cannot disagree about a project's source paths, about a `--file` that names nothing (recorded, since a hook may not exit 2) or about a configuration edit promoting an incremental run. The report and journal `mode` values are unchanged (`"changed"`/`"full"`, as Python writes), and the `hook-protocol` golden is byte-identical. |
+| 33 | hook internal failures are RECORDED: stderr, `.kragg/hook-errors.jsonl`, and a notice at the next SessionStart | Both implementations fail open — exit 0, no block — and Python leaves no trace, so a hook whose `kragg.toml` broke, whose project stopped resolving or whose pipeline crashed is indistinguishable from a hook with nothing to say, indefinitely. kragg-ts keeps the fail-open contract byte for byte on stdout and adds the trace: a stderr line (debug output at exit 0, not a `hook error` notice), an append-only record carrying a timestamp, the event name narrowed to a fixed set, and the error message — never the stdin payload — and a first line in the next SessionStart context saying how many failures were recorded since the last session. The file is kragg-ts-only, in the journal's shape; `.kragg/history.jsonl` is untouched. kragg-ts also sets `KRAGG_HOOK_ACTIVE` for the duration of a hook run, so a project whose own tooling invokes `kragg hook claude` from inside the pipeline the hook started re-enters a no-op instead of a second full run. |
 
 Four defects found in the Python implementation during the port are recorded in
 [KNOWN_LIMITATIONS.md](../KNOWN_LIMITATIONS.md#found-in-the-python-implementation-during-this-port).

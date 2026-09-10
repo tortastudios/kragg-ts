@@ -101,7 +101,7 @@ failed task, not a judgement call.
 
 ## Project Map
 
-178 modules under `src/`, listed top-down in the order `kragg.json`'s
+180 modules under `src/`, listed top-down in the order `kragg.json`'s
 `layers` declares — a module may import its own layer or a lower one, never a
 higher one, and the `boundaries` gate enforces that on this repo.
 
@@ -117,7 +117,9 @@ higher one, and the `boundaries` gate enforces that on this repo.
 - `src/commands/` — one module per command: `check`, `security`, `fix`,
   `map`, `spec`, `brief`, `status`, `policyShow`, `doctor`, `coverage`,
   `criticality`, `mutation`, `flaky`, `audit`, `new`, `gen`, `init`, `hook`,
-  plus `hookCheck.ts` (the `RunCheck` injected into the hook), `scope.ts`
+  plus `hookCheck.ts` (the `RunCheck` injected into the hook, which resolves
+  the hook's scope through `scope.ts` so the hook and the command check the
+  same files), `scope.ts`
   (the one resolver for `full`/`changed`/`file`, shared by `check` and
   `security`: what the external tools are invoked on, what the path-aware
   gates narrow to, when a configuration change makes an incremental run a
@@ -130,8 +132,12 @@ higher one, and the `boundaries` gate enforces that on this repo.
   completed run of the intended suite counts as a sample), `brief/`
   (`exemptions` — the `## Suppressions` and `## Baseline` sections).
 - `src/hooks/` — `claude.ts` (event dispatch; the deliberate fail-**open**
-  exception to everything else here) and `protocol.ts` (narrowing untrusted
-  stdin, building the stdout JSON the harness reads).
+  exception to everything else here, and the module that says which of the
+  CLI's scopes an event means, never which files), `protocol.ts` (narrowing
+  untrusted stdin, building the stdout JSON the harness reads), `session.ts`
+  (the SessionStart context: last run, critical functions, recorded hook
+  failures) and `diagnostics.ts` (`.kragg/hook-errors.jsonl` — failing open is
+  not failing invisibly; never write the stdin payload there).
 - `src/catalog.ts` + `src/catalog/` — the only place that knows which gates
   exist, in what order, in which tier. `check.ts` is the `check` pipeline,
   `security.ts` the gates shared by both pipelines, `context.ts` the per-run
