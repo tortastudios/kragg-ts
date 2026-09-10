@@ -32,7 +32,16 @@ Three properties matter more than the gate list:
 
 ## Install
 
-Not yet published. From a checkout:
+The package on npm is called `kragg-ts`. The command it installs is `kragg`.
+The name split matters: this is the TypeScript sibling of a Python tool that
+is already called `kragg` on PyPI, and the two are not the same package.
+
+```sh
+pnpm add -D kragg-ts
+pnpm exec kragg check
+```
+
+`npm` and `yarn` work the same way. From a checkout instead:
 
 ```sh
 pnpm install --ignore-scripts
@@ -504,10 +513,11 @@ Each row is pinned by a fixture or a unit test, and the full list — with the
 
 ## Supply chain
 
-**One runtime dependency** (`typescript` — you cannot parse TypeScript without
-the TypeScript compiler) and **one dev dependency** (`@types/node`), both
-pinned to exact versions. No bundler, no test framework: `tsc` emits and
-`node:test` runs.
+**One runtime dependency** (`typescript`. You cannot parse TypeScript without
+the TypeScript compiler) and **two dev dependencies** (`@types/node`, and
+`oxlint` for kragg-ts's own self-check), all pinned to exact versions. No
+bundler, no test framework: `tsc` emits and `node:test` runs. See
+[docs/dependency-policy.md](docs/dependency-policy.md) for the full reasoning.
 
 Installs run with dependency lifecycle scripts disabled, no package may run a
 build script, and a **30-day minimum release age** is enforced mechanically —
@@ -573,6 +583,27 @@ whose own gates are red has no claim on anyone else's code.
 
 `AGENTS.md` is the contract for agents working in this repository, including
 the hard rules that are not open to interpretation.
+
+## Releases
+
+A release is a git tag of the form `vX.Y.Z` that matches
+`package.json#version`. Pushing the tag runs
+[`.github/workflows/release.yml`](.github/workflows/release.yml): typecheck,
+build, test, the local conformance fixtures, then `npm publish` and a GitHub
+release with generated notes. There is no manual publish step and no
+separate version bump commit; the tag and the version are the same fact.
+
+To cut a release:
+
+```sh
+# bump package.json#version first, commit it, then:
+git tag v0.1.0
+git push origin v0.1.0
+```
+
+`CHANGELOG.md` follows Keep a Changelog. Move the `## [Unreleased]` bullets
+into a new `## [X.Y.Z] - YYYY-MM-DD` section as part of the version bump
+commit, so the tagged commit and the changelog agree about what shipped.
 
 ## License
 

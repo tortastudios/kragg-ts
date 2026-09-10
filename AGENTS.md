@@ -50,8 +50,9 @@ failed task, not a judgement call.
 
 - **Do not add any dependency** — runtime or dev — without explicit written
   human approval. Read `docs/dependency-policy.md` first. There is exactly
-  **one** runtime dependency (`typescript`) and **one** dev dependency
-  (`@types/node`). That is a standing constraint, not a starting point.
+  **one** runtime dependency (`typescript`) and **two** dev dependencies
+  (`@types/node`, `oxlint`). That is a standing constraint, not a starting
+  point.
 - **Do not run dependency lifecycle scripts.** Never `pnpm approve-builds`,
   never add to `allowBuilds`, never set `dangerouslyAllowAllBuilds`. Install
   with `pnpm install --ignore-scripts`.

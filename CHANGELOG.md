@@ -501,6 +501,19 @@ a previously green run red — see [Gate additions](#gate-additions) below.
   together with `--changed`/`--since` is exit 2 instead of being discarded in
   favour of git's file set.
 
+### Changed
+
+- The npm package is now published as `kragg-ts`, not `kragg`. The command
+  it installs is still `kragg`. The Python sibling already owns the name
+  `kragg` on PyPI, and the two are different packages, so `kragg` on npm
+  would have been misleading either way. A project scaffolded by `kragg new`
+  now pins `kragg-ts` as its dev dependency once this build is a released
+  version.
+- `oxlint` is now an approved dev dependency, not an unreviewed one.
+  kragg-ts runs its own `lint` gate against its own source with it, the way
+  any project using kragg would. It ships to nobody who installs the
+  package.
+
 ## [0.0.0] — unreleased
 
 Initial implementation. Not published to npm.

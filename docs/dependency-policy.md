@@ -55,33 +55,45 @@ that almost nothing else does. **It is not a precedent.**
 
 ### 2. Minimal dev surface
 
-`devDependencies` is exactly one package:
+`devDependencies` is exactly two packages:
 
 | Package | Version | Why |
 | --- | --- | --- |
 | `@types/node` | `24.12.4` | Types for the `node:` builtins. |
+| `oxlint` | `1.73.0` | The linter kragg-ts runs on its own source, through the same `lint` gate every project using kragg gets. |
 
-It pulls one transitive package, `undici-types`, from DefinitelyTyped. Types
-only — no runtime code.
+`@types/node` pulls one transitive package, `undici-types`, from
+DefinitelyTyped. Types only, no runtime code. `oxlint` is a single native
+binary with **zero** dependencies of its own.
 
-**The whole installed tree is three packages.** `pnpm list --depth Infinity`,
-which agrees with the three entries in `pnpm-lock.yaml`'s `packages:` block:
+**Why a linter is approved here but not shipped as a runtime dependency.**
+kragg-ts checks itself with its own `check --all`. That check includes the
+`lint` gate, and the `lint` gate needs a linter to run. Without one installed,
+`check --all` on this repo would report `lint` as skipped, which defeats the
+point of dogfooding the tool on itself. `oxlint` was the pick: no
+dependencies, a single Rust binary, and the fastest of the three linters kragg
+supports (oxlint, biome, eslint). It runs only on this repository, at dev
+time, through `pnpm exec oxlint`. It is never imported by any file under
+`src/`, and it ships to nobody who installs `kragg-ts`.
+
+**The whole installed tree is four packages.** `pnpm list --depth Infinity`,
+which agrees with the entries in `pnpm-lock.yaml`'s `packages:` block:
 
 ```
-kragg@0.0.0
+kragg-ts@0.1.0
 │   dependencies:
 ├── typescript@6.0.3
 │   devDependencies:
+├── oxlint@1.73.0
 └─┬ @types/node@24.12.4
   └── undici-types@7.16.0
 
-3 packages
+4 packages
 ```
 
-No bundler. No test framework. No linter. No formatter. `node:test` is the
-test runner and `tsc` is the build — and `tsc` comes from the runtime
-dependency above, so the build needs nothing the shipped package does not
-already have.
+No bundler. No test framework. No formatter. `node:test` is the test runner
+and `tsc` is the build, and `tsc` comes from the runtime dependency above, so
+the build needs nothing the shipped package does not already have.
 
 ### 3. Pin every version exactly
 
