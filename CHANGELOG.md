@@ -85,6 +85,50 @@ a previously green run red — see [Gate additions](#gate-additions) below.
 
 ### Fixed
 
+- **TOR-1370** — the Claude Code hook checks what the equivalent command
+  checks, and a hook that fails is no longer silent.
+  - **Scope.** `handleStop` ran the pipeline over `policy.sourcePaths[0]`
+    (inherited from Python's `_stop`), so in a project declaring
+    `source_paths: ["src", "lib"]` the hook's per-file tools — the linter, the
+    secret scanner — were pointed at `src` alone: `kragg check` reported a
+    `no-debugger` violation in `lib/` and exited 1, while the Stop hook on the
+    same tree emitted nothing, let the turn end, and journalled `passed: true`.
+    The hook now states an INTENT (`full`, `file`, `changed`) that
+    `src/commands/scope.ts` — the one resolver `check` and `security` use —
+    expands, so a Stop is `kragg check`, a post-edit is `check --file <path>`,
+    and a tool that edited no single file is `check --changed`, including the
+    rules the hook must not reimplement (a configuration edit promoting an
+    incremental run, deletions, an edited file outside the source paths). The
+    hook loads no policy and derives no file list of its own any more.
+  - **Observability.** Failing open is the deliberate exception and it is
+    unchanged — exit 0, nothing blocked, valid protocol JSON or no output at
+    all — but every internal failure is now RECORDED: a line on stderr (debug
+    output at exit 0, never a `hook error` notice), an append-only entry in
+    `.kragg/hook-errors.jsonl` carrying a timestamp, the event name narrowed to
+    a fixed set and the error message, and a first line in the next
+    `SessionStart` context: `N kragg hook failures recorded since the last
+    session`. The record NEVER contains the stdin payload — a `tool_input` is a
+    tool's own arguments, which for `Bash` is a command line. The injected
+    check seam answers `report` / `nothing` / `failed` instead of
+    `CheckReport | null`, because that `null` meant both "nothing to check" and
+    "could not run at all" and both read as a pass.
+  - **Recursion.** `stop_hook_active` is unchanged and still pinned. Alongside
+    it, `KRAGG_HOOK_ACTIVE` is set for the duration of a hook run and inherited
+    by everything the pipeline spawns, so a project whose test command or
+    wrapper script invokes `kragg hook claude` re-enters a no-op instead of
+    starting another full pipeline inside the one already running.
+  - **Truncation** is unchanged at 9000 characters with the in-band marker, and
+    is now pinned on both emitting paths (a block `reason` and a SessionStart
+    `additionalContext`) with the assertion that the cut is applied to the text
+    and never to the JSON envelope, so `decision` always survives.
+
+  No wire format moves: `.kragg/history.jsonl` keeps its keys and its
+  `"changed"`/`"full"` mode values, the report payload is untouched, and the
+  `hook-protocol` conformance golden is byte-identical.
+  `.kragg/hook-errors.jsonl` is a new kragg-ts-only file in the journal's
+  shape, rotated at 200 lines, that no gate and no Python reader consults.
+  `src/hooks/session.ts` and `src/hooks/diagnostics.ts` split the SessionStart
+  and diagnostics halves out of `claude.ts`.
 - **TOR-1366** — criticality freshness and compiler state are now invalidated
   by everything the analysis actually reads. Three separate ways a run could
   believe pre-edit state:

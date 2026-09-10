@@ -264,10 +264,20 @@ nowhere else:
 
 Output is truncated at 9000 characters with an in-band marker, because the
 harness spills over-long hook output to a file where the model never sees it.
+The cap applies to both emitted shapes — a block `reason` and a SessionStart
+`additionalContext` — and it truncates the TEXT, never the envelope, so the
+`decision` field always survives.
+
 The hook returns 0 on *any* internal failure — the one deliberate fail-open in
-kragg, since a broken guardrail must not become a broken editing session. See
-[`src/hooks/protocol.ts`](../src/hooks/protocol.ts) and
-[`src/hooks/claude.ts`](../src/hooks/claude.ts).
+kragg, since a broken guardrail must not become a broken editing session.
+kragg-ts additionally **records** each such failure (divergence 30): a line on
+stderr and an entry in `.kragg/hook-errors.jsonl`, which is a kragg-ts-only
+file in the journal's shape and is not read by Python. What each event checks
+is resolved by `src/commands/scope.ts`, the same resolver `check` uses
+(divergence 29). See [`src/hooks/protocol.ts`](../src/hooks/protocol.ts),
+[`src/hooks/claude.ts`](../src/hooks/claude.ts),
+[`src/hooks/session.ts`](../src/hooks/session.ts) and
+[`src/hooks/diagnostics.ts`](../src/hooks/diagnostics.ts).
 
 ### 8. Configuration
 
@@ -344,7 +354,7 @@ A conformance runner must not flag these; a suite that diffs the two
 implementations naively will flag every one. Rows 1–9 are this repository's
 original table, re-verified against both trees while the spec was written; rows
 10–12 were added by that verification and are also SPEC.md section 10's rows
-10–12; rows 13–28 were introduced by TOR-1358, TOR-1363, TOR-1361, TOR-1369, TOR-1375, TOR-1364 and TOR-1365 on this branch. Fixtures that exercise a row carry a `divergences` entry naming its id.
+10–12; rows 13–30 were introduced by TOR-1358, TOR-1363, TOR-1361, TOR-1369, TOR-1375, TOR-1364, TOR-1365 and TOR-1370 on this branch. Fixtures that exercise a row carry a `divergences` entry naming its id.
 
 | # | Divergence | Why it is intentional |
 | --- | --- | --- |
@@ -376,6 +386,8 @@ original table, re-verified against both trees while the spec was written; rows
 | 26 | a change set whose only source change is a **deletion** is likewise a FULL run | Both implementations drop deletions from the selection (a deleted file cannot be checked), which turned "the module half the tree imports is gone" into an empty selection and exit 0. A deleted file is still never handed to a per-file tool; it just stops being mistaken for "nothing changed". |
 | 27 | `check --file <path that does not exist>` is exit 2, naming the path | Python runs the pipeline over a selection that matches nothing, which reads as a clean pass: the linter errors about *itself* finding no files while every path-aware gate prints a `[PASS]` over zero files. `targets` for a path that DOES exist is unchanged — including a directory, which stays verbatim on the wire and is expanded only into the internal narrowing. |
 | 28 | git plumbing runs with `-z`; a git failure carries git's message | Python reads `git diff --name-only` with `core.quotePath` on, so `src/café.ts` arrives as `"src/caf\303\251.ts"`, fails the existence check and leaves the selection silently. It also treats any non-zero git exit as an empty diff, so a repository with no commit yet (`git diff HEAD` has no HEAD) reports only untracked files. kragg-ts parses NUL-separated records and reports a git failure as exit 3 with git's own diagnostic. |
+| 29 | the hook checks what the equivalent `kragg check` invocation checks, through the same resolver | Python's `_stop` runs `_run_check(root, (policy.source_paths[0],), incremental=False)`, so in a project declaring `["src", "lib"]` the Stop hook's per-file tools — the linter, the secret scanner — are pointed at `src` only, and a turn ends green over `lib` because nothing looked at it. kragg-ts's hook now states an INTENT (`full` / `file` / `changed`) and `src/commands/scope.ts` resolves it exactly as it does for `check`, `check --file` and `check --changed`, so the command and the hook cannot disagree about a project's source paths, about a `--file` that names nothing (recorded, since a hook may not exit 2) or about a configuration edit promoting an incremental run. The report and journal `mode` values are unchanged (`"changed"`/`"full"`, as Python writes), and the `hook-protocol` golden is byte-identical. |
+| 30 | hook internal failures are RECORDED: stderr, `.kragg/hook-errors.jsonl`, and a notice at the next SessionStart | Both implementations fail open — exit 0, no block — and Python leaves no trace, so a hook whose `kragg.toml` broke, whose project stopped resolving or whose pipeline crashed is indistinguishable from a hook with nothing to say, indefinitely. kragg-ts keeps the fail-open contract byte for byte on stdout and adds the trace: a stderr line (debug output at exit 0, not a `hook error` notice), an append-only record carrying a timestamp, the event name narrowed to a fixed set, and the error message — never the stdin payload — and a first line in the next SessionStart context saying how many failures were recorded since the last session. The file is kragg-ts-only, in the journal's shape; `.kragg/history.jsonl` is untouched. kragg-ts also sets `KRAGG_HOOK_ACTIVE` for the duration of a hook run, so a project whose own tooling invokes `kragg hook claude` from inside the pipeline the hook started re-enters a no-op instead of a second full run. |
 
 Four defects found in the Python implementation during the port are recorded in
 [KNOWN_LIMITATIONS.md](../KNOWN_LIMITATIONS.md#found-in-the-python-implementation-during-this-port).

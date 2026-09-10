@@ -23,7 +23,8 @@
 import { readFileSync } from "node:fs";
 
 import { EXIT_USAGE } from "../engine/report.ts";
-import { runClaudeHook, type EnsureCriticality, type RunCheck } from "../hooks/claude.ts";
+import { runClaudeHook, type RunCheck } from "../hooks/claude.ts";
+import type { EnsureCriticality } from "../hooks/session.ts";
 
 /** Harness protocols this command speaks. Only Claude Code exists today. */
 export const HOOK_PROTOCOLS: readonly string[] = ["claude"];
@@ -55,7 +56,14 @@ export interface HookCommandOptions {
   readonly readStdin?: (() => string) | undefined;
   /** Payload sink. Defaults to stdout. Injected by tests. */
   readonly emit?: ((line: string) => void) | undefined;
-  /** Usage-error sink. Defaults to stderr. Injected by tests. */
+  /**
+   * Usage-error and diagnostic sink. Defaults to stderr. Injected by tests.
+   *
+   * One sink for both, because they are one channel in production: the
+   * protocol typo below and the hook's own recorded failures (see
+   * `src/hooks/diagnostics.ts`) are both things a person goes looking for on
+   * stderr, and neither reaches the model.
+   */
   readonly emitError?: ((line: string) => void) | undefined;
 }
 
@@ -82,6 +90,7 @@ export async function cmdHook(options: HookCommandOptions): Promise<number> {
     runCheck: options.runCheck,
     ensureCriticality: options.ensureCriticality,
     emit: options.emit,
+    emitError: options.emitError,
   });
 }
 

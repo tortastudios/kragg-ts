@@ -303,6 +303,21 @@ Scaffolding emits `AGENTS.md` as the canonical agent contract — read by Codex,
 Cursor and Gemini CLI, and by Claude Code via a `CLAUDE.md` pointer — plus
 hooks that run `kragg check --changed` after edits.
 
+`kragg hook claude` checks **what the equivalent command would check**: a Stop
+runs the whole project exactly as `kragg check` does — every `source_paths`
+entry, not the first one — a post-edit run is `check --file` on the edited
+file, and a tool that edited no single file is `check --changed`. All three go
+through the one resolver in `src/commands/scope.ts`, so the hook and the
+command cannot disagree about a project's scope.
+
+Hooks still **fail open** — any internal failure exits 0 and blocks nothing,
+because a broken guardrail must not become a broken editing session — but they
+no longer fail *invisibly*. A failure writes a line to stderr and an entry to
+`.kragg/hook-errors.jsonl` (timestamp, event, message — never the stdin
+payload), and the next `SessionStart` opens with `N kragg hook failures
+recorded since the last session`. A hook whose config broke three days ago used
+to be indistinguishable from a hook with nothing to say.
+
 ## Configuration
 
 Config is **data, not code.** There is no `kragg.config.ts` and there will not
@@ -398,7 +413,9 @@ Deliberate, and documented at each site:
 | config validation | Python degrades a mismatched value to its default and ignores unknown keys; kragg-ts rejects both with exit 2, naming the setting. Strictly narrower: every config Python accepts *and reads as written* loads identically here. |
 | criticality-dependent gates | Derived on demand when the data is missing or stale, so `critical-tests` and `test-quality` run; Python skips them visibly instead. |
 | SessionStart hook | Emits the `hookSpecificOutput` envelope, which is what injects `additionalContext`; Python prints plain-text context lines. |
-| hook output | Capped at 9000 characters with an in-band marker, because the harness spills longer output to a file the model never sees. Python does not cap. |
+| hook output | Capped at 9000 characters with an in-band marker, because the harness spills longer output to a file the model never sees. Python does not cap. The cap applies to a block `reason` and to a SessionStart `additionalContext` alike, and truncates the text, never the JSON envelope. |
+| Stop hook scope | The same full check `kragg check` runs — every `source_paths` entry — resolved by the same `src/commands/scope.ts`. Python's `_stop` passes `source_paths[0]`, so in a project with more than one source directory the hook's per-file tools never open the rest and a turn can end green over them. Post-edit runs go through the same resolver as `check --file` and `check --changed`. |
+| hook internal failures | Still fail open — exit 0, nothing blocked — but recorded: a stderr line, an entry in `.kragg/hook-errors.jsonl` (timestamp, event, message; never the stdin payload), and a first line in the next SessionStart context saying how many failures happened since the last session. Python leaves no trace, so a hook that has stopped working looks exactly like one with nothing to say. |
 | test evidence | Python reads `.kragg/coverage.json` from a fixed path. kragg-ts gives every invocation its own `.kragg/runs/` directory, refuses anything incomplete, and hands `critical-coverage` the coverage in memory. Same gates, same wire format; only the provenance rule differs. |
 | unmeasured critical functions | Python's `critical-coverage` passes a critical function the report never mentions (`measured=False`), reasoning that a missing entry is a measurement-key mismatch. kragg-ts hands the gate the document its own run wrote, so a missing file was never loaded: the function fails under the additive code `critical-unmeasured`, with the cause in the message. |
 | coverage denominator | Python's `pytest --cov=src` instruments every file under `src`, loaded or not. The JavaScript runners report only what the run loaded, so kragg-ts reconciles the number against `source_paths` itself: unloaded files count as uncovered by their statement lines, and files outside the source paths do not count. |
