@@ -21,11 +21,13 @@ import { parseBiomeJson } from "../src/adapters/linters/biome.ts";
 import { parseEslintJson, PARSE_ERROR_CODE } from "../src/adapters/linters/eslint.ts";
 import {
   isJsonObject,
+  parseJsonPayload,
   readArray,
   readPosition,
   readProp,
   readString,
   relativeToRoot,
+  violation as buildViolation,
   type JsonObject,
   type LintParse,
 } from "../src/adapters/linters/json.ts";
@@ -366,5 +368,34 @@ describe("linter JSON readers", () => {
     // Python's `is_relative_to` guard makes the same choice.
     assert.equal(relativeToRoot("/elsewhere/src/a.ts", ROOT), "/elsewhere/src/a.ts");
     assert.equal(relativeToRoot(ROOT, ROOT), ROOT);
+  });
+});
+
+describe("parseJsonPayload", () => {
+  it("parses a clean document directly", () => {
+    assert.deepEqual(parseJsonPayload('[{"filePath": "a.ts"}]'), [{ filePath: "a.ts" }]);
+  });
+
+  it("recovers a document wrapped in stray output lines", () => {
+    assert.deepEqual(
+      parseJsonPayload('warning: something\n{"ok": true}\nFinished in 1s'),
+      { ok: true },
+    );
+  });
+
+  it("refuses a truncated payload and empty output", () => {
+    assert.equal(parseJsonPayload('{"diagnostics": [1, 2'), undefined);
+    assert.equal(parseJsonPayload(""), undefined);
+    assert.equal(parseJsonPayload("no json here"), undefined);
+  });
+});
+
+describe("violation", () => {
+  it("emits only the keys that have a value", () => {
+    assert.deepEqual(buildViolation({ message: "m" }), { message: "m" });
+    assert.deepEqual(
+      buildViolation({ message: "m", file: "a.ts", line: 3, column: undefined, code: "c" }),
+      { message: "m", file: "a.ts", line: 3, code: "c" },
+    );
   });
 });

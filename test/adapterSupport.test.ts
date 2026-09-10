@@ -34,10 +34,12 @@ import {
   extractJson,
   isJsonObject,
   objectsIn,
+  parseJson,
+  prop,
   type JsonObject,
 } from "../src/adapters/support/json.ts";
 import { readTextFile } from "../src/adapters/support/manifest.ts";
-import { capped, crashed, notConfigured } from "../src/adapters/support/outcome.ts";
+import { capped, crashed, missingTool, notConfigured } from "../src/adapters/support/outcome.ts";
 import { runOptions } from "../src/adapters/support/run.ts";
 
 const roots: string[] = [];
@@ -244,5 +246,36 @@ describe("capped", () => {
     const items = [1, 2, 3];
     assert.equal(capped(items, 0), items);
     assert.equal(capped(items, -1), items);
+  });
+});
+
+describe("parseJson", () => {
+  it("returns the document for valid JSON", () => {
+    assert.deepEqual(parseJson('{"advisories": [1]}'), { advisories: [1] });
+  });
+
+  it("returns undefined for empty, blank and malformed input", () => {
+    assert.equal(parseJson(""), undefined);
+    assert.equal(parseJson("  \n"), undefined);
+    assert.equal(parseJson('{"advisories": ['), undefined);
+  });
+});
+
+describe("prop", () => {
+  it("reads own properties only, never the prototype", () => {
+    assert.equal(prop({ title: "x" }, "title"), "x");
+    assert.equal(prop({ title: "x" }, "missing"), undefined);
+    assert.equal(prop({}, "constructor"), undefined);
+    assert.equal(prop({}, "toString"), undefined);
+  });
+});
+
+describe("missingTool", () => {
+  it("builds the missing-tool arm around the install message", () => {
+    assert.deepEqual(missingTool("Fix: pnpm add -D vitest"), {
+      ok: false,
+      kind: "missing-tool",
+      message: "Fix: pnpm add -D vitest",
+    });
   });
 });

@@ -8,12 +8,14 @@
  *    test that cannot fail verifies nothing, yet it still lights up a coverage
  *    report, which is precisely why coverage alone is not evidence;
  *  - **`critical-untested`** — every PUBLIC CRITICAL function (from
- *    `.kragg/criticality.json`) must be referenced by name somewhere in the
- *    test suite. This is a deliberately weak, deliberately cheap check: a
- *    substring search over the test corpus, exactly as Python does it. It
- *    cannot tell a real exercise from a mention in a comment, and it is not
- *    meant to. It catches the case that matters — the highest-fan-in function
- *    in the codebase appearing NOWHERE in the tests.
+ *    `.kragg/criticality.json`) must be REFERENCED by the test suite: some
+ *    identifier in a test file, outside any skipped or todo test, must bind
+ *    to the function through the type checker. Python does a substring
+ *    search over the test corpus, which a comment, a string literal or an
+ *    unrelated same-named symbol satisfies; a bound identifier is satisfied
+ *    only by code that reaches the function. It is still a floor. A bound
+ *    reference says a test EXERCISES the function, not that its assertions
+ *    would catch a wrong answer — see `testDepth/references.ts`.
  *
  * ── WHAT CHANGED IN THE PORT ───────────────────────────────────────────────
  * Python collects `def test_*` from files named `test_*.py`. Here a test is a
@@ -25,15 +27,23 @@
  * a `testPaths` DIRECTORY entry covers is scanned, not only ones matching a
  * `*.test.ts` naming convention, and every one of them is part of the corpus
  * for the reference check. A shared `test/helpers.ts` IS part of the test
- * suite: excluding it would flag critical functions that the suite genuinely
- * exercises. Files holding no test calls contribute nothing to the first check,
- * so the wider net costs nothing but a parse. The one cost is a test-tree
- * FIXTURE that deliberately contains a broken test — mark it with
+ * suite: a function it binds is a function the suite reaches, and excluding
+ * it would flag critical functions that the suite genuinely exercises through
+ * a wrapper. Files holding no test calls contribute nothing to the first
+ * check, so the wider net costs nothing but a parse. The one cost is a
+ * test-tree FIXTURE that deliberately contains a broken test — mark it with
  * `// kragg: ignore -- <reason>`, which this gate honours per site. A PATTERN
  * entry (`src/**\/*.test.ts`) selects exactly what it says instead: the walk
  * it implies is wider than the pattern, and `testDepth/testFiles.ts` narrows
- * it back, because a corpus that swallowed `src/` would make the reference
- * check below true for every function in the codebase.
+ * it back, because a corpus that swallowed `src/` would bind every function
+ * in the codebase to its own definition and make the reference check vacuous.
+ *
+ * THE REFERENCE CHECK NEEDS THE PROGRAM. Binding an identifier to a
+ * declaration is the checker's job, so the run's shared program is loaded —
+ * only when there is a critical function to look for — and a program that
+ * will not build makes the gate `error: true` rather than fall back to text.
+ * A test file the `tsconfig.json` does not include has no checker view and
+ * yields no evidence; the finding says so and names the files.
  *
  * ── WHEN THIS GATE DOES NOT RUN ────────────────────────────────────────────
  * No parsable file under any test path means the gate SKIPS with that reason.
@@ -42,6 +52,7 @@
  * behaviour AGENTS.md forbids, so this one says so instead.
  */
 
+import type { AnalysisProgram } from "../analysis/program.ts";
 import {
   resolveTypeScript,
   type ParsedSource,
@@ -55,20 +66,32 @@ import {
   declarationProblem,
   hasCriticalityData,
   simpleName,
+  type CriticalFunction,
 } from "./testDepth/criticalFunctions.ts";
 import { failed, ran, skipped, type TestDepthOutcome } from "./testDepth/outcome.ts";
+import {
+  fileEvidence,
+  mergeReferences,
+  OUTSIDE_PROGRAM_NOTE,
+  referenceResolver,
+  type BoundReferences,
+} from "./testDepth/references.ts";
 import { findTestCases } from "./testDepth/testCases.ts";
 import { parsedTestSources } from "./testDepth/testFiles.ts";
 
 /** `Violation.code` for a test case with no assertion. */
 export const NO_ASSERT_CODE = "no-assert";
 
-/** `Violation.code` for a critical function no test mentions. */
+/** `Violation.code` for a critical function no test binds. */
 export const CRITICAL_UNTESTED_CODE = "critical-untested";
 
 /** Fix hint for `no-assert`, worded exactly as the Python original. */
 export const NO_ASSERT_FIX_HINT =
   "assert on behavior; a test that cannot fail verifies nothing";
+
+/** Note appended when the only references sit in tests that do not run. */
+export const SKIPPED_ONLY_NOTE =
+  "referenced only inside skipped or todo tests, which do not count";
 
 export interface TestQualityOptions {
   readonly root: string;
@@ -81,6 +104,11 @@ export interface TestQualityOptions {
    * reference check is skipped rather than run against a wrong answer.
    */
   readonly sourcePaths?: readonly string[] | undefined;
+  /**
+   * The run's shared program, for binding test identifiers to critical
+   * functions. Loaded only when there is a critical function to look for.
+   */
+  readonly program: AnalysisProgram;
   /** Compiler to parse with. Defaults to the project's own. */
   readonly api?: TypeScriptApi | undefined;
 }
@@ -107,10 +135,11 @@ export function checkTestQuality(options: TestQualityOptions): TestDepthOutcome 
   if (stale !== null) {
     return failed(stale);
   }
-  return ran([
-    ...assertionViolations(sources, api),
-    ...referenceViolations(options.root, options.sourcePaths ?? [], sources, api),
-  ]);
+  const references = referenceViolations(options, sources, api);
+  if (!references.ok) {
+    return references;
+  }
+  return ran([...assertionViolations(sources, api), ...references.violations]);
 }
 
 /** One violation per test case whose body cannot fail. */
@@ -145,46 +174,93 @@ function assertionViolations(
   return violations;
 }
 
+/** The reference check's findings, or the program failure that stopped it. */
+type ReferenceOutcome =
+  | { readonly ok: true; readonly violations: readonly Violation[] }
+  | { readonly ok: false; readonly message: string };
+
 /**
- * One violation per public critical function the test corpus never mentions.
+ * One violation per public critical function no running test binds.
  *
- * The corpus is the raw text of every scanned file, and the search is a plain
- * SUBSTRING match on the function's simple name, matching Python's
- * `if simple not in corpus`. Substring rather than a word boundary is the
- * lenient reading — `send` is satisfied by `sendAll` — and lenient is right for
- * a check whose only job is to catch the total absence of a name.
- *
- * No file or line: the finding is about the test suite as a whole, and there is
- * no honest place to point at.
+ * The corpus is every scanned file's checker view, merged: a function bound
+ * anywhere in the test tree, outside a skipped or todo test, is referenced.
+ * The program is loaded only once there is a critical function to look for,
+ * so a repo without criticality data never pays for it here.
  */
 function referenceViolations(
-  root: string,
-  sourcePaths: readonly string[],
+  options: TestQualityOptions,
   sources: readonly ParsedSource[],
   api: TypeScriptApi,
-): readonly Violation[] {
+): ReferenceOutcome {
+  const sourcePaths = options.sourcePaths ?? [];
   if (sourcePaths.length === 0) {
-    return [];
+    return { ok: true, violations: [] };
   }
-  const critical = criticalFunctions(root, sourcePaths, { api });
+  const critical = criticalFunctions(options.root, sourcePaths, { api });
   if (critical.length === 0) {
-    return [];
+    return { ok: true, violations: [] };
   }
-  const corpus = sources.map((source) => source.lines.join("\n")).join("\n");
-  const violations: Violation[] = [];
-  for (const { qualname, declaredReason } of critical) {
-    const simple = simpleName(qualname);
-    if (simple !== "" && !corpus.includes(simple)) {
-      // A declared function is named with the reviewer's reason: this gate's
-      // finding is "nobody tests the authorization entrypoint", and saying so
-      // is the difference between a fix and a suppression.
-      const why = declaredReason === undefined ? "" : ` (declared: ${declaredReason})`;
-      violations.push({
-        message: `no test references critical function ${qualname}${why}`,
-        code: CRITICAL_UNTESTED_CODE,
-        fixHint: `add a test exercising ${simple} directly`,
-      });
+  const loaded = referenceResolver(options.program, sourcePaths);
+  if (!loaded.ok) {
+    return { ok: false, message: loaded.message };
+  }
+  const outside: string[] = [];
+  const parts: BoundReferences[] = [];
+  for (const source of sources) {
+    const evidence = fileEvidence(loaded.resolver, source.relative);
+    if (evidence.kind === "resolved") {
+      parts.push(evidence.references);
+    } else {
+      outside.push(source.relative);
     }
   }
+  return {
+    ok: true,
+    violations: unreferenced(critical, mergeReferences(parts), outside),
+  };
+}
+
+/**
+ * The critical functions the merged evidence does not bind, as findings.
+ *
+ * The message distinguishes the three ways a function ends up here — nothing
+ * binds it, only a skipped test binds it, or the test files that might have
+ * are outside the program — because each has a different fix. No file or
+ * line: the finding is about the test suite as a whole, and there is no
+ * honest place to point at.
+ */
+function unreferenced(
+  critical: readonly CriticalFunction[],
+  bound: BoundReferences,
+  outside: readonly string[],
+): readonly Violation[] {
+  const violations: Violation[] = [];
+  for (const { qualname, declaredReason } of critical) {
+    if (bound.functions.has(qualname)) {
+      continue;
+    }
+    // A declared function is named with the reviewer's reason: this gate's
+    // finding is "nobody tests the authorization entrypoint", and saying so
+    // is the difference between a fix and a suppression.
+    const why = declaredReason === undefined ? "" : ` (declared: ${declaredReason})`;
+    const note = bound.skippedFunctions.has(qualname)
+      ? ` (${SKIPPED_ONLY_NOTE})`
+      : outsideNote(outside);
+    const simple = simpleName(qualname);
+    violations.push({
+      message: `no test references critical function ${qualname}${why}${note}`,
+      code: CRITICAL_UNTESTED_CODE,
+      fixHint: `add a test that exercises ${simple}, directly or through a helper`,
+    });
+  }
   return violations;
+}
+
+/** ` (2 test files are outside …: test/a.ts, test/b.ts)`, or nothing. */
+function outsideNote(outside: readonly string[]): string {
+  if (outside.length === 0) {
+    return "";
+  }
+  const noun = outside.length === 1 ? "test file is" : "test files are";
+  return ` (${outside.length} ${noun} ${OUTSIDE_PROGRAM_NOTE}: ${outside.join(", ")})`;
 }

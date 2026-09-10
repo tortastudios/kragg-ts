@@ -38,6 +38,7 @@ import { after, describe, it } from "node:test";
 
 import ts from "typescript";
 
+import { analysisProgram } from "../src/analysis/program.ts";
 import { renderGaps } from "../src/commands/coverage.ts";
 import { runCriticality } from "../src/commands/criticality.ts";
 import { selectTargets } from "../src/commands/mutation/targets.ts";
@@ -230,6 +231,7 @@ describe("an undeclared low-fan-in entrypoint is invisible to the gates", () => 
       root,
       testPaths: ["test"],
       sourcePaths: ["src"],
+      program: analysisProgram({ root, api: ts }),
       api: ts,
     });
     assert.equal(outcome.ok && !outcome.skipped, true);
@@ -288,6 +290,7 @@ describe("a declared entrypoint is critical everywhere the graph's own are", () 
       root,
       testPaths: ["test"],
       sourcePaths: ["src"],
+      program: analysisProgram({ root, api: ts }),
       api: ts,
     });
     assert.equal(outcome.ok && !outcome.skipped, true);
@@ -476,6 +479,7 @@ describe("a declaration that matches no function in the program", () => {
       root,
       sourcePaths: ["src"],
       testPaths: ["test"],
+      program: analysisProgram({ root, api: ts }),
       api: ts,
     });
     assert.equal(tests.ok, false);
@@ -485,6 +489,7 @@ describe("a declaration that matches no function in the program", () => {
       root,
       testPaths: ["test"],
       sourcePaths: ["src"],
+      program: analysisProgram({ root, api: ts }),
       api: ts,
     });
     assert.equal(quality.ok, false);

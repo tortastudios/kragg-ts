@@ -26,6 +26,7 @@ import {
   type CriticalDeclaration,
   type ForbiddenCall,
 } from "../src/policy/policy.ts";
+import { isTable, own } from "../src/policy/readers.ts";
 
 const roots: string[] = [];
 
@@ -550,5 +551,27 @@ describe("policyAsDict", () => {
     assert.ok(Array.isArray(paths));
     paths.push("injected");
     assert.deepEqual(DEFAULT_POLICY.sourcePaths, ["src"]);
+  });
+});
+
+/**
+ * The two readers every policy key goes through. `own` is the reason a
+ * config key named `constructor` cannot hand a function to a narrowing
+ * helper: config is attacker-influenced input.
+ */
+describe("readers: isTable / own", () => {
+  it("accepts only a plain object as a table", () => {
+    assert.equal(isTable({}), true);
+    assert.equal(isTable({ source_paths: ["src"] }), true);
+    assert.equal(isTable([]), false);
+    assert.equal(isTable(null), false);
+    assert.equal(isTable("src"), false);
+  });
+
+  it("reads own properties only, never the prototype", () => {
+    assert.equal(own({ profile: "strict" }, "profile"), "strict");
+    assert.equal(own({ profile: "strict" }, "missing"), undefined);
+    assert.equal(own({}, "constructor"), undefined);
+    assert.equal(own({}, "toString"), undefined);
   });
 });

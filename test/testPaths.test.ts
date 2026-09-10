@@ -21,6 +21,7 @@ import { after, describe, it } from "node:test";
 
 import ts from "typescript";
 
+import { analysisProgram } from "../src/analysis/program.ts";
 import { checkTestQuality } from "../src/gates/testQuality.ts";
 import { parsedTestSources } from "../src/gates/testDepth/testFiles.ts";
 import {
@@ -183,6 +184,7 @@ describe("the corpus the test-depth gates read", () => {
       root,
       testPaths: ["src/**/*.test.ts"],
       sourcePaths: ["src"],
+      program: analysisProgram({ root, api: ts }),
       api: ts,
     });
     // Before the fix this walked a directory named `src/**/*.test.ts`, found

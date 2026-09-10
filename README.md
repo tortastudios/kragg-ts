@@ -119,8 +119,8 @@ character in a file, not reinstalling a tool.
 | `structure` | file-length and public-symbol budgets |
 | `forbidden-calls` | project-banned APIs, resolved through the type checker |
 | `nullable-default` | `\|\|` mis-coalescing a legitimate `0` / `""` / `false` |
-| `critical-tests` | critical functions cannot change without test changes |
-| `test-quality` | no assertion-free tests; critical functions are referenced |
+| `critical-tests` | a changed critical function needs a changed test that the type checker binds to it or to its module — an unrelated test edit does not count |
+| `test-quality` | no assertion-free tests; every critical function is bound by an identifier in a running test (never a comment, a string or a skipped test) |
 | `secret-default` | secrets given silent fallbacks — a blank key must fail at startup, not sign |
 | `detect-secrets` | gitleaks or secretlint — autodetected under `"auto"`, required when `secret_scanner` names one |
 
@@ -186,8 +186,8 @@ several deliberately ignore the selection. That is documented, not accidental:
 | `boundaries` | **whole project** | a layering violation is a property of the import graph, not of one file |
 | `forbidden-calls`, `nullable-default`, `secret-default` | the file list | per-file, type-aware |
 | `detect-secrets` | the file list, else the whole project | credentials hide in `.env` files and fixtures, not only in `src/` |
-| `critical-tests` | **whole project**, plus its own `--since` diff | it compares critical functions against test changes across the tree |
-| `test-quality` | **whole project** | it answers "does a test reference this critical function", which no selection bounds |
+| `critical-tests` | **whole project**, plus its own `--since` diff | it compares critical functions against the test changes that bind them, across the tree |
+| `test-quality` | **whole project** | it answers "does a running test bind this critical function", which no selection bounds |
 | `test-coverage`, `critical-coverage`, `audit` | **whole project**, and they skip in incremental mode | a suite or an advisory scan means nothing partially run |
 
 ## Test depth
@@ -229,7 +229,24 @@ mostly-deterministic signals:
   git-tracked, because equivalent mutants are a reviewed, shared property.
 - **what's claimed** — `kragg spec` renders `describe`/`it` strings as a
   documentation tree and flags critical functions with only example-based
-  tests (property-based tests, via fast-check, kill more mutants).
+  tests (property-based tests, via fast-check, kill more mutants). The
+  property summary is a **text** signal: a function counts as property-tested
+  when its name occurs in the text of a recognised `fc.*`/`test.prop` test —
+  title, comment or code — so it says a property test *names* the function,
+  not that the property exercises it or would catch a wrong answer.
+- **what's linked** — `critical-tests` and `test-quality` tie a critical
+  function to test code through the type checker: an identifier in a test
+  file, outside any skipped or todo test, that binds to the function (through
+  an alias, a re-export, a shared helper or a `describe`-level fixture — no
+  direct call is required) or, for `critical-tests`, to anything in its
+  module. A name in a comment, a string or a same-named unrelated symbol is
+  not a reference, and an edit to an unrelated test file does not vouch for a
+  critical change. What a bound reference proves is that the test
+  **exercises** the function; it is not proof of behavioural coverage — a
+  test can bind the name and assert nothing useful. Coverage of its lines is
+  `critical-coverage`'s question and the strength of the assertions is
+  `kragg mutation`'s. Test files outside the `tsconfig.json` program have no
+  checker view and so give no evidence; the finding names them.
 - **what's trustworthy** — `kragg flaky` mines the run journal for gates that
   flipped on an unchanged commit; `--rerun N` re-runs the suite N times under
   the same `test_runner`, `test_command` and `test_paths` as `check`'s test
@@ -448,8 +465,9 @@ directory (`"test"`) or a pattern (`"src/**/*.test.ts"`), so a colocated suite
 is expressible: `**` matches zero or more path segments, `*` and `?` stay
 inside one, `{a,b}` alternates, and `[a-z]` is a class. The same entries decide
 what the runner is told to discover, which files `test-quality` and `kragg
-spec` read, and what `critical-tests` counts as a test change — one answer, not
-three. A directory entry still contributes everything under it (a shared
+spec` read, and which changed files `critical-tests` examines for evidence —
+one answer, not three. (Whether an examined test actually vouches for a
+changed function is the checker's question, never the path's.) A directory entry still contributes everything under it (a shared
 `test/helpers.ts` is part of the suite); a pattern contributes exactly what it
 matches, so pointing at `src/**/*.test.ts` does not pull `src/` into the test
 corpus.
@@ -541,6 +559,7 @@ Deliberate, and documented at each site:
 | a gate that throws | Reported as that gate's `error: true` — the rest of the pipeline still runs and the consolidated report survives. Python lets the exception kill the process. |
 | config validation | Python degrades a mismatched value to its default and ignores unknown keys; kragg-ts rejects both with exit 2, naming the setting. Strictly narrower: every config Python accepts *and reads as written* loads identically here. |
 | criticality-dependent gates | Derived on demand when the data is missing or stale, so `critical-tests` and `test-quality` run; Python skips them visibly instead. |
+| test evidence for critical functions | `critical-tests` accepts a changed test only when the checker binds it (or a test-tree module it imports) to the changed function or its module; Python passes on any change under `tests/`. `test-quality`'s `critical-untested` requires an identifier bound to the function outside a skipped test; Python's is a substring search of the test text. Both fail as `error: true` when the program cannot be built, and a test file outside the program is named as unresolvable rather than text-matched. |
 | SessionStart hook | Emits the `hookSpecificOutput` envelope, which is what injects `additionalContext`; Python prints plain-text context lines. |
 | hook output | Capped at 9000 characters with an in-band marker, because the harness spills longer output to a file the model never sees. Python does not cap. The cap applies to a block `reason` and to a SessionStart `additionalContext` alike, and truncates the text, never the JSON envelope. |
 | Stop hook scope | The same full check `kragg check` runs — every `source_paths` entry — resolved by the same `src/commands/scope.ts`. Python's `_stop` passes `source_paths[0]`, so in a project with more than one source directory the hook's per-file tools never open the rest and a turn can end green over them. Post-edit runs go through the same resolver as `check --file` and `check --changed`. |

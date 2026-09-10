@@ -278,6 +278,33 @@ describe("spec: property coverage is unavailable, not zero", () => {
     ]);
   });
 
+  it("credits a property test that names the function only in its title", () => {
+    // The documented limit of the static signal: attribution is a word-bounded
+    // name occurrence in the property test's TEXT, so a title suffices and no
+    // call is required. `hasPropertyTest` therefore reads "a property test
+    // names this function", never "a property exercises it" — the gates use
+    // checker-bound references for that (see `testDepth/references.ts`).
+    const root = project({
+      "package.json": JSON.stringify({ name: "x", devDependencies: { "fast-check": "3" } }),
+      "src/a.ts": "export function run(): void {}\nexport function other(): void {}\n",
+      "test/a.test.ts": [
+        'import fc from "fast-check";',
+        'it("run: holds for every string", () => {',
+        "  fc.assert(fc.property(fc.string(), (value) => other(value)));",
+        "});",
+        "",
+      ].join("\n"),
+      ".kragg/criticality.json": CRITICALITY,
+    });
+    const report = propertyCoverage({
+      root,
+      sourcePaths: ["src"],
+      testPaths: ["test"],
+      api: ts,
+    });
+    assert.deepEqual(available(report).map((row) => row.hasPropertyTest), [true]);
+  });
+
   it("credits the @fast-check/vitest `test.prop` binding", () => {
     // The arbitraries sit on the CALLEE, so a body-only scan would miss this.
     const root = project({
