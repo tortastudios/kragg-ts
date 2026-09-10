@@ -24,7 +24,10 @@
  * coverage slipped", and those need different responses from whoever reads the
  * report. Computing it here keeps the two facts separate by construction, and
  * as a bonus makes `coverage_fail_under` mean the same thing under every
- * runner.
+ * runner. It does not silence the runner's own threshold: the number here is
+ * kragg's floor, and a threshold the runner enforced from the project's own
+ * config is reported separately by `runnerReportedFailure` in
+ * `testEvidence.ts`, never merged into this percentage.
  *
  * DIVISION OF LABOUR WITH `src/coverage/istanbul.ts`: that module turns a
  * report into per-file uncovered LINES and function spans — the actionable

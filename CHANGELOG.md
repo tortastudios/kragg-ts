@@ -18,6 +18,34 @@ a previously green run red — see [Gate additions](#gate-additions) below.
 
 ## [Unreleased]
 
+### Fixed
+
+- **TOR-1419** — a coverage threshold the TEST RUNNER enforces from the
+  project's own configuration is no longer absorbed into a kragg pass. kragg
+  deliberately passes no threshold to any runner and computes line coverage
+  itself, so that "your tests fail" stays distinguishable from "coverage
+  slipped" — but `--coverage` leaves the project's own `vitest.config.ts` in
+  force, so a `coverage.thresholds` block there is still checked by vitest, on
+  dimensions kragg does not compute, and signalled with `process.exitCode = 1`
+  *after* the json report was written saying `success: true`. kragg read only
+  that report, so a project whose own `vitest run --coverage` exited 1 on
+  branch coverage got `kragg check` exit 0 with every gate green. The runner's
+  exit code is now consulted for the one combination nothing kragg asked for
+  can produce — the runner's own report is a pass, every test in it passed, a
+  complete coverage artifact came back, and the process still exited non-zero
+  — and reported as a violation of `test-coverage` under the additive code
+  `runner-reported-failure`, quoting the runner's own threshold line when it
+  printed one. `kragg check` fails (exit 1, not 3: the runner reached a
+  verdict, so this is a finding and not missing evidence). It is a **second**
+  violation beside `coverage-below-threshold` and never merged with it: one is
+  kragg's line-coverage floor, the other is the runner's own threshold on
+  whatever dimensions the runner tracks. kragg still implements line coverage
+  only; that scope limit is unchanged. A project with no runner-native
+  thresholds behaves exactly as before — its runner exits 0 and nothing is
+  reported. Pinned by `test/testRunner.test.ts` and by the
+  `runner-native-threshold` end-to-end regression fixture, which fails the run
+  on `node --test`'s own `--test-coverage-lines` while kragg's floor is met.
+
 ### Changed
 
 - The npm package is now `@tortastudios/kragg-ts`, not the bare `kragg-ts`

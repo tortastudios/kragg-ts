@@ -317,6 +317,13 @@ function withoutSubcommand(
  * threshold miss with `process.exitCode = 1` — the same code as a failing
  * test — so delegating the threshold would destroy the distinction between
  * "tests fail" and "coverage slipped". kragg computes the percentage itself.
+ *
+ * That does NOT mean no threshold is checked. `--coverage` leaves the
+ * project's own `vitest.config.ts` in force, thresholds included, so vitest
+ * may fail the run on dimensions kragg never asked about. `runnerReportedFailure`
+ * in `testEvidence.ts` reads that back off the exit code and reports it as the
+ * runner's own finding; see `adapters/testRunner.ts` for why it is a separate
+ * violation and not folded into kragg's line-coverage floor.
  */
 function vitestCommand(
   bin: string,
