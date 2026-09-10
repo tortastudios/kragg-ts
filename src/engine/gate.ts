@@ -13,6 +13,12 @@
  *   remaining gate is reported as skipped with reason "fail-fast" rather than
  *   omitted, so the report still accounts for the whole pipeline.
  *
+ * All three are about which gates OF THIS PIPELINE to run, and every answer
+ * they give is a reported one: a skipped gate is still a row in the report.
+ * Saying that a tier is not part of the pipeline at all is a different
+ * question, and `--fast-only` answers it one level up, by filtering the specs
+ * before they get here — see `commands/pipeline.ts`.
+ *
  * A SKIP IS NOT A FAILURE, and this is the one place that has to be taught it.
  * A visible skip is spelled `passed: false, skipped: true` (see
  * `catalog/results.ts`), so the obvious `!result.passed` test counts one as a

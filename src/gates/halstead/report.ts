@@ -99,12 +99,28 @@ function toViolation(failure: HalsteadFailure): Violation {
   return {
     message:
       `${name === "" ? file : name}: ${failure.metric} ` +
-      `${failure.actual.toFixed(1)} exceeds max ${failure.maximum.toFixed(1)}`,
+      `${formatMetricValue(failure.actual)} exceeds max ${formatMetricValue(failure.maximum)}`,
     file,
     line: failure.line,
     code: "halstead",
     fixHint: "reduce operators/operands; split the function",
   };
+}
+
+/**
+ * Format a metric value for a violation message.
+ *
+ * One decimal place let a genuine violation print the SAME rounded number on
+ * both sides of "exceeds max" — e.g. `estimated bugs 0.4 exceeds max 0.4` for
+ * an actual value of 0.4331, since `MAX_BUGS` is 0.4 — with no visible sign of
+ * the real margin or of how far the function is from the ceiling. Four
+ * decimal places (the precision `criticality/report.ts` already uses for
+ * betweenness) is display precision only: `checkSource` already compares the
+ * unrounded `actual`/`maximum` before this ever runs, so the threshold
+ * decision this text describes does not change.
+ */
+function formatMetricValue(value: number): string {
+  return value.toFixed(4);
 }
 
 /** Format a failure for CLI output, matching `format_violation` in Python. */

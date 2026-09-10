@@ -151,6 +151,7 @@ describe("runPackages over canned gates", () => {
       maxViolations: undefined,
       journal: true,
       failFast: false,
+      fastOnly: false,
       all: false,
       packages,
     };

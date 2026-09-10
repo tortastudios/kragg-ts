@@ -30,6 +30,7 @@
  */
 
 import assert from "node:assert/strict";
+import { join } from "node:path";
 import { after, describe, it } from "node:test";
 
 import {
@@ -40,6 +41,7 @@ import {
   hasArtifact,
   journalEntries,
   materialize,
+  remove,
   runCli,
   type CliRun,
 } from "./regressionHarness.ts";
@@ -640,5 +642,212 @@ describe("TOR-1368: a rerun that discovers no tests is not a stability report", 
     const run = await flakyZeroTests();
     assert.match(run.stderr, /invocation: /u);
     assert.match(run.stderr, /searched: tests\/\*\*/u);
+  });
+});
+
+// ---------------------------------------------------------------------------
+// TOR-1414. `Cannot find module 'x'` is Node's wording for a failed require —
+// and also TypeScript's wording for TS2307, which a compiler that ran
+// perfectly well writes to its stdout. Matching those words anywhere in a
+// completed command's output reported the whole type-check gate as "tsc is
+// not installed": exit 3, `date-helpers` named as the missing tool, and not
+// one of the compiler's actual findings shown.
+// ---------------------------------------------------------------------------
+
+/** The bad import, introduced at run time. Line 3 is the `import`. */
+const BAD_IMPORT =
+  "/** Imports a package that is not installed: the compiler's TS2307. */\n" +
+  "\n" +
+  'import { formatDate } from "date-helpers";\n' +
+  "\n" +
+  "export function stamp(when: Date): string {\n" +
+  "  return formatDate(when);\n" +
+  "}\n";
+
+const tscDiagnostic = scenario(async (): Promise<ReportView> => {
+  const root = await materialize({ fixture: "tsc-diagnostic-not-missing", typescript: true });
+  edit(root, { "src/index.ts": BAD_IMPORT });
+  return reportOf(await runCli(root, ["check", "--no-journal", "--format", "json"]));
+});
+
+const tscEntryPointGone = scenario(async (): Promise<ReportView> => {
+  const root = await materialize({ fixture: "tsc-diagnostic-not-missing", typescript: true });
+  edit(root, { "src/index.ts": BAD_IMPORT });
+  // The half-installed shape, and the other half of this case: the `.bin/tsc`
+  // shim still resolves, and the entry point it requires is gone. Node's own
+  // uncaught MODULE_NOT_FOUND is what the adapter reads then — and THAT is a
+  // missing tool, which the fix must not have taken away.
+  remove(root, join("node_modules", "typescript", "lib", "tsc.js"));
+  return reportOf(await runCli(root, ["check", "--no-journal", "--format", "json"]));
+});
+
+describe("TOR-1414: a compiler diagnostic is a finding, not a missing compiler", () => {
+  it("reports the tsc gate as RUN and failed, never as an environment error", async () => {
+    const report = await tscDiagnostic();
+    const tsc = gate(report, "tsc");
+    assert.equal(ran(tsc), true, "the compiler ran; reporting it absent hid its findings");
+    assert.equal(tsc.error, false);
+    assert.equal(tsc.skipped, false);
+    assert.equal(tsc.passed, false);
+  });
+
+  it("lists the TS2307 diagnostic at an actionable location", async () => {
+    const report = await tscDiagnostic();
+    const tsc = gate(report, "tsc");
+    assert.deepEqual([...violationCodes(tsc)], ["TS2307"]);
+    const found = tsc.violations[0];
+    assert.equal(found?.file, "src/index.ts");
+    assert.equal(found?.line, 3);
+    assert.match(found?.message ?? "", /Cannot find module 'date-helpers'/u);
+  });
+
+  it("exits 1 (findings), not 3 (environment)", async () => {
+    const report = await tscDiagnostic();
+    assert.equal(report.exitCode, 1);
+  });
+
+  it("still calls a compiler whose own entry point is gone MISSING, at exit 3", async () => {
+    const report = await tscEntryPointGone();
+    const tsc = gate(report, "tsc");
+    assert.equal(tsc.error, true);
+    assert.equal(tsc.passed, false);
+    assert.equal(tsc.skipped, false);
+    assert.match(tsc.rawOutput ?? "", /tsc is not installed in this project/u);
+    assert.equal(report.exitCode, 3);
+  });
+});
+
+// ---------------------------------------------------------------------------
+// TOR-1419. The runner kragg drives can enforce coverage thresholds of its
+// own, on dimensions kragg does not compute. kragg read only the runner's
+// report — which is written BEFORE the runner checks its thresholds — and
+// reported a pass over a run the tool itself had already failed.
+//
+// The fixture asks `node --test` for its own `--test-coverage-lines=90` and
+// sets kragg's `coverage_fail_under` to 50, so the suite passes, kragg's own
+// floor is met, and the ONLY failing signal in the run is the runner's.
+// ---------------------------------------------------------------------------
+
+const runnerThreshold = scenario(async (): Promise<ReportView> => {
+  const root = await materialize({ fixture: "runner-native-threshold", typescript: true });
+  return reportOf(await runCli(root, ["check", "--no-journal", "--format", "json"]));
+});
+
+describe("TOR-1419: a runner-native coverage threshold is not absorbed into a pass", () => {
+  it("really ran the suite, and every test in it passed", async () => {
+    const report = await runnerThreshold();
+    const view = gate(report, "test-coverage");
+    assert.equal(ran(view), true, `test-coverage did not run: ${JSON.stringify(view)}`);
+    // The runner's verdict is a FINDING, not missing evidence: exit 1, not 3.
+    assert.equal(view.error, false);
+    assert.equal(view.passed, false);
+  });
+
+  it("reports the runner's own threshold under its own code, attributed to the runner", async () => {
+    const report = await runnerThreshold();
+    const view = gate(report, "test-coverage");
+    assert.deepEqual(violationCodes(view), ["runner-reported-failure"]);
+    const message = view.violations[0]?.message ?? "";
+    assert.match(message, /with all 2 tests passing/u);
+    assert.match(message, /runner's OWN configured coverage threshold/u);
+    assert.match(message, /not by kragg's line-coverage floor/u);
+    // What the runner itself computed, quoted rather than re-derived.
+    assert.match(message, /line coverage does not meet threshold of 90%/u);
+  });
+
+  it("keeps kragg's own floor a separate, unfired signal", async () => {
+    const report = await runnerThreshold();
+    // 50% was met, so `coverage-below-threshold` is absent — the two checks
+    // are never merged into one number.
+    assert.ok(!violationCodes(gate(report, "test-coverage")).includes("coverage-below-threshold"));
+    // And the coverage evidence still reached the gate that consumes it.
+    assert.equal(gate(report, "critical-coverage").skipped, false);
+  });
+
+  it("exits 1: the whole run fails, as the runner's own run does", async () => {
+    const report = await runnerThreshold();
+    assert.equal(report.exitCode, 1);
+    assert.equal(report.passed, false);
+  });
+});
+
+// ---------------------------------------------------------------------------
+// TOR-1418. A location that exists only inside another violation's prose is a
+// location no machine consumer can act on.
+// ---------------------------------------------------------------------------
+
+const foldedLocations = scenario(async (): Promise<ReportView> => {
+  const root = await materialize({ fixture: "folded-locations", typescript: true });
+  return reportOf(await runCli(root, ["check", "--no-journal", "--format", "json"]));
+});
+
+describe("TOR-1418: every flagged location is its own violation object", () => {
+  it("gives each of the three over-budget modules its own entry", async () => {
+    const structure = gate(await foldedLocations(), "structure");
+    assert.equal(ran(structure), true);
+    assert.equal(structure.passed, false);
+    assert.equal(structure.violationCount, 3);
+    assert.deepEqual(
+      structure.violations.map((violation) => violation.file),
+      ["src/main.ts", "src/scene.ts", "src/simulation.ts"],
+    );
+  });
+
+  it("lets a file-scoped consumer find the file the fold used to swallow", async () => {
+    // THE REPORTED FAILURE. `src/simulation.ts` was flagged, but a filter over
+    // `violations[].file` matched nothing and the agent skipped the file.
+    const structure = gate(await foldedLocations(), "structure");
+    const mine = structure.violations.filter((v) => v.file === "src/simulation.ts");
+    assert.equal(mine.length, 1);
+    assert.equal(mine[0]?.code, "symbol-budget");
+  });
+
+  it("keeps two findings in ONE file apart by line", async () => {
+    const secrets = gate(await foldedLocations(), "secret-default");
+    assert.equal(ran(secrets), true);
+    assert.equal(secrets.violationCount, 2);
+    assert.deepEqual(
+      secrets.violations.map((violation) => violation.line),
+      [22, 27],
+    );
+  });
+
+  it("puts no location in prose, in any gate", async () => {
+    for (const view of (await foldedLocations()).gates) {
+      for (const violation of view.violations) {
+        assert.doesNotMatch(
+          violation.message,
+          /\+\d+ more at /u,
+          `${view.name} folded a location into a message: ${violation.message}`,
+        );
+      }
+    }
+  });
+
+  it("leaves `truncated` false when the cap dropped nothing", async () => {
+    // The fold used to hide two of three files with `truncated: false`, which
+    // is the same sentence as "nothing was hidden".
+    const report = await foldedLocations();
+    for (const name of ["structure", "secret-default"]) {
+      const view = gate(report, name);
+      assert.equal(view.truncated, false, name);
+      assert.equal(view.violations.length, view.violationCount, name);
+    }
+  });
+
+  it("still reports `truncated` when the cap really does drop entries", async () => {
+    const root = await materialize({ fixture: "folded-locations", typescript: true });
+    const run = await runCli(root, [
+      "check",
+      "--no-journal",
+      "--format",
+      "json",
+      "--max-violations",
+      "2",
+    ]);
+    const structure = gate(reportOf(run), "structure");
+    assert.equal(structure.violationCount, 3);
+    assert.equal(structure.violations.length, 2);
+    assert.equal(structure.truncated, true);
   });
 });

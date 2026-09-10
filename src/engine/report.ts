@@ -43,14 +43,18 @@ export const EXIT_USAGE = 2;
 export const EXIT_ENVIRONMENT = 3;
 
 /**
- * Caps on the raw output kept for a gate we could not parse, and on the
- * locations listed in a deduped message.
+ * Caps on the raw output kept for a gate we could not parse.
  *
- * Internal: they tune the two functions below and nothing else reads them.
+ * Internal: they tune `capOutput` below and nothing else reads them.
+ *
+ * There is no longer a cap on locations listed in a deduped message, because
+ * a deduped message no longer lists any: dedupe collapses only findings that
+ * share a LOCATION as well as a `(code, message)`, so the extra locations it
+ * used to fold into prose are now violation objects of their own. See
+ * `dedupeViolations`.
  */
 const MAX_RAW_LINES = 40;
 const MAX_RAW_CHARS = 4000;
-const MAX_DEDUPE_LOCATIONS = 5;
 
 /* --- Domain types ------------------------------------------------------- */
 
@@ -74,8 +78,9 @@ export interface ProcessedGate {
    *
    * Deliberately post-dedupe, unlike `result.violationCount`, so that
    * `advisoryCount > advisories.length` is exactly the truncation signal and
-   * needs no companion boolean. Dedupe loses nothing: the collapsed message
-   * carries its own `(+N more at …)` tail.
+   * needs no companion boolean. Dedupe loses no LOCATION: it only collapses
+   * advisories that already sit at the same one, and says how many with a
+   * `(+N more)` tail.
    */
   readonly advisoryCount: number;
 }
@@ -157,10 +162,27 @@ function processGate(result: GateResult, maxViolations: number): ProcessedGate {
 }
 
 /**
- * Collapse identical (code, message) findings spanning many locations.
+ * Collapse findings identical in `(code, message, location)` — and NOTHING
+ * that differs in where it is.
  *
- * "Missing return type (+37 more at a.ts:1, b.ts:9)" is one actionable line;
- * 38 near-identical lines is a wall the reader skims past.
+ * THE LOCATION IS PART OF THE KEY, AND THAT IS THE WHOLE POINT. This used to
+ * group on `(code, message)` alone and fold every other location into the
+ * survivor's prose — "maintainability index grade C (minimum: A) (+2 more at
+ * src/scene.ts, src/simulation.ts)". One line reads well, but the JSON
+ * payload then carried ONE violation object for three affected files, with no
+ * structured field naming the other two: a consumer filtering `violations` by
+ * `file` concluded that `src/simulation.ts` was clean, and a file-scoped agent
+ * skipped work it had actually been assigned. Prose is not a data structure.
+ *
+ * So every distinct location is now a violation object of its own, subject to
+ * the same per-gate cap as before (`truncated` still means, and only means,
+ * that the cap dropped entries). Genuine duplicates — the identical finding
+ * reported twice AT THE SAME location — still collapse, and say so with a
+ * `(+N more)` tail; there is nowhere else for the reader to look, so nothing
+ * is hidden by that.
+ *
+ * A gate whose findings really are one finding about many files should say so
+ * in ONE violation, not by relying on the report to fold N of them.
  */
 export function dedupeViolations(
   violations: readonly Violation[],
@@ -168,8 +190,12 @@ export function dedupeViolations(
   const groups = new Map<string, Violation[]>();
   for (const violation of violations) {
     // JSON.stringify of a tuple is collision-free here: no delimiter in
-    // either field can be confused for the separator.
-    const key = JSON.stringify([violation.code ?? null, violation.message]);
+    // any field can be confused for the separator.
+    const key = JSON.stringify([
+      violation.code ?? null,
+      violation.message,
+      violationLocation(violation),
+    ]);
     const group = groups.get(key);
     if (group === undefined) {
       groups.set(key, [violation]);
@@ -188,15 +214,10 @@ export function dedupeViolations(
       deduped.push(first);
       continue;
     }
-    const locations = group
-      .slice(1)
-      .map(violationLocation)
-      .filter((location) => location !== "")
-      .slice(0, MAX_DEDUPE_LOCATIONS);
-    const where = locations.length > 0 ? ` at ${locations.join(", ")}` : "";
+    // No `at …` list: every member of this group is at `first`'s location.
     deduped.push({
       ...first,
-      message: `${first.message} (+${group.length - 1} more${where})`,
+      message: `${first.message} (+${group.length - 1} more)`,
     });
   }
   return deduped;

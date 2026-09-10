@@ -203,7 +203,7 @@ These were the four dependencies this project expected to want. **None was
 adopted, and — now that the tool is complete — none turned out to be needed.**
 
 That is the strongest available evidence that this policy is workable rather
-than merely austere. The whole of `kragg check` (18 gates, 192 modules under
+than merely austere. The whole of `kragg check` (18 gates, 193 modules under
 `src/`) was built with `typescript` and the Node standard library:
 
 - the AST work that `oxc-parser` and `ts-morph` were for is done through the

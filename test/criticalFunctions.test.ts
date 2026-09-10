@@ -211,6 +211,34 @@ describe("criticalFunctions", () => {
     ]);
   });
 
+  it("keeps a TypeScript-private member in the population", () => {
+    // TOR-1417 relaxed what counts as EVIDENCE for a `private` member in
+    // `test-quality`; it must not have removed the member from the list three
+    // gates enforce on. `critical-coverage` still demands that not one of its
+    // lines is uncovered, and it can only do that if the member is here.
+    const root = projectWith(
+      [
+        { name: "src/a#Client.sign", fan_in: 3, is_critical: true },
+        { name: "src/a#Client.hook", fan_in: 2, is_critical: true },
+        { name: "src/a#Client.send", fan_in: 7, is_critical: true },
+      ],
+      {
+        "src/a.ts": [
+          "export class Client {",
+          "  send(): number { return this.sign(); }",
+          "  private sign(): number { return this.hook(); }",
+          "  protected hook(): number { return 1; }",
+          "}",
+        ].join("\n"),
+      },
+    );
+    assert.deepEqual(qualnames(root), [
+      "src/a#Client.hook",
+      "src/a#Client.send",
+      "src/a#Client.sign",
+    ]);
+  });
+
   it("recognises every export spelling that binds a callable", () => {
     // `export { local as alias }` records the LOCAL name, because that is what
     // the criticality graph named the declaration. Recording the alias instead

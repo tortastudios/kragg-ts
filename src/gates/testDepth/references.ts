@@ -95,6 +95,16 @@ type FileByPath = ReadonlyMap<string, bundledTs.SourceFile>;
 export interface ReferenceResolver {
   readonly api: TypeScriptApi;
   readonly checker: bundledTs.TypeChecker;
+  /** Repo root, as `moduleName` took the module names relative to. */
+  readonly root: string;
+  /**
+   * The built program.
+   *
+   * Carried so a caller that needs CALL EDGES between the declarations below —
+   * `restricted.ts`, for a member no test can name directly — can build them on
+   * the very program these symbols came from, rather than compiling a second.
+   */
+  readonly program: bundledTs.Program;
   /** Declaration node -> qualified name, over the files under the source paths. */
   readonly scope: Scope;
   readonly sourceModules: ModuleByFile;
@@ -140,7 +150,15 @@ export function referenceResolver(
   }
   return {
     ok: true,
-    resolver: { api, checker: loaded.checker, scope, sourceModules, byRelative },
+    resolver: {
+      api,
+      checker: loaded.checker,
+      root: program.root,
+      program: loaded.program,
+      scope,
+      sourceModules,
+      byRelative,
+    },
   };
 }
 

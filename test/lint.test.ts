@@ -80,6 +80,27 @@ function installed(root: string, name: string): void {
   fakeLinter(root, name, "{}", 0);
 }
 
+/**
+ * A HALF-INSTALLED linter: the `.bin` shim is there, its entry point is not.
+ *
+ * Not a recorded string — real `node`, really failing to resolve, so the
+ * stderr the adapter sees is Node's own uncaught `MODULE_NOT_FOUND` with the
+ * `node:internal/modules/` stack under it. That stack is what `missingTool`
+ * keys off, so this is the fixture that proves the lint gate still calls a
+ * genuinely unusable linter an environment problem.
+ */
+function brokenLinter(root: string, name: string): void {
+  const dir = join(root, "node_modules", ".bin");
+  mkdirSync(dir, { recursive: true });
+  const path = join(dir, name);
+  const entry = join(root, "node_modules", name, "lib", "main.js");
+  writeFileSync(
+    path,
+    `#!/bin/sh\nexec ${JSON.stringify(process.execPath)} -e "require('${entry}')"\n`,
+  );
+  chmodSync(path, 0o755);
+}
+
 describe("detectLintTool", () => {
   it("skips when nothing is installed, naming every option and its install command", () => {
     const env = resolveProjectEnvironment(project());
@@ -273,6 +294,21 @@ describe("runLint", () => {
     if (!outcome.ok) {
       assert.equal(outcome.reason, "skipped");
       assert.equal(outcome.command, undefined);
+    }
+  });
+
+  it("still ERRORS when a resolved shim's own entry point does not resolve", async () => {
+    // Step 1 of `interpretRun`'s order, and the case that must survive the
+    // TOR-1414 tightening: `oxlint` resolved, then died before it linted
+    // anything. A project with no linter that ran is an unchecked project.
+    const root = project();
+    brokenLinter(root, "oxlint");
+    const outcome = await runLint({ env: resolveProjectEnvironment(root) });
+    assert.equal(outcome.ok, false);
+    if (!outcome.ok) {
+      assert.equal(outcome.reason, "error");
+      assert.match(outcome.message, /oxlint is not installed in this project/u);
+      assert.match(outcome.message, /pnpm add -D oxlint/u);
     }
   });
 });

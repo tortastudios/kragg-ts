@@ -110,6 +110,7 @@ function pipeline(
       maxViolations: undefined,
       journal: true,
       failFast: false,
+      fastOnly: false,
       packages: [],
       all: false,
       ...overrides,

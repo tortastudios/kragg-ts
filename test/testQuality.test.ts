@@ -36,6 +36,7 @@ import {
   NO_ASSERT_CODE,
   NO_ASSERT_FIX_HINT,
   SKIPPED_ONLY_NOTE,
+  UNREACHED_MEMBER_NOTE,
 } from "../src/gates/testQuality.ts";
 import {
   failed as failedOutcome,
@@ -546,6 +547,215 @@ describe("test-quality: critical references", () => {
     });
     assert.equal(outcome.ok && !outcome.skipped && outcome.violations.length, 0);
     assert.equal(program.loaded(), false);
+  });
+});
+
+/**
+ * TypeScript's `private`/`protected` members, which no test file may name.
+ *
+ * These are written from the position that the exemption is the DANGEROUS
+ * half: it is trivial to make the gate quiet by waving every private method
+ * through, and that would delete real enforcement. So every positive case here
+ * has a negative twin on the same fixture — the same class, the same keyword,
+ * the same criticality record — differing only in whether a running test
+ * actually reaches the member. If the trace were replaced by a blanket pass,
+ * the twins go green together and this block fails.
+ */
+describe("test-quality: TypeScript-private members", () => {
+  const SOURCE = [
+    "export class Client {",
+    "  send(payload: string): string {",
+    "    return this.sign(payload);",
+    "  }",
+    "  private sign(payload: string): string {",
+    "    return `signed:${this.salt()}${payload}`;",
+    "  }",
+    "  private salt(): string {",
+    '    return "s";',
+    "  }",
+    "  private orphan(): string {",
+    '    return "nothing a test runs calls this";',
+    "  }",
+    "}",
+  ].join("\n");
+
+  const CRITICALITY = JSON.stringify([
+    { name: "src/client#Client.sign", fan_in: 3, is_critical: true },
+    { name: "src/client#Client.salt", fan_in: 1, is_critical: true },
+    { name: "src/client#Client.orphan", fan_in: 0, is_critical: true },
+  ]);
+
+  const IMPORT_CLIENT = 'import { Client } from "../src/client.ts";\n';
+
+  function membersIn(tests: Readonly<Record<string, string>>): readonly Violation[] {
+    return violationsIn({
+      ".kragg/criticality.json": CRITICALITY,
+      "src/client.ts": SOURCE,
+      ...tests,
+    });
+  }
+
+  /** The one test that exercises `send`, and through it `sign` and `salt`. */
+  const EXERCISES_SEND = `${IMPORT_CLIENT}it("sends", () => { expect(new Client().send("x")).toBe("signed:sx"); });`;
+
+  it("does not demand a direct reference for a member the public surface reaches", () => {
+    // `sign` is one call from `send`; `salt` is two. Neither can be named from
+    // a test file at all, and both run when this test runs.
+    const violations = membersIn({ "test/sample.test.ts": EXERCISES_SEND });
+    assert.deepEqual(
+      violations.map((violation) => violation.message),
+      [
+        "no test references critical function src/client#Client.orphan " +
+          `(${UNREACHED_MEMBER_NOTE})`,
+      ],
+    );
+    assert.equal(violations[0]?.code, CRITICAL_UNTESTED_CODE);
+    // The hint must not ask for the one thing the compiler forbids.
+    assert.equal(
+      violations[0]?.fixHint,
+      "add a test that exercises orphan through its class's public API",
+    );
+  });
+
+  it("reports every private member when nothing exercises the public surface", () => {
+    // The same fixture with the call removed: the exemption is a property of
+    // the path, not of the keyword.
+    const violations = membersIn({
+      "test/sample.test.ts": `${IMPORT_CLIENT}it("builds", () => { expect(new Client()).toBeTruthy(); });`,
+    });
+    assert.deepEqual(codes(violations), [
+      CRITICAL_UNTESTED_CODE,
+      CRITICAL_UNTESTED_CODE,
+      CRITICAL_UNTESTED_CODE,
+    ]);
+  });
+
+  it("does not count a public call made only inside a skipped test", () => {
+    // A skipped test runs nothing, so it seeds no path. This is the shape a
+    // blanket exemption would wave through.
+    const violations = membersIn({
+      "test/sample.test.ts": [
+        IMPORT_CLIENT,
+        'it.skip("later", () => { expect(new Client().send("x")).toBe("signed:sx"); });',
+        'it("real", () => { expect(new Client()).toBeTruthy(); });',
+      ].join("\n"),
+    });
+    assert.deepEqual(codes(violations), [
+      CRITICAL_UNTESTED_CODE,
+      CRITICAL_UNTESTED_CODE,
+      CRITICAL_UNTESTED_CODE,
+    ]);
+  });
+
+  it("follows a public entry point in another module to a private member", () => {
+    // The call graph, not the class body: the only test binding is a free
+    // function two modules away from the keyword.
+    assert.deepEqual(
+      membersIn({
+        "src/facade.ts": [
+          'import { Client } from "./client.ts";',
+          "export function dispatch(payload: string): string {",
+          "  return new Client().send(payload);",
+          "}",
+        ].join("\n"),
+        "test/sample.test.ts": [
+          'import { dispatch } from "../src/facade.ts";',
+          'it("dispatches", () => { expect(dispatch("x")).toBe("signed:sx"); });',
+        ].join("\n"),
+        ".kragg/criticality.json": JSON.stringify([
+          { name: "src/client#Client.sign", fan_in: 3, is_critical: true },
+          { name: "src/client#Client.salt", fan_in: 1, is_critical: true },
+        ]),
+      }),
+      [],
+    );
+  });
+
+  it("reaches a protected member through a subclass in another module", () => {
+    assert.deepEqual(
+      violationsIn({
+        ".kragg/criticality.json": JSON.stringify([
+          { name: "src/base#Base.hook", fan_in: 2, is_critical: true },
+        ]),
+        "src/base.ts": [
+          "export class Base {",
+          "  protected hook(): string {",
+          '    return "base";',
+          "  }",
+          "}",
+        ].join("\n"),
+        "src/child.ts": [
+          'import { Base } from "./base.ts";',
+          "export class Child extends Base {",
+          "  describe(): string {",
+          "    return `child:${this.hook()}`;",
+          "  }",
+          "}",
+        ].join("\n"),
+        "test/sample.test.ts": [
+          'import { Child } from "../src/child.ts";',
+          'it("describes", () => { expect(new Child().describe()).toBe("child:base"); });',
+        ].join("\n"),
+      }),
+      [],
+    );
+  });
+
+  it("reports a protected member no subclass a test runs reaches", () => {
+    const violations = violationsIn({
+      ".kragg/criticality.json": JSON.stringify([
+        { name: "src/base#Base.hook", fan_in: 0, is_critical: true },
+      ]),
+      "src/base.ts": [
+        "export class Base {",
+        "  protected hook(): string {",
+        '    return "base";',
+        "  }",
+        "}",
+      ].join("\n"),
+      "src/child.ts": [
+        'import { Base } from "./base.ts";',
+        "export class Child extends Base {",
+        "  describe(): string {",
+        '    return "child";',
+        "  }",
+        "}",
+      ].join("\n"),
+      "test/sample.test.ts": [
+        'import { Child } from "../src/child.ts";',
+        'it("describes", () => { expect(new Child().describe()).toBe("child"); });',
+      ].join("\n"),
+    });
+    assert.deepEqual(
+      violations.map((violation) => violation.message),
+      [`no test references critical function src/base#Base.hook (${UNREACHED_MEMBER_NOTE})`],
+    );
+  });
+
+  it("still demands a direct reference from a public member of the same class", () => {
+    // The keyword is the whole difference: `send` is reachable by exactly the
+    // same path as `sign` and is still required to be named.
+    const violations = violationsIn({
+      ".kragg/criticality.json": JSON.stringify([
+        { name: "src/client#Client.send", fan_in: 9, is_critical: true },
+        { name: "src/client#Client.sign", fan_in: 3, is_critical: true },
+      ]),
+      "src/client.ts": SOURCE,
+      "src/facade.ts": [
+        'import { Client } from "./client.ts";',
+        "export function dispatch(payload: string): string {",
+        "  return new Client().send(payload);",
+        "}",
+      ].join("\n"),
+      "test/sample.test.ts": [
+        'import { dispatch } from "../src/facade.ts";',
+        'it("dispatches", () => { expect(dispatch("x")).toBe("signed:sx"); });',
+      ].join("\n"),
+    });
+    assert.deepEqual(
+      violations.map((violation) => violation.message),
+      ["no test references critical function src/client#Client.send"],
+    );
   });
 });
 

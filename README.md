@@ -115,6 +115,7 @@ kragg check                    # all gates, one consolidated report
 kragg check --changed          # only files changed vs HEAD (cheap inner loop)
 kragg check --since main       # changed vs merge-base with a ref
 kragg check --file src/a.ts    # scope to specific files (repeatable)
+kragg check --fast-only        # the static tier only; never runs the slow one
 kragg check --format json      # stable machine-readable schema
 kragg check --package @app/web # one workspace member as its own run (repeatable)
 kragg security                 # the security subset, cheap enough for every push
@@ -147,6 +148,37 @@ kragg init                     # add guardrails to an existing project
 kragg init --dry-run           # ...or just print what that would change
 kragg hook claude              # harness hook adapter (reads hook JSON on stdin)
 ```
+
+### `kragg fix` runs two passes, not one
+
+Linting and formatting are two independent tool choices in this ecosystem, so
+`kragg fix` makes two independent detections and runs whichever halves the
+project actually has:
+
+| Half | What runs | Chosen when |
+| --- | --- | --- |
+| lint fix | `oxlint --fix`, `eslint --fix`, or biome's combined `check --write` | the same `lint_tool` detection the `lint` gate uses |
+| format | `prettier --write`, or `biome format --write` | the project both **installed** the formatter and **configured** it |
+
+biome is the one tool that covers both roles: when it is the project's linter,
+`check --write` has already formatted and no second formatter is detected.
+Everywhere else the two are unrelated — oxlint for lint plus Prettier for
+format is an ordinary pairing, and it is the pairing this repository would use
+if it formatted at all.
+
+**A formatter is never imposed.** Prettier arrives as a transitive dependency
+of plenty of toolchains, and a formatter run with no config rewrites every file
+it is pointed at to its own defaults — on disk, in one command. So a merely
+installed formatter is not enough: kragg looks for `.prettierrc*`,
+`prettier.config.*`, `package.json#prettier` or `biome.json` in the project
+root, and when it finds none it says so and formats nothing. There is no
+`format_tool` policy key; the config file *is* the declaration.
+
+Both halves are resolved from the project's own `node_modules/.bin`, and either
+one being absent is a visible skip naming the exact install command — the
+`note: … does not format` line is printed exactly when the run really did not
+format. A `lint_tool` that names a linter the project has not installed is
+still exit 3, and then nothing runs at all, formatter included.
 
 ### Exit codes
 
@@ -192,6 +224,20 @@ character in a file, not reinstalling a tool.
 | `test-coverage` | the project's test suite, plus the coverage floor |
 | `critical-coverage` | public critical functions must be measured and have no uncovered lines |
 | `audit` | dependency vulnerabilities via the project's package manager |
+
+**Running the fast tier alone.** `--fast-only`, on `check` and `security`
+both, assembles the static gates and stops there — for the agent loop that
+wants to clear lint, type and metric findings without paying for the suite and
+the advisory database on every pass. The slow gates are not in the pipeline at
+all, so they are **absent** from `gates[]` rather than present with
+`skipped: true`; the exit code is the fast gates' verdict alone; and stderr
+names what did not run, because a shorter gate list on its own reads like an
+ordinary run. It selects a **tier**, never a file set, so it composes with
+`--file` / `--changed` / `--since` and with `--fail-fast`, which still halts at
+the first failure. It is refused, exit 2, with `--all` — whose whole meaning is
+"run the slow tier anyway" — and with `--update-baseline`, which records a full
+run and would otherwise drop `critical-coverage`'s accepted entries from the
+baseline file.
 
 kragg **bundles none of these tools**. Every external tool is resolved from the
 project's own `node_modules/.bin` — never a global install, never kragg's own
@@ -328,7 +374,9 @@ mostly-deterministic signals:
   `criticality.json` spells a name, so `Reader.close` and `Writer.close` each
   answer for their own lines. This is **line** coverage: `if (broken) fix();`
   on one line counts as covered once the `if` ran; no branch verdict is
-  implied anywhere.
+  implied anywhere — but a branch threshold the RUNNER enforces from its own
+  config still fails the run, reported as the runner's (see "The runner's own
+  coverage thresholds are reported, not absorbed" below).
   Both gates believe only **this invocation's** evidence: the runner writes
   into a private `.kragg/runs/` directory that did not exist before the run,
   so a runner that crashes, times out or leaves a partial report is an error
@@ -628,6 +676,21 @@ the runner whose report format it produces. Whatever ran, the gate's output
 states the argv and where it came from, so kragg's reconstruction is never
 mistaken for the project's own script.
 
+**The runner's own coverage thresholds are reported, not absorbed.** kragg
+passes no threshold to any runner and enforces only its own **line**-coverage
+floor — but `--coverage` leaves the project's own configuration in force, so
+`coverage.thresholds` in a `vitest.config.ts` (or `--test-coverage-lines` in a
+`test_command`) is still checked by the runner, over dimensions kragg does not
+compute, and signalled with the same exit code a failing test uses. When the
+runner's own report says every test passed, a complete coverage artifact came
+back, and the process still exited non-zero, kragg reports that as its own
+violation — `runner-reported-failure`, quoting the runner's own threshold line
+— and `kragg check` fails with it. It is deliberately a **second** finding
+beside `coverage-below-threshold` rather than the same one: kragg's floor and
+the runner's thresholds are independent checks, and merging them would produce
+one ambiguous number. A project with no runner-native thresholds sees no
+change: the runner exits 0 and nothing is reported.
+
 **A run that discovered no tests is an error, not a pass.** Zero failures out
 of zero tests is arithmetic, not evidence, so `test-coverage` reports
 `error: true` and exit 3, naming the argv, the patterns it searched and the
@@ -688,10 +751,11 @@ Deliberate, and documented at each site:
 | non-ASCII changed paths | Every git plumbing call is `-z`, so a path like `src/café.ts` survives. Python's `core.quotePath` output escapes it, the escaped name matches nothing on disk, and the file leaves the selection silently. |
 | `secret_name_suffixes` | Includes `ServiceKey`, which Python's default list lacks. |
 | pipeline halting | A **skip never halts** the slow tier or `--fail-fast`; only a gate that ran and did not pass does. Python branches on `not result.passed`, which counts a visible skip as a failure. |
+| `check`/`security --fast-only` | Runs the FAST tier alone, with the slow gates **absent** from `gates[]` rather than skipped in it. Python has no way to ask for a tier: `--fail-fast` stops at the first failure and the slow tier runs whenever the fast one is clean. No key moves — the run is simply a shorter pipeline — and the fact is stated on stderr. |
 | a gate that throws | Reported as that gate's `error: true` — the rest of the pipeline still runs and the consolidated report survives. Python lets the exception kill the process. |
 | config validation | Python degrades a mismatched value to its default and ignores unknown keys; kragg-ts rejects both with exit 2, naming the setting. Strictly narrower: every config Python accepts *and reads as written* loads identically here. |
 | criticality-dependent gates | Derived on demand when the data is missing or stale, so `critical-tests` and `test-quality` run; Python skips them visibly instead. |
-| test evidence for critical functions | `critical-tests` accepts a changed test only when the checker binds it (or a test-tree module it imports) to the changed function or its module; Python passes on any change under `tests/`. `test-quality`'s `critical-untested` requires an identifier bound to the function outside a skipped test; Python's is a substring search of the test text. Both fail as `error: true` when the program cannot be built, and a test file outside the program is named as unresolvable rather than text-matched. |
+| test evidence for critical functions | `critical-tests` accepts a changed test only when the checker binds it (or a test-tree module it imports) to the changed function or its module; Python passes on any change under `tests/`. `test-quality`'s `critical-untested` requires an identifier bound to the function outside a skipped test; Python's is a substring search of the test text. A `private`/`protected` member of an exported class is the one thing a test file may not name, so for that member — and only for that demand — the evidence is a path instead: it is accepted when the call graph puts it downstream of something a running test binds, and reported when it is not. It stays in the population `critical-tests` and `critical-coverage` enforce on. Both fail as `error: true` when the program cannot be built, and a test file outside the program is named as unresolvable rather than text-matched. |
 | SessionStart hook | Emits the `hookSpecificOutput` envelope, which is what injects `additionalContext`; Python prints plain-text context lines. |
 | hook output | Capped at 9000 characters with an in-band marker, because the harness spills longer output to a file the model never sees. Python does not cap. The cap applies to a block `reason` and to a SessionStart `additionalContext` alike, and truncates the text, never the JSON envelope. |
 | Stop hook scope | The same full check `kragg check` runs — every `source_paths` entry — resolved by the same `src/commands/scope.ts`. Python's `_stop` passes `source_paths[0]`, so in a project with more than one source directory the hook's per-file tools never open the rest and a turn can end green over them. Post-edit runs go through the same resolver as `check --file` and `check --changed`. |
@@ -701,6 +765,7 @@ Deliberate, and documented at each site:
 | a zero-test run | `error: true` and exit 3, naming the argv and the settings that change it: a completed run that discovered nothing verifies nothing. Python passes `--cov-fail-under` to pytest and reads its exit code, so the case is not distinguished as its own outcome. |
 | test evidence | Python reads `.kragg/coverage.json` from a fixed path. kragg-ts gives every invocation its own `.kragg/runs/` directory, refuses anything incomplete, and hands `critical-coverage` the coverage in memory. Same gates, same wire format; only the provenance rule differs. |
 | unmeasured critical functions | Python's `critical-coverage` passes a critical function the report never mentions (`measured=False`), reasoning that a missing entry is a measurement-key mismatch. kragg-ts hands the gate the document its own run wrote, so a missing file was never loaded: the function fails under the additive code `critical-unmeasured`, with the cause in the message. |
+| the runner's own thresholds | Python passes `--cov-fail-under` to pytest, so pytest's exit code IS kragg's floor and there is no second threshold to lose. The JavaScript runners are given no threshold but still read the project's own config, so kragg-ts reports a non-zero exit over a passing report with complete coverage as the additive code `runner-reported-failure`, beside `coverage-below-threshold` and never merged with it. |
 | coverage denominator | Python's `pytest --cov=src` instruments every file under `src`, loaded or not. The JavaScript runners report only what the run loaded, so kragg-ts reconciles the number against `source_paths` itself: unloaded files count as uncovered by their statement lines, and files outside the source paths do not count. |
 | `// kragg: ignore` | Requires a reason: `// kragg: ignore -- <reason>`. A bare marker is not honoured and is reported on the finding it tried to hide. Python's `# kragg: ignore` needs none. |
 | legacy-debt baseline | `kragg.json#baseline` plus `check --update-baseline` records accepted findings of the metric, structure and test-quality gates; they become `baselined:` advisories and new findings still fail. Python has no equivalent; no wire key is added. `brief` gains `## Suppressions` and `## Baseline`. |

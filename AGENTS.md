@@ -102,7 +102,7 @@ failed task, not a judgement call.
 
 ## Project Map
 
-192 modules under `src/`, listed top-down in the order `kragg.json`'s
+193 modules under `src/`, listed top-down in the order `kragg.json`'s
 `layers` declares — a module may import its own layer or a lower one, never a
 higher one, and the `boundaries` gate enforces that on this repo.
 
@@ -161,13 +161,21 @@ higher one, and the `boundaries` gate enforces that on this repo.
   partition, metrics, blocks, report), `nullableDefault/`, `secretDefault/`,
   `secrets/` (gitleaks, secretlint, lookup), `testDepth/` (shared by the
   three test-depth gates; `testFiles.ts` is the test corpus `test_paths`
-  selects, and `references.ts` binds test code in it to critical functions
-  through the checker), `typingStrictness/` (config, hatches, included,
+  selects, `references.ts` binds test code in it to critical functions
+  through the checker, and `restricted.ts` answers the one question a
+  `private`/`protected` member cannot answer with a name — whether the call
+  graph puts it downstream of something a running test binds),
+  `typingStrictness/` (config, hatches, included,
   chain, codes). Single-file gates: `criticalCoverage.ts`, `criticalTests.ts`,
   `testQuality.ts`, `typeComplexity.ts`. Each directory has a same-named `.ts`
   beside it that is the public entry point and re-exports the parts.
 - `src/adapters/` — external tools turned into violations: `lint.ts`,
-  `tsc.ts`, `testRunner.ts`, `audit.ts`, `deadcode.ts`; `linters/` holds the
+  `tsc.ts`, `testRunner.ts`, `audit.ts`, `deadcode.ts`; plus `format.ts`,
+  which is not a gate at all — it is the formatter detection `kragg fix`
+  drives, kept apart from `lint.ts` because formatting and linting are
+  independent tool choices in this ecosystem, and stricter than it because a
+  formatter with no config rewrites every file it is given (it therefore
+  requires a config file, never merely a `node_modules` entry); `linters/` holds the
   oxlint/biome/eslint JSON parsers, `support/` the per-package-manager audit
   parsers, the per-runner test reports, lcov/istanbul readers, the
   `Unavailable` outcome kinds, the `runCommand` helpers, the per-invocation
@@ -345,8 +353,10 @@ authority; this list must match it.
 | `hook claude` | hook adapter; reads hook JSON on stdin |
 
 `check` and `security` share `--file`, `--format`, `--max-violations`,
-`--no-journal` and `--package`; of the two, only `check` takes `--changed`,
-`--since`, `--fail-fast`, `--all` and `--update-baseline`. The rest:
+`--no-journal`, `--fast-only` (the FAST tier alone; the slow gates are absent
+from the report, not skipped in it) and `--package`; of the two, only `check`
+takes `--changed`, `--since`, `--fail-fast`, `--all` and `--update-baseline`.
+The rest:
 `fix --file`; `status --format --last`; `map`/`spec --path --symbol --changed
 --limit --all --format`, plus `map --write`; `brief --since --path --limit
 --all`; `criticality --write --path`; `mutation --path --since --all
@@ -367,8 +377,10 @@ list of what it accepts — `test/cli.test.ts` walks the help text against the
 per-command table. Exit 2, never a silent no-op, for: a flag the command does
 not accept, a `--format` other than `text`/`json`, a count that is not a
 non-negative integer, a positional the command has no use for, `--file`
-alongside `--changed`/`--since`, and `criticality --write --path` (a scoped
-`criticality.json` would read downstream as "everything else is uncritical").
+alongside `--changed`/`--since`, `--fast-only` alongside `--all` (a tier
+contradiction) or `--update-baseline` (which records a full run), and
+`criticality --write --path` (a scoped `criticality.json` would read
+downstream as "everything else is uncritical").
 
 ## Conventions
 

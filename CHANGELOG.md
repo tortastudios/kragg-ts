@@ -18,7 +18,111 @@ a previously green run red — see [Gate additions](#gate-additions) below.
 
 ## [Unreleased]
 
+### Fixed
+
+- **TOR-1414** — a compiler diagnostic is no longer mistaken for a missing
+  compiler. `missingTool()` decides exit 3 ("the tool is not installed")
+  against exit 1 ("the tool ran and found problems") by reading a completed
+  command's output, and two of its patterns matched the bare words `Cannot
+  find module 'x'` / `Cannot find package 'x'` anywhere in that output. Those
+  are Node's wording for a failed `require` — and *also* TypeScript's wording
+  for TS2307, `Cannot find module 'node:fs' or its corresponding type
+  declarations`, which a compiler that ran perfectly writes to its stdout about
+  the project's own code. A single TS2307 therefore turned the whole type-check
+  gate into `[ERROR] tsc — tsc is not installed in this project`, exit 3, with
+  the compiler's real findings never shown. The two patterns now key off the
+  *structure* of a genuine Node module-resolution failure — an uncaught
+  `Error: Cannot find module …` header **together with** a
+  `node:internal/modules/` stack frame under it — rather than on the words, so
+  no tool's report about the code it is analysing can satisfy them. A tool
+  whose own entry point does not resolve, or that is not installed at all, is
+  still exit 3, unchanged, for every adapter that asks (`tsc`, lint, the test
+  runner, the secret scanners, the auditor, knip, Stryker).
+- **TOR-1419** — a coverage threshold the TEST RUNNER enforces from the
+  project's own configuration is no longer absorbed into a kragg pass. kragg
+  deliberately passes no threshold to any runner and computes line coverage
+  itself, so that "your tests fail" stays distinguishable from "coverage
+  slipped" — but `--coverage` leaves the project's own `vitest.config.ts` in
+  force, so a `coverage.thresholds` block there is still checked by vitest, on
+  dimensions kragg does not compute, and signalled with `process.exitCode = 1`
+  *after* the json report was written saying `success: true`. kragg read only
+  that report, so a project whose own `vitest run --coverage` exited 1 on
+  branch coverage got `kragg check` exit 0 with every gate green. The runner's
+  exit code is now consulted for the one combination nothing kragg asked for
+  can produce — the runner's own report is a pass, every test in it passed, a
+  complete coverage artifact came back, and the process still exited non-zero
+  — and reported as a violation of `test-coverage` under the additive code
+  `runner-reported-failure`, quoting the runner's own threshold line when it
+  printed one. `kragg check` fails (exit 1, not 3: the runner reached a
+  verdict, so this is a finding and not missing evidence). It is a **second**
+  violation beside `coverage-below-threshold` and never merged with it: one is
+  kragg's line-coverage floor, the other is the runner's own threshold on
+  whatever dimensions the runner tracks. kragg still implements line coverage
+  only; that scope limit is unchanged. A project with no runner-native
+  thresholds behaves exactly as before — its runner exits 0 and nothing is
+  reported. Pinned by `test/testRunner.test.ts` and by the
+  `runner-native-threshold` end-to-end regression fixture, which fails the run
+  on `node --test`'s own `--test-coverage-lines` while kragg's floor is met.
+
 ### Changed
+
+- **TOR-1416** — the `halstead` gate's violation messages now report
+  `effort`, `difficulty` and `estimated bugs` to four decimal places instead
+  of one, so a genuine threshold breach cannot print the identical rounded
+  number on both sides of "exceeds max" (e.g. `estimated bugs 0.4 exceeds max
+  0.4` for an actual value of 0.4331, since `MAX_BUGS` is 0.4). This is
+  display precision only — `checkSource` already compares the unrounded
+  values, so the threshold decision is unchanged.
+- **TOR-1417** — `test-quality` no longer demands a direct, by-name test
+  reference to a TypeScript `private`/`protected` method on an exported class.
+  A test file cannot legally write one — the compiler rejects
+  `client.sign(...)` from outside the class — so the only two ways to satisfy
+  `critical-untested` for such a member were to export an internal helper
+  purely so a test could name it, or to write a binding that satisfies the
+  checker and tests nothing. An ECMAScript `#private` member never had the
+  problem, because `criticality.json` records its `#` and the name-shape rule
+  reads that as the visibility marker it is; the keyword form left no trace in
+  a name and so looked public.
+
+  Only the DIRECT-REFERENCE demand changes, and only for a member that is
+  demonstrably reached. `src/gates/testDepth/restricted.ts` reads the
+  `private`/`protected` modifiers off the DECLARATIONS the criticality pass
+  already registered (never off the name, never off the source text), and
+  answers the demand with a path: seeds are what running tests bind — a
+  skipped test seeds nothing — and edges are the same checker-resolved
+  `buildCallGraph` edges the criticality analysis itself is derived from, so
+  a public entry point in another module and a `protected` member reached
+  from a subclass both resolve. A member on no such path is still reported,
+  now with the cause in the message and a fix hint that does not ask for the
+  binding the compiler forbids. The graph is built only when such a member
+  would otherwise be a finding.
+
+  Nothing is exempted from scrutiny: the member stays in `criticalFunctions`,
+  so `critical-coverage` still fails it for a single uncovered line and
+  `critical-tests` still demands a relevant test change when its file is
+  edited. No gate, threshold, exclusion or wire key changed.
+- **TOR-1418** — every flagged location now reaches the JSON payload as its own
+  violation object. The report's display dedupe grouped findings by
+  `(code, message)` and folded the other locations into the survivor's message
+  — `maintainability index grade C (minimum: A) (+2 more at src/scene.ts,
+  src/simulation.ts)` — so a gate with three affected files emitted **one**
+  violation object naming one file, and no structured field named the other
+  two. A consumer that reads `file`/`line`/`code` (a file-scoped agent deciding
+  what it has been assigned) undercounted the affected files and read an
+  actually-flagged file as clean. Dedupe now groups by
+  `(code, message, location)`: only the identical finding reported twice at the
+  same place collapses, with a bare `(+N more)` tail, and everything else is its
+  own entry with its own `file`, `line` and `column`, under the unchanged
+  per-gate cap.
+
+  **No key was added, renamed or retyped.** `ViolationPayload` is the same six
+  fields, `violation_count` is still the raw total, and `truncated` still means
+  exactly one thing — the `max_violations_per_gate` cap dropped entries — rather
+  than being `false` while a fold hid a location. Text output changes: a family
+  spanning several files now prints one line per file instead of one line with
+  the rest in prose. Python still folds across locations, which is now
+  divergence 41 in `docs/spec-conformance.md`; `test/fixtures/regressions/`
+  gains `folded-locations`, which fails if the fold comes back.
 
 - The npm package is now `@tortastudios/kragg-ts`, not the bare `kragg-ts`
   this project shipped a few commits earlier. The org owns the scope on
@@ -28,6 +132,68 @@ a previously green run red — see [Gate additions](#gate-additions) below.
 
 ### Added
 
+- **TOR-1415** — `--fast-only`, on `check` and `security` both: assemble and
+  run the FAST (static) tier and nothing else. `--fail-fast` was the closest
+  thing available and it is a different question — it stops at the first
+  failure, so once every fast gate passes the slow tier (`test-coverage`,
+  `critical-coverage`, `audit`) runs as usual, and an agent iterating on lint,
+  type and metric findings paid for the suite and the advisory database on
+  every pass. `security` takes the flag too because it is not already
+  fast-only: its pipeline ends in `audit`, which talks to the network.
+
+  The slow gates are removed from the pipeline before it starts, so they are
+  **absent** from `gates[]` rather than present with `skipped: true` — a skip
+  is a reported state, and a consumer looking for `test-coverage` in the list
+  would find a gate that ran and stepped aside. The exit code is the fast
+  gates' verdict alone. **No wire key was added, renamed or retyped**: the
+  payload is the ordinary one over a shorter gate list, and `mode` still means
+  the file scope (`full`/`changed`/`file`), never the tier. Because a shorter
+  list is not self-describing, the run names the gates it did not assemble on
+  stderr — in both formats, so `--format json` stays one parseable document on
+  stdout — the way a `--changed` promoted to a full run states its reason.
+
+  The flag selects a TIER, so it composes with the flags that select FILES
+  (`--file`, `--changed`, `--since`) and with `--fail-fast`, which still halts
+  at the first failure. Two combinations are usage errors (exit 2) instead of
+  one silently overriding the other: `--all`, whose entire meaning is "run the
+  slow tier anyway", and `--update-baseline`, which records a full run and
+  would otherwise replace the baseline file without `critical-coverage`'s
+  accepted entries. Divergence row 42 in `docs/spec-conformance.md`; Python has
+  no way to ask for a tier.
+- **TOR-1420** — `kragg fix` now formats. It has always been documented as
+  "format and safely fix lint findings", but only biome ever formatted
+  anything: its `check --write` is a combined pass, while oxlint and eslint fix
+  lint findings and printed `note: X fixes lint findings only; it does not
+  format.` A project on oxlint — the faster choice, and the one this repository
+  dogfoods — therefore got no formatting at all. Formatting is now detected
+  INDEPENDENTLY of the lint tool, because the two are independent choices in
+  this ecosystem (oxlint-for-lint plus Prettier-for-format is an ordinary
+  pairing). `src/adapters/format.ts` resolves `prettier` (then `biome`) from
+  the project's own `node_modules/.bin`, exactly as every other external tool
+  kragg drives is resolved — never `PATH`, never a global install, never
+  kragg's own tree — and `kragg fix` runs `prettier --write` (or
+  `biome format --write`) after the lint fix pass, dropping the "does not
+  format" note for that project. When biome is the LINTER nothing changes:
+  `check --write` has already formatted, and no second formatter is detected or
+  run.
+
+  Detection is deliberately STRICTER than `detectLintTool`, which has a
+  fallback stage that accepts a merely-installed linter. A formatter with no
+  configuration rewrites every file it is pointed at to its own defaults, on
+  disk, in one command, and Prettier arrives transitively in plenty of
+  dependency trees — so a formatter is chosen only when the project both
+  installed **and** configured it (`.prettierrc*`, `prettier.config.*`,
+  `package.json#prettier`, `biome.json`). Installed-but-unconfigured is a
+  visible skip that names the config file to add; configured-but-uninstalled is
+  a visible skip that names the install command; neither is a silent no-op. A
+  `lint_tool` naming a linter the project has not installed is still `error`
+  and exit 3, and now nothing runs at all in that case — formatter included.
+
+  No dependency was added (kragg still bundles nothing), no gate was added, no
+  policy key was added, and no wire key, exit code or threshold changed. There
+  is deliberately no `check`-time `format` gate: reporting drift would mean a
+  new gate name in the report's gate list, which the Python conformance runner
+  diffs byte-exact, and the `fix` command is where writing to disk belongs.
 - **TOR-1378** — releases are gated on end-to-end regressions and on truthful
   self-check evidence, both against the BUILT `dist/cli.js`. 1,090 passing
   unit tests did not catch false-green behaviour between the engine, the

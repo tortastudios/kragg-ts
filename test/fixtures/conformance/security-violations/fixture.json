@@ -10,6 +10,13 @@
   "setup": { "git": false },
   "expected_exit": 1,
   "journal": true,
-  "notes": "Exit 1: gates ran and found violations. This fixture pins the count semantics of SPEC.md section 2.5 — `forbidden-calls` reports two findings, the display list collapses them into one entry that names the second location, and `truncated` stays false because dedupe, not the cap, is what shrank the list. A consumer reading `violations.length` as the count would be wrong here, which is the point. It also pins the SLOW-tier rule (SPEC.md section 4.1): `audit` skips with `static gates failed`, not with `incremental mode`, because this is a full-mode run whose FAST gates went red.",
-  "divergences": []
+  "notes": "Exit 1: gates ran and found violations. This fixture pins the count semantics of SPEC.md section 2.5. `forbidden-calls` reports two findings, at src/index.ts:20:10 and src/index.ts:24:10, and the project sets `max_violations_per_gate: 1`, so ONE reaches the display list and `truncated` is true — the cap dropped an entry, which is the only thing `truncated` has ever claimed. Before TOR-1418 the two findings were folded into a single entry whose message carried `(+1 more at src/index.ts:24:10)` and `truncated` was false: the second location existed only as prose, and `truncated: false` said nothing had been dropped while a location had. `violation_count` (2) is still the field a consumer must read for the count, because the display list is capped. It also pins the SLOW-tier rule (SPEC.md section 4.1): `audit` skips with `static gates failed`, not with `incremental mode`, because this is a full-mode run whose FAST gates went red.",
+  "divergences": [
+    {
+      "id": "SPEC-2.5",
+      "summary": "kragg-ts's display dedupe keys on `(code, message, location)`; Python's `dedupe_violations` keys on `(code, message)` alone and folds the other locations into the survivor's message. Same fields, same caps — kragg-ts just never puts a location somewhere only a human can read it.",
+      "spec": "crag spec/SPEC.md section 2.5",
+      "doc": "docs/spec-conformance.md#11-intentional-divergences"
+    }
+  ]
 }

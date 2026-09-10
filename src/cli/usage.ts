@@ -54,6 +54,17 @@ Options for check and security:
   --format text|json     output format (default: text)
   --max-violations <n>   cap violations shown per gate
   --no-journal           do not append to .kragg/history.jsonl
+  --fast-only            run the static (FAST) gates and nothing else. The
+                         slow tier — test-coverage, critical-coverage and
+                         audit for check, audit for security — is not
+                         assembled, so those gates are ABSENT from the report
+                         rather than listed as skipped, the exit code reflects
+                         the fast gates alone, and stderr names what did not
+                         run. Composes with --file/--changed/--since (they
+                         narrow the files, this narrows the tier) and with
+                         --fail-fast, which still halts at the first failure.
+                         Refused with --all, which forces the slow tier to
+                         run, and with --update-baseline, which records one.
   --package <name-or-path>
                          check this workspace member instead of the root
                          (repeatable): a package.json name or a directory
@@ -68,7 +79,8 @@ Options for check only:
   --changed              only files changed against HEAD
   --since <ref>          only files changed since <ref>
   --fail-fast            stop at the first failing gate
-  --all                  run slow gates even after a fast gate failed
+  --all                  run slow gates even after a fast gate failed (the
+                         opposite of --fast-only; passing both is exit 2)
   --update-baseline      record this run's findings from the metric, structure
                          and test-quality gates as reviewed legacy debt in the
                          file kragg.json#baseline names (full runs only; the

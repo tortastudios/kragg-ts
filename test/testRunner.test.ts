@@ -39,7 +39,12 @@ import { parseNodeTap } from "../src/adapters/support/nodeTestReport.ts";
 import { parseVitestJson } from "../src/adapters/support/vitestReport.ts";
 import { artifacts, buildCommand, RUNS_DIR } from "../src/adapters/support/testCommands.ts";
 import { fromReport } from "../src/catalog/results.ts";
-import { buildReport, EXIT_ENVIRONMENT, reportExitCode } from "../src/engine/report.ts";
+import {
+  buildReport,
+  EXIT_ENVIRONMENT,
+  EXIT_GATE_FAILURES,
+  reportExitCode,
+} from "../src/engine/report.ts";
 import {
   relativeToRoot as reportRelativeToRoot,
   condense,
@@ -694,6 +699,23 @@ function assertPreserved(root: string): void {
   assert.deepEqual(readdirSync(join(root, RUNS_DIR)), []);
 }
 
+test("a half-installed runner is still MISSING, not crashed", async () => {
+  // The `.bin` shim is there and the package it needs is not — and this is a
+  // REAL resolution failure, not a recorded string: the shim execs this very
+  // Node on `require('vitest')` in a project that has no vitest, so the stderr
+  // the adapter reads is Node's own uncaught MODULE_NOT_FOUND with the
+  // `node:internal/modules/` stack under it. That stack is the signal
+  // `missingTool` keys off after TOR-1414, and this is the case that must not
+  // have been weakened by tightening it.
+  const root = vitestProject(`exec ${JSON.stringify(process.execPath)} -e "require('vitest')"`);
+  const outcome = await run(root);
+  assert.equal(outcome.ok, false);
+  assert.equal(outcome.kind, "missing-tool");
+  assert.match(outcome.message, /vitest is not installed in this project/u);
+  assert.match(outcome.message, /pnpm add -D vitest/u);
+  assertPreserved(root);
+});
+
 test("a crashed runner is an error — never the previous run's pass", async () => {
   const root = vitestProject("echo 'Error: worker crashed' >&2\nexit 1");
   const outcome = await run(root);
@@ -785,7 +807,117 @@ test("a complete run is credited, and its coverage is published where it is conf
   // This run's report replaced the stale one at `coverage_report_path`; the
   // unrelated file beside it is untouched, and the run directory is gone.
   assert.equal(readFileSync(join(root, "coverage/coverage-final.json"), "utf8"), `${FULL_COVERAGE}\n`);
+  // The control for the runner-native-threshold cases below: exit 0 means the
+  // runner enforced nothing of its own, and nothing is invented.
+  assert.equal(outcome.violations.length, 0);
   assertPreserved(root);
+});
+
+// ── the runner's OWN coverage threshold ────────────────────────────────────
+//
+// kragg passes no threshold to any runner, but `--coverage` leaves the
+// project's own `vitest.config.ts` in force, so a `coverage.thresholds` block
+// there is checked by vitest and signalled with `process.exitCode = 1` — while
+// the json report, written first, still says `success: true`. Reading the
+// report alone made that a kragg pass. The trigger is the combination no
+// kragg-supplied flag can produce: report says PASS, every test in it passed, a
+// complete coverage artifact came back, and the process still exited non-zero.
+
+/** vitest's own threshold sentence, on stderr, exactly as vitest 5 prints it. */
+const VITEST_THRESHOLD =
+  "ERROR: Coverage for branches (60%) does not meet global threshold (80%)";
+
+test("a runner-native threshold failure fails the gate, attributed to the runner", async () => {
+  const root = vitestProject(
+    `${writeReport(GREEN)}\n${writeCoverage(FULL_COVERAGE)}\n` +
+      `echo '${VITEST_THRESHOLD}' >&2\nexit 1`,
+  );
+  const outcome = await run(root);
+  assert.ok(outcome.ok);
+  // The tests really did pass and the coverage really was read: this is not a
+  // test failure and not unusable evidence.
+  assert.equal(outcome.summary.failed, 0);
+  assert.equal(outcome.summary.passed, 1);
+  assert.ok(outcome.coverage?.ok);
+  assert.equal(outcome.coverage.totals.pct, 100);
+  assert.equal(outcome.coverage.violation, undefined, "kragg's own floor was met");
+  // …and yet the gate FAILS, on the runner's own verdict, under its own code.
+  assert.equal(outcome.passed, false);
+  assert.equal(outcome.error, false, "a runner verdict is a finding, not missing evidence");
+  assert.equal(outcome.violations.length, 1);
+  const violation = outcome.violations[0];
+  assert.equal(violation?.code, "runner-reported-failure");
+  // The message keeps the two signals apart, and carries the dimension and the
+  // numbers the runner itself computed.
+  assert.match(violation?.message ?? "", /runner's OWN configured coverage threshold/u);
+  assert.match(violation?.message ?? "", /not by kragg's line-coverage floor/u);
+  assert.match(violation?.message ?? "", /Coverage for branches \(60%\) does not meet global threshold \(80%\)/u);
+  assert.match(violation?.fixHint ?? "", /not\s+`coverage_fail_under`/u);
+  // Through the gate mapping: a genuine failure, exit 1 — not exit 3.
+  const gate = fromReport(TEST_GATE, outcome);
+  assert.equal(gate.passed, false);
+  assert.equal(gate.error, false);
+  assert.equal(gate.violationCount, 1);
+  assert.equal(exitCodeFor(gate), EXIT_GATE_FAILURES);
+  assertPreserved(root);
+});
+
+test("a runner that prints no threshold line is still reported, honestly", async () => {
+  const root = vitestProject(`${writeReport(GREEN)}\n${writeCoverage(FULL_COVERAGE)}\nexit 1`);
+  const outcome = await run(root);
+  assert.ok(outcome.ok);
+  assert.equal(outcome.passed, false);
+  assert.equal(outcome.error, false);
+  assert.equal(outcome.violations[0]?.code, "runner-reported-failure");
+  const message = outcome.violations[0]?.message ?? "";
+  // No threshold text came back, so none is quoted and none is invented; the
+  // message says what kragg actually observed and where to look.
+  assert.match(message, /vitest exited 1 with all 1 tests passing/u);
+  assert.match(message, /failed by the runner itself/u);
+  assert.doesNotMatch(message, /reported:/u);
+  assertPreserved(root);
+});
+
+test("kragg's floor and the runner's threshold are two violations, never one", async () => {
+  // One statement, never executed: 0% against a floor of 80, AND the runner
+  // failing the run on a threshold of its own.
+  const empty = JSON.stringify({
+    "src/a.ts": {
+      path: "src/a.ts",
+      statementMap: { "0": { start: { line: 1, column: 0 }, end: { line: 1, column: 9 } } },
+      fnMap: {},
+      branchMap: {},
+      s: { "0": 0 },
+      f: {},
+      b: {},
+    },
+  });
+  const root = vitestProject(
+    `${writeReport(GREEN)}\n${writeCoverage(empty)}\necho '${VITEST_THRESHOLD}' >&2\nexit 1`,
+  );
+  const outcome = await run(root);
+  assert.ok(outcome.ok);
+  assert.deepEqual(
+    outcome.violations.map((entry) => entry.code),
+    ["coverage-below-threshold", "runner-reported-failure"],
+  );
+  assert.match(outcome.violations[0]?.message ?? "", /line coverage 0% is below the required 80%/u);
+});
+
+test("a failing test explains the non-zero exit; no runner verdict is added", async () => {
+  const root = vitestProject(`${writeReport(RED)}\n${writeCoverage(FULL_COVERAGE)}\nexit 1`);
+  const outcome = await run(root);
+  assert.ok(outcome.ok);
+  assert.deepEqual(outcome.violations.map((entry) => entry.code), ["test-failed"]);
+});
+
+test("a missing coverage artifact stays an error; no threshold is inferred from it", async () => {
+  const root = vitestProject(`${writeReport(GREEN)}\necho '${VITEST_THRESHOLD}' >&2\nexit 1`);
+  const outcome = await run(root);
+  assert.ok(outcome.ok);
+  assert.equal(outcome.error, true, "unreadable coverage is unusable evidence, exit 3");
+  assert.equal(outcome.violations.length, 0);
+  assert.equal(exitCodeFor(fromReport(TEST_GATE, outcome)), EXIT_ENVIRONMENT);
 });
 
 test("switching runners: node's lcov is this run's evidence; vitest's stale istanbul is not consulted", async () => {
