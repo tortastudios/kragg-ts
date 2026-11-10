@@ -689,7 +689,20 @@ violation — `runner-reported-failure`, quoting the runner's own threshold line
 beside `coverage-below-threshold` rather than the same one: kragg's floor and
 the runner's thresholds are independent checks, and merging them would produce
 one ambiguous number. A project with no runner-native thresholds sees no
-change: the runner exits 0 and nothing is reported.
+change: the runner exits 0 and nothing is reported. When the runner printed no
+threshold line, the message names the other usual cause too: an unhandled
+error.
+
+**Errors vitest catches outside any test are reported, not swallowed.** A timer
+that fires after its test has finished, or a promise rejected with no handler,
+makes vitest fail the run with exit 1 while every test passes, and the json
+report kragg parses has no field for it. kragg therefore runs a small reporter
+of its own beside json. It records the errors vitest failed the run on in the
+run's own directory, and reports each one as `runner-unhandled-error`: vitest's
+message, the test that was running when vitest caught it, and the line of the
+project's code that threw (the first stack frame inside `source_paths`).
+`kragg check` fails with it whether or not coverage is on. A project that sets
+vitest's `dangerouslyIgnoreUnhandledErrors` keeps its passing run.
 
 **A run that discovered no tests is an error, not a pass.** Zero failures out
 of zero tests is arithmetic, not evidence, so `test-coverage` reports
@@ -766,6 +779,7 @@ Deliberate, and documented at each site:
 | test evidence | Python reads `.kragg/coverage.json` from a fixed path. kragg-ts gives every invocation its own `.kragg/runs/` directory, refuses anything incomplete, and hands `critical-coverage` the coverage in memory. Same gates, same wire format; only the provenance rule differs. |
 | unmeasured critical functions | Python's `critical-coverage` passes a critical function the report never mentions (`measured=False`), reasoning that a missing entry is a measurement-key mismatch. kragg-ts hands the gate the document its own run wrote, so a missing file was never loaded: the function fails under the additive code `critical-unmeasured`, with the cause in the message. |
 | the runner's own thresholds | Python passes `--cov-fail-under` to pytest, so pytest's exit code IS kragg's floor and there is no second threshold to lose. The JavaScript runners are given no threshold but still read the project's own config, so kragg-ts reports a non-zero exit over a passing report with complete coverage as the additive code `runner-reported-failure`, beside `coverage-below-threshold` and never merged with it. |
+| unhandled errors | Python reads pytest's exit code as the verdict, so a run pytest failed is never a pass. vitest fails a run on an error it caught outside any test while its json report says every test passed, so kragg-ts records them with a reporter of its own and reports each under the additive code `runner-unhandled-error`, at the first stack frame inside `source_paths`. |
 | coverage denominator | Python's `pytest --cov=src` instruments every file under `src`, loaded or not. The JavaScript runners report only what the run loaded, so kragg-ts reconciles the number against `source_paths` itself: unloaded files count as uncovered by their statement lines, and files outside the source paths do not count. |
 | `// kragg: ignore` | Requires a reason: `// kragg: ignore -- <reason>`. A bare marker is not honoured and is reported on the finding it tried to hide. Python's `# kragg: ignore` needs none. |
 | legacy-debt baseline | `kragg.json#baseline` plus `check --update-baseline` records accepted findings of the metric, structure and test-quality gates; they become `baselined:` advisories and new findings still fail. Python has no equivalent; no wire key is added. `brief` gains `## Suppressions` and `## Baseline`. |

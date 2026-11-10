@@ -18,6 +18,42 @@ a previously green run red — see [Gate additions](#gate-additions) below.
 
 ## [Unreleased]
 
+### Fixed
+
+- **TOR-1902** — an error vitest catches outside any test is now reported as
+  what it is, instead of as an unexplained exit code that `kragg check` blamed
+  on a coverage threshold. A timer that fires after its test has finished, a
+  promise rejected with no handler, a listener that throws once the
+  environment is gone: vitest counts each as an *unhandled error* and fails
+  the run with exit 1, while every test passes and its json report still says
+  `success: true`. That report has no field for them, and vitest prints them
+  only through its console reporters, which kragg replaces with
+  `--reporter=json`. So kragg-ts 0.2.0 saw only the exit code. With coverage
+  on, it reported `runner-reported-failure` and named "a coverage threshold in
+  the runner's own configuration" as the usual cause, in a project with no
+  threshold at all (548 of 548 tests passing). With `coverage_fail_under: 0`,
+  it reported the run as a **pass**. kragg now runs a reporter of its own
+  beside json (`--reporter=<kragg>/dist/adapters/support/vitestReporter.js`).
+  It records the list vitest sets the exit code from in the run's own
+  directory. Each error becomes a `test-coverage` violation under the additive
+  code `runner-unhandled-error`, with vitest's message and the test it was
+  running. It points at the first stack frame inside `source_paths`, which is
+  the line of the project's own code that threw. `kragg check` fails with it
+  (exit 1, not 3), with coverage on or off. A run vitest itself passed,
+  because the project sets `dangerouslyIgnoreUnhandledErrors`, is left a pass.
+  When nothing was recorded, `runner-reported-failure` still reads the exit
+  code. Its message now names an unhandled error beside a runner threshold as
+  the two usual causes. Its hint no longer offers kragg's own argv, which
+  prints neither cause under vitest. Verified against vitest 3.0.0 through
+  5.0.3 with kragg installed. vitest 3.0 and 3.1 load an out-of-project
+  reporter only from `node_modules`, so a kragg run from a source checkout
+  against those two minors stops at startup (exit 3, never a pass); see
+  KNOWN_LIMITATIONS.md. Pinned by `test/testRunner.test.ts`, fed a recording
+  of a real vitest 5.0.0 run, and end to end against the real vitest by the
+  compatibility `tools` lane. Every vitest row now adds a test whose timer
+  throws after teardown, and requires `runner-unhandled-error` at the line
+  that threw.
+
 ## [0.2.0] — 2026-09-10
 
 ### Fixed
