@@ -68,6 +68,12 @@
  * (`support/testEvidence.ts`) reads it back off the exit code as a violation of
  * its own, beside kragg's line-coverage floor and never merged into it.
  *
+ * A timer that throws after its test has finished fails a vitest run the same
+ * way: exit 1 over a json report that says `success: true`, which has no field
+ * for an unhandled error. kragg runs its own reporter beside json
+ * (`support/vitestReporter.ts`) to record them in the run directory, and each
+ * becomes a `runner-unhandled-error` violation (`support/vitestResults.ts`).
+ *
  * THE NUMBER IS THE PROJECT'S, NOT THE REPORT'S. Every runner reports only
  * the files the run loaded, so a percentage over the report alone is a
  * percentage over whichever files happened to load. `projectTotals`
@@ -107,8 +113,7 @@ import type { JsonObject } from "./support/json.ts";
 import { readLcov } from "./support/lcov.ts";
 import { parseBunTest } from "./support/bunTestReport.ts";
 import { parseNodeTap } from "./support/nodeTestReport.ts";
-import { parseVitestJson } from "./support/vitestReport.ts";
-import { readTextFile } from "./support/manifest.ts";
+import { readVitestResults } from "./support/vitestResults.ts";
 import { EMPTY_SUMMARY } from "./support/testReport.ts";
 import type { TestReport, TestSummary } from "./support/testReport.ts";
 import { capped, crashed } from "./support/outcome.ts";
@@ -289,7 +294,7 @@ async function runInto(
   if (result.killed === true) {
     return crashed(killedMessage(runner, options.timeoutMs, result));
   }
-  const report = parseResults(runner, result, layout);
+  const report = parseResults(runner, result, layout, options.sourcePaths);
   if (report === undefined) {
     return crashed(crashMessage(runner, result, layout));
   }
@@ -308,16 +313,10 @@ function parseResults(
   runner: TestRunnerName,
   result: CompletedCommand,
   layout: Artifacts,
+  sourcePaths: readonly string[],
 ): TestReport | undefined {
   if (runner === "vitest") {
-    // The report file is authoritative; stdout is the fallback for a vitest
-    // whose `--outputFile` handling differs. Both are this run's: the file
-    // lives in the run directory and stdout came from the process just run.
-    const fromFile = readTextFile(layout.reportFile);
-    return (
-      (fromFile === undefined ? undefined : parseVitestJson(fromFile, layout.root)) ??
-      parseVitestJson(result.stdout, layout.root)
-    );
+    return readVitestResults(result, layout, sourcePaths);
   }
   if (runner === "node") {
     return parseNodeTap(result.stdout, layout.root) ?? parseNodeTap(result.stderr, layout.root);

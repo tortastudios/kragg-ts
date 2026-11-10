@@ -99,24 +99,26 @@ export function stackLocation(
   preferFile: string | undefined,
 ): StackLocation | undefined {
   let fallback: StackLocation | undefined;
-  STACK_FRAME.lastIndex = 0;
-  for (const match of stack.matchAll(STACK_FRAME)) {
-    // Every capture group in `STACK_FRAME` is mandatory, so a match always
-    // carries all three; the defaults only satisfy `noUncheckedIndexedAccess`.
-    const [, file = "", line = "0", column = "0"] = match;
-    const found: StackLocation = {
-      file,
-      line: Number.parseInt(line, 10),
-      column: Number.parseInt(column, 10),
-    };
-    if (preferFile !== undefined && sameFile(file, preferFile)) {
+  for (const found of stackFrames(stack)) {
+    if (preferFile !== undefined && sameFile(found.file, preferFile)) {
       return found;
     }
-    if (fallback === undefined && !file.includes("node_modules")) {
+    if (fallback === undefined && !found.file.includes("node_modules")) {
       fallback = found;
     }
   }
   return fallback;
+}
+
+/** Every `path:line:column` frame in a stack trace, top frame first. */
+export function stackFrames(stack: string): readonly StackLocation[] {
+  STACK_FRAME.lastIndex = 0;
+  return [...stack.matchAll(STACK_FRAME)].map((match) => {
+    // Every capture group in `STACK_FRAME` is mandatory, so a match always
+    // carries all three; the defaults only satisfy `noUncheckedIndexedAccess`.
+    const [, file = "", line = "0", column = "0"] = match;
+    return { file, line: Number.parseInt(line, 10), column: Number.parseInt(column, 10) };
+  });
 }
 
 /** Path equality that tolerates absolute-vs-relative spellings of one file. */
