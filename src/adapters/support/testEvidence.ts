@@ -108,6 +108,15 @@ const THRESHOLD_PREVIEW = 4;
  * numbers are; a wording change in a future release costs the detail, never the
  * signal.
  *
+ * A threshold is one of TWO usual causes, and the message names both when it
+ * has nothing to quote. The other is an UNHANDLED ERROR: a throw or rejection
+ * the runner caught outside any test — a timer firing after its test has
+ * finished — which fails the run without failing a test. vitest's are captured
+ * by kragg's own reporter and reported as `runner-unhandled-error`
+ * (`vitestResults.ts`), so they reach this only when that capture recorded
+ * nothing. Naming a threshold alone once sent a reader hunting for one that did
+ * not exist (TOR-1902).
+ *
  * Scope is deliberately narrow, so a project with no runner-native thresholds
  * behaves exactly as before:
  *
@@ -134,21 +143,36 @@ export function runnerReportedFailure(
   }
   const quoted = thresholdLines(result);
   const ran = `${runner} exited ${result.returncode} with all ${report.summary.total} tests passing`;
+  if (quoted !== undefined) {
+    return {
+      message:
+        `${ran}: the run was failed by the runner's OWN configured coverage threshold, ` +
+        `not by kragg's line-coverage floor. ${runner} reported: ${quoted}`,
+      code: RUNNER_REPORTED_FAILURE,
+      fixHint:
+        "this is the runner's own threshold on its own coverage dimensions, not " +
+        "`coverage_fail_under` — run the project's own coverage command (or this gate's " +
+        `command: ${result.command.join(" ")}) to see which dimension failed`,
+    };
+  }
   return {
     message:
-      quoted === undefined
-        ? `${ran} and a complete coverage report, so the run was failed by the runner ` +
-          "itself. kragg passes no threshold to any runner and enforces only its own " +
-          "line-coverage floor (`coverage_fail_under`), which this run met — the usual " +
-          "cause is a coverage threshold in the runner's own configuration, on a " +
-          "dimension kragg does not compute."
-        : `${ran}: the run was failed by the runner's OWN configured coverage threshold, ` +
-          `not by kragg's line-coverage floor. ${runner} reported: ${quoted}`,
+      `${ran} and a complete coverage report, so the run was failed by the runner ` +
+      "itself. kragg passes no threshold to any runner and enforces only its own " +
+      "line-coverage floor (`coverage_fail_under`), which this run met. The two usual " +
+      "causes are a coverage threshold in the runner's own configuration, on a " +
+      "dimension kragg does not compute, and an unhandled error: an exception or " +
+      "rejection the runner caught outside any test, such as a timer that fires after " +
+      "its test has finished, which fails the run without failing a test.",
     code: RUNNER_REPORTED_FAILURE,
     fixHint:
-      "this is the runner's own threshold on its own coverage dimensions, not " +
-      "`coverage_fail_under` — run the project's own coverage command (or this gate's " +
-      `command: ${result.command.join(" ")}) to see which dimension failed`,
+      "this is the runner's own verdict, not `coverage_fail_under`: run the project's own " +
+      "test command with its usual reporter, and look for a threshold line or an " +
+      "unhandled-errors section" +
+      (runner === "vitest"
+        ? ". This gate's command replaces vitest's console reporters, so it prints " +
+          `neither: ${result.command.join(" ")}`
+        : ` (this gate's command: ${result.command.join(" ")})`),
   };
 }
 
