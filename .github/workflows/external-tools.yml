@@ -68,7 +68,9 @@ jobs:
   # real tool at its pinned version, runs `kragg check --all` against a fixture
   # containing exactly one lint finding, and asserts the adapter produced a
   # violation with that file and that rule id — plus, for the runner, that the
-  # coverage report the runner itself wrote was read and published.
+  # coverage report the runner itself wrote was read and published. The vitest
+  # rows then add a test whose timer throws after teardown and assert the
+  # unhandled error reaches the report as `runner-unhandled-error` (TOR-1902).
   adapters:
     name: ${{ matrix.runner }} + ${{ matrix.linter }}
     runs-on: ubuntu-latest

@@ -217,6 +217,65 @@ function testFiles(runner: Runner): Readonly<Record<string, string>> {
 }
 
 /**
+ * The timer-after-teardown case (TOR-1902), written into a vitest fixture
+ * after its ordinary run.
+ *
+ * The shape of the clavis widget test TOR-1901 fixed: the first test stubs a
+ * `document` and arms a 150 ms repaint, `afterEach` unstubs it again, and the
+ * repaint fires while the second test is still running, reading a `document`
+ * that is gone. Both tests pass. vitest catches the throw as an unhandled
+ * error and exits 1, while its json report still says `success: true` — so
+ * kragg's own reporter is the only way the error reaches the gate.
+ *
+ * `declare const document` is how the source type-checks under a lib with no
+ * DOM; it is erased, so at run time `document` is whatever the test stubbed.
+ */
+export const UNHANDLED_ERROR_FILES: Readonly<Record<string, string>> = {
+  "src/widget.ts": [
+    "declare const document: { readonly activeElement: unknown };",
+    "",
+    "export function showSent(): void {",
+    "  setTimeout(() => {",
+    "    paint();",
+    "  }, 150);",
+    "}",
+    "",
+    "function paint(): void {",
+    "  captureFocus();",
+    "}",
+    "",
+    "export function captureFocus(): unknown {",
+    "  return document.activeElement;",
+    "}",
+    "",
+  ].join("\n"),
+  "test/widget.test.ts": [
+    'import { afterEach, expect, test, vi } from "vitest";',
+    "",
+    'import { showSent } from "../src/widget.ts";',
+    "",
+    "afterEach(() => {",
+    "  vi.unstubAllGlobals();",
+    "});",
+    "",
+    'test("sends, and arms the repaint", () => {',
+    '  vi.stubGlobal("document", { activeElement: null });',
+    "  showSent();",
+    "  expect(true).toBe(true);",
+    "});",
+    "",
+    'test("is still running when the repaint fires", async () => {',
+    "  await new Promise((resolve) => setTimeout(resolve, 400));",
+    "  expect(true).toBe(true);",
+    "});",
+    "",
+  ].join("\n"),
+};
+
+/** The line of `src/widget.ts` that throws: the `document` read in `captureFocus`. */
+export const UNHANDLED_ERROR_LINE = 14;
+
+/**
  * The scanner fixture: one planted credential, outside `src`.
  *
  * OUTSIDE `src` on purpose. `detect-secrets` scans the whole project (secrets

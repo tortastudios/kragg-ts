@@ -15,6 +15,13 @@
  * finding, and asserts kragg turned that tool's CURRENT output into a
  * violation with a file and a rule id.
  *
+ * Each vitest row then runs kragg a second time over the same installed
+ * fixture, with a test whose timer throws after teardown added to it, and
+ * asserts the unhandled error vitest fails the run on reaches the report as
+ * `runner-unhandled-error` at the line that threw (TOR-1902). That error is
+ * carried by kragg's own vitest reporter, so this is the one place its
+ * contract with vitest's reporter API is exercised against the real tool.
+ *
  * ── WHY IT IS SEPARATELY GOVERNED, AND NOT PART OF `check` ─────────────────
  * Everything this lane asserts depends on software this repository does not
  * control and cannot pin transitively. A tool ships a breaking change, a
@@ -70,7 +77,14 @@ import {
   type LaneOutcome,
   type RowOutcome,
 } from "./support.ts";
-import { toolFixtureFiles, type Linter, type RowSpec, type Runner } from "./toolFixture.ts";
+import {
+  toolFixtureFiles,
+  UNHANDLED_ERROR_FILES,
+  UNHANDLED_ERROR_LINE,
+  type Linter,
+  type RowSpec,
+  type Runner,
+} from "./toolFixture.ts";
 
 const RUNNERS: readonly Runner[] = ["vitest", "node", "bun"];
 const LINTERS: readonly Linter[] = ["oxlint", "biome", "eslint"];
@@ -126,11 +140,32 @@ async function runRow(environment: LaneEnvironment, spec: RowSpec): Promise<RowO
     return ranRow(spec.row, checks);
   }
 
-  // `--all` forces the slow tier: the fixture's lint gate FAILS by design, and
-  // without `--all` a failed fast gate would skip `test-coverage`, which is the
-  // half of the row that exercises the test runner.
-  const result = await sh(
-    "kragg check --all",
+  const result = await checkAll(environment, root, "kragg check --all");
+  const report = parseReport(result.stdout);
+  checks.push(
+    check("kragg check produced a schema_version 1 report", report?.["schema_version"] === 1, outcomeOf(result)),
+  );
+  checks.push(...lintChecks(spec, report));
+  checks.push(...runnerChecks(spec, report, root));
+  if (spec.scanner) {
+    checks.push(...scannerChecks(report));
+  }
+  if (spec.runner === "vitest") {
+    checks.push(...(await unhandledErrorChecks(environment, root)));
+  }
+  return ranRow(spec.row, checks);
+}
+
+/**
+ * The installed kragg's `check --all --format json` in the fixture.
+ *
+ * `--all` forces the slow tier: the fixture's lint gate FAILS by design, and
+ * without `--all` a failed fast gate would skip `test-coverage`, which is the
+ * half of the row that exercises the test runner.
+ */
+function checkAll(environment: LaneEnvironment, root: string, name: string): ReturnType<typeof sh> {
+  return sh(
+    name,
     [
       environment.nodeUnderTest,
       join(root, "node_modules", "@tortastudios", "kragg-ts", "dist", "cli.js"),
@@ -142,16 +177,49 @@ async function runRow(environment: LaneEnvironment, spec: RowSpec): Promise<RowO
     ],
     root,
   );
-  const report = parseReport(result.stdout);
-  checks.push(
-    check("kragg check produced a schema_version 1 report", report?.["schema_version"] === 1, outcomeOf(result)),
-  );
-  checks.push(...lintChecks(spec, report));
-  checks.push(...runnerChecks(spec, report, root));
-  if (spec.scanner) {
-    checks.push(...scannerChecks(report));
-  }
-  return ranRow(spec.row, checks);
+}
+
+/**
+ * A timer that throws after teardown, under the real vitest (TOR-1902).
+ *
+ * Every test passes, vitest exits 1 on the unhandled error, and its json
+ * report says `success: true`. The row passes only if kragg's own reporter
+ * carried the error into the report: as `runner-unhandled-error`, not blamed on
+ * a coverage threshold, at the line of the project's code that threw.
+ */
+async function unhandledErrorChecks(
+  environment: LaneEnvironment,
+  root: string,
+): Promise<readonly CheckOutcome[]> {
+  writeTree(root, UNHANDLED_ERROR_FILES);
+  const result = await checkAll(environment, root, "kragg check --all, timer after teardown");
+  const gate = gateNamed(parseReport(result.stdout), "test-coverage");
+  const violations = violationsOf(gate);
+  const codes = violations.map((violation) => String(violation["code"])).join(", ");
+  const unhandled = violations.find((violation) => violation["code"] === "runner-unhandled-error");
+  const message = typeof unhandled?.["message"] === "string" ? unhandled["message"] : "";
+  return [
+    check(
+      "vitest's unhandled error failed test-coverage as a finding, not an error",
+      gateRan(gate) && gate?.["passed"] === false,
+      describeGate(gate),
+    ),
+    check(
+      "it is reported as runner-unhandled-error, not as runner-reported-failure",
+      unhandled !== undefined && !codes.includes("runner-reported-failure"),
+      `codes: ${codes}`,
+    ),
+    check(
+      `it points at src/widget.ts:${UNHANDLED_ERROR_LINE}, where the project's code threw`,
+      unhandled?.["file"] === "src/widget.ts" && unhandled["line"] === UNHANDLED_ERROR_LINE,
+      `${String(unhandled?.["file"])}:${String(unhandled?.["line"])}`,
+    ),
+    check(
+      "it carries vitest's own error message",
+      message.includes("ReferenceError: document is not defined"),
+      message.slice(0, 300),
+    ),
+  ];
 }
 
 /** The linter really ran, and its CURRENT output became a located violation. */
