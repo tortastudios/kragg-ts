@@ -46,6 +46,7 @@ import {
 import UnhandledErrorReporter, {
   REPORTER_PATH,
   UNHANDLED_ERRORS_ENV,
+  unhandledErrorRecord,
 } from "../src/adapters/support/vitestReporter.ts";
 import { fromReport } from "../src/catalog/results.ts";
 import {
@@ -57,6 +58,7 @@ import {
 import {
   relativeToRoot as reportRelativeToRoot,
   condense,
+  stackFrames,
   stackLocation,
 } from "../src/adapters/support/testReport.ts";
 import { resolveProjectEnvironment } from "../src/environment/project.ts";
@@ -1555,4 +1557,179 @@ test("the spawned runner is told where this run's unhandled errors go", async ()
   assert.match(target, /\/\.kragg\/runs\/test-[^/]+\/unhandled-errors\.json$/u);
   assert.ok(target.startsWith(root), "inside this project's own run directory");
   assertPreserved(root);
+});
+
+/** `SERIALIZED_ERROR`, as it would be in a project at `root`. */
+function errorIn(root: string, overrides: Record<string, unknown> = {}): Record<string, unknown> {
+  return {
+    ...SERIALIZED_ERROR,
+    stack: SERIALIZED_ERROR.stack.replaceAll("/repo/", `${root}/`),
+    VITEST_TEST_PATH: `${root}/test/widget.test.ts`,
+    ...overrides,
+  };
+}
+
+/**
+ * A vitest project whose stand-in runner writes `report` and full coverage,
+ * hands kragg's reporter file the records the REAL reporter makes of
+ * `errors(root)`, and exits `exit`.
+ */
+function unhandledProject(
+  errors: (root: string) => readonly unknown[],
+  exit: number,
+  report: string = GREEN,
+): string {
+  const root = vitestProject(
+    `${writeReport(report)}\n${writeCoverage(FULL_COVERAGE)}\n` +
+      `cp unhandled.json "$${UNHANDLED_ERRORS_ENV}"\nexit ${exit}`,
+  );
+  writeFileSync(
+    join(root, "unhandled.json"),
+    JSON.stringify({ errors: errors(root).map(unhandledErrorRecord) }),
+  );
+  return root;
+}
+
+test("an unhandled error fails the gate under its own code, at the line that threw", async () => {
+  const root = unhandledProject((at) => [errorIn(at)], 1);
+  const outcome = await run(root);
+  assert.ok(outcome.ok, outcome.ok ? "" : outcome.message);
+  // Every test passed and the coverage was read: this is neither a test
+  // failure nor missing evidence.
+  assert.equal(outcome.summary.passed, 1);
+  assert.equal(outcome.summary.failed, 0);
+  assert.ok(outcome.coverage?.ok);
+  assert.equal(outcome.passed, false);
+  assert.equal(outcome.error, false, "vitest reached a verdict: a finding, not missing evidence");
+  // Named for what it is, and NOT blamed on a coverage threshold.
+  assert.deepEqual(
+    outcome.violations.map((violation) => violation.code),
+    ["runner-unhandled-error"],
+  );
+  const violation = outcome.violations[0];
+  // The project's own code that threw, not the timer machinery after it.
+  assert.equal(violation?.file, "src/widget.ts");
+  assert.equal(violation?.line, 13);
+  assert.equal(violation?.column, 3);
+  const message = violation?.message ?? "";
+  assert.match(message, /vitest failed the run on an unhandled error \(Uncaught Exception\)/u);
+  assert.match(message, /outside any test: ReferenceError: document is not defined/u);
+  assert.match(
+    message,
+    /caught while "waits long enough for the timer to fire" in test\/widget\.test\.ts was running/u,
+  );
+  assert.match(violation?.fixHint ?? "", /not necessarily the one that started it/u);
+  assert.match(violation?.fixHint ?? "", /re-run alone: vitest run test\/widget\.test\.ts$/u);
+  // Through the gate mapping: exit 1.
+  const gate = fromReport(TEST_GATE, outcome);
+  assert.equal(gate.passed, false);
+  assert.equal(gate.error, false);
+  assert.equal(exitCodeFor(gate), EXIT_GATE_FAILURES);
+  assertPreserved(root);
+});
+
+test("with coverage off, an unhandled error still fails the gate", async () => {
+  // `runnerReportedFailure` only reads the exit code when coverage came back,
+  // so before the reporter this run — report a pass, no coverage asked for,
+  // exit 1 — was a green gate.
+  const root = unhandledProject((at) => [errorIn(at)], 1);
+  const outcome = await runTests({
+    env: resolveProjectEnvironment(root),
+    choice: "auto",
+    coverageFailUnder: 0,
+    maxViolations: 25,
+    testPaths: ["test"],
+    sourcePaths: ["src"],
+  });
+  assert.ok(outcome.ok, outcome.ok ? "" : outcome.message);
+  assert.equal(outcome.coverage, null);
+  assert.equal(outcome.passed, false);
+  assert.equal(outcome.violations[0]?.code, "runner-unhandled-error");
+  assert.equal(exitCodeFor(fromReport(TEST_GATE, outcome)), EXIT_GATE_FAILURES);
+});
+
+test("each unhandled error is its own violation, located by the best frame it has", async () => {
+  const root = unhandledProject(
+    (at) => [
+      // Library frames first, then the project's code: the project's code wins.
+      errorIn(at, {
+        stack:
+          "TypeError: listener failed\n" +
+          `    at emit (${at}/node_modules/mitt/index.js:2:7)\n` +
+          `    at notify (${at}/src/events.ts:21:5)`,
+        message: "listener failed",
+        name: "TypeError",
+        type: "Unhandled Rejection",
+        VITEST_AFTER_ENV_TEARDOWN: true,
+      }),
+      // Nothing under `source_paths`: the first frame outside node_modules.
+      errorIn(at, {
+        stack: `Error: late\n    at Timeout._onTimeout (${at}/test/widget.test.ts:30:11)`,
+        message: "late",
+        name: "Error",
+      }),
+      // No usable frame at all: the test file vitest named.
+      errorIn(at, { stack: "", message: "a bare rejection", name: "" }),
+    ],
+    1,
+  );
+  const outcome = await run(root);
+  assert.ok(outcome.ok, outcome.ok ? "" : outcome.message);
+  assert.deepEqual(
+    outcome.violations.map((violation) => [violation.file, violation.line]),
+    [
+      ["src/events.ts", 21],
+      ["test/widget.test.ts", 30],
+      ["test/widget.test.ts", undefined],
+    ],
+  );
+  const [rejection, , bare] = outcome.violations;
+  assert.match(rejection?.message ?? "", /\(Unhandled Rejection\)/u);
+  assert.match(
+    rejection?.message ?? "",
+    /caught after the test environment of test\/widget\.test\.ts was torn down/u,
+  );
+  assert.match(bare?.message ?? "", /outside any test: a bare rejection/u);
+});
+
+test("a run vitest passed is not failed by kragg, even with errors in the file", async () => {
+  // `dangerouslyIgnoreUnhandledErrors`: vitest still hands reporters the list
+  // and exits 0. That is the project's own opt-out, and the verdict stands.
+  const root = unhandledProject((at) => [errorIn(at)], 0);
+  const outcome = await run(root);
+  assert.ok(outcome.ok, outcome.ok ? "" : outcome.message);
+  assert.equal(outcome.passed, true);
+  assert.deepEqual(outcome.violations, []);
+});
+
+test("a failing test and an unhandled error are both reported, test first", async () => {
+  const root = unhandledProject((at) => [errorIn(at)], 1, RED);
+  const outcome = await run(root);
+  assert.ok(outcome.ok, outcome.ok ? "" : outcome.message);
+  assert.deepEqual(
+    outcome.violations.map((violation) => violation.code),
+    ["test-failed", "runner-unhandled-error"],
+  );
+});
+
+test("a reporter that recorded nothing leaves the exit code to runner-reported-failure", async () => {
+  // The reporter ran and vitest caught no unhandled error, so whatever failed
+  // the run is something else — and it is still not a pass.
+  const root = unhandledProject(() => [], 1);
+  const outcome = await run(root);
+  assert.ok(outcome.ok, outcome.ok ? "" : outcome.message);
+  assert.equal(outcome.passed, false);
+  assert.deepEqual(
+    outcome.violations.map((violation) => violation.code),
+    ["runner-reported-failure"],
+  );
+});
+
+test("stackFrames lists every frame top first, and skips frames with no source position", () => {
+  assert.deepEqual(stackFrames(SERIALIZED_ERROR.stack), [
+    { file: "/repo/src/widget.ts", line: 13, column: 3 },
+    { file: "/repo/src/widget.ts", line: 9, column: 3 },
+    { file: "/repo/src/widget.ts", line: 4, column: 5 },
+  ]);
+  assert.deepEqual(stackFrames("Error: no frames"), []);
 });
