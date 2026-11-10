@@ -113,13 +113,13 @@ import { EMPTY_SUMMARY } from "./support/testReport.ts";
 import type { TestReport, TestSummary } from "./support/testReport.ts";
 import { capped, crashed } from "./support/outcome.ts";
 import type { Unavailable } from "./support/outcome.ts";
-import { runOptions } from "./support/run.ts";
 import {
   artifacts,
   buildCommand,
   createRunDir,
   discardRunDir,
   publishCoverage,
+  testRunOptions,
 } from "./support/testCommands.ts";
 import type { Artifacts } from "./support/testCommands.ts";
 import {
@@ -279,7 +279,8 @@ async function runInto(
     withCoverage,
     options.testPaths,
   );
-  const result = await runCommand(TEST_GATE, command, layout.root, runOptions(options.timeoutMs));
+  const run = testRunOptions(layout, options.timeoutMs);
+  const result = await runCommand(TEST_GATE, command, layout.root, run);
 
   const environmentFailure = runnerMissing(options.env, TEST_GATE, runner, result);
   if (environmentFailure !== undefined) {

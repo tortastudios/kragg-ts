@@ -28,7 +28,7 @@ import {
   writeFileSync,
 } from "node:fs";
 import { tmpdir } from "node:os";
-import { join } from "node:path";
+import { isAbsolute, join } from "node:path";
 import { after, test } from "node:test";
 
 import { runTests, TEST_GATE } from "../src/adapters/testRunner.ts";
@@ -37,7 +37,16 @@ import { detectTestRunner } from "../src/adapters/support/detect.ts";
 import { parseBunTest } from "../src/adapters/support/bunTestReport.ts";
 import { parseNodeTap } from "../src/adapters/support/nodeTestReport.ts";
 import { parseVitestJson } from "../src/adapters/support/vitestReport.ts";
-import { artifacts, buildCommand, RUNS_DIR } from "../src/adapters/support/testCommands.ts";
+import {
+  artifacts,
+  buildCommand,
+  RUNS_DIR,
+  testRunOptions,
+} from "../src/adapters/support/testCommands.ts";
+import UnhandledErrorReporter, {
+  REPORTER_PATH,
+  UNHANDLED_ERRORS_ENV,
+} from "../src/adapters/support/vitestReporter.ts";
 import { fromReport } from "../src/catalog/results.ts";
 import {
   buildReport,
@@ -1393,4 +1402,157 @@ test("colocated tests and paths with spaces run end to end, under `node --test`"
   assert.equal(outcome.summary.failed, 0);
   assert.ok(outcome.command.includes("src/**/*.test.js"));
   assert.ok(outcome.command.includes("my tests/**/*.{test,spec}.{ts,tsx,mts,cts,js,jsx,mjs,cjs}"));
+});
+
+// ── errors vitest catches outside any test ─────────────────────────────────────
+//
+// A timer that fires after its test has finished makes vitest exit 1 with
+// every test passing and a json report that still says `success: true`: the
+// json reporter has no field for an unhandled error, and vitest prints one
+// only through the console reporters kragg replaces. kragg therefore runs a
+// reporter of its own beside json, which writes the list vitest hands it into
+// this run's directory.
+
+/**
+ * An unhandled error exactly as vitest 5.0.3 hands it to a reporter: the
+ * worker's serialized object, source-mapped stack, vitest's own keys.
+ */
+const SERIALIZED_ERROR = {
+  stack:
+    "ReferenceError: document is not defined\n" +
+    "    at captureFocus (/repo/src/widget.ts:13:3)\n" +
+    "    at paint (/repo/src/widget.ts:9:3)\n" +
+    "    at Timeout._onTimeout (/repo/src/widget.ts:4:5)\n" +
+    "    at listOnTimeout (node:internal/timers:685:17)\n" +
+    "    at process.processTimers (node:internal/timers:618:7)",
+  message: "document is not defined",
+  constructor: "Function<ReferenceError>",
+  name: "ReferenceError",
+  toString: "Function<toString>",
+  VITEST_TEST_NAME: "waits long enough for the timer to fire",
+  VITEST_TEST_PATH: "/repo/test/widget.test.ts",
+  type: "Uncaught Exception",
+};
+
+/** Run `body` with the reporter's variable set to `target`, then restore it. */
+function withReporterTarget(target: string | undefined, body: () => void): void {
+  const previous = process.env[UNHANDLED_ERRORS_ENV];
+  if (target === undefined) {
+    delete process.env[UNHANDLED_ERRORS_ENV];
+  } else {
+    process.env[UNHANDLED_ERRORS_ENV] = target;
+  }
+  try {
+    body();
+  } finally {
+    if (previous === undefined) {
+      delete process.env[UNHANDLED_ERRORS_ENV];
+    } else {
+      process.env[UNHANDLED_ERRORS_ENV] = previous;
+    }
+  }
+}
+
+test("vitest also runs kragg's own reporter, beside the json one it parses", () => {
+  const layout = artifacts("/repo", "coverage/coverage-final.json", RUN_DIR);
+  const command = buildCommand(["/repo/node_modules/.bin/vitest"], "vitest", layout, false, []);
+  assert.ok(command.includes("--reporter=json"), "json is still the report kragg reads");
+  assert.ok(command.includes(`--reporter=${REPORTER_PATH}`));
+  // By absolute path: vitest would read a bare name as a package and resolve a
+  // relative one against the project, and neither is where kragg is installed.
+  assert.ok(isAbsolute(REPORTER_PATH));
+  assert.ok(existsSync(REPORTER_PATH), "the path is the module's own, so it exists");
+  // It writes into THIS run's directory, named through the environment.
+  assert.equal(layout.unhandledErrorsFile, `${RUN_DIR}/unhandled-errors.json`);
+  assert.deepEqual(testRunOptions(layout, undefined), {
+    env: { [UNHANDLED_ERRORS_ENV]: layout.unhandledErrorsFile },
+  });
+  assert.equal(testRunOptions(layout, 500).timeoutMs, 500);
+});
+
+test("the reporter writes the list vitest hands it, from either hook", () => {
+  const target = join(project({}), "unhandled-errors.json");
+  withReporterTarget(target, () => {
+    const reporter = new UnhandledErrorReporter();
+    // vitest 3, 4 and 5: `onTestRunEnd`, with the worker's serialized error.
+    reporter.onTestRunEnd([], [SERIALIZED_ERROR]);
+    assert.deepEqual(JSON.parse(readFileSync(target, "utf8")), {
+      errors: [
+        {
+          name: "ReferenceError",
+          message: "document is not defined",
+          stack: SERIALIZED_ERROR.stack,
+          type: "Uncaught Exception",
+          testPath: "/repo/test/widget.test.ts",
+          testName: "waits long enough for the timer to fire",
+          afterTeardown: false,
+        },
+      ],
+    });
+    // vitest 3 also calls `onFinished`. An error caught in vitest's own process
+    // can be a real `Error`, whose message and stack are not enumerable, and a
+    // rejection can carry a value that is not an error at all.
+    const thrown = new TypeError("teardown failed");
+    reporter.onFinished([], [
+      Object.assign(thrown, { type: "Unhandled Rejection", VITEST_AFTER_ENV_TEARDOWN: true }),
+      "a bare string",
+    ]);
+    const written: unknown = JSON.parse(readFileSync(target, "utf8"));
+    assert.deepEqual(written, {
+      errors: [
+        {
+          name: "TypeError",
+          message: "teardown failed",
+          stack: thrown.stack,
+          type: "Unhandled Rejection",
+          testPath: "",
+          testName: "",
+          afterTeardown: true,
+        },
+        {
+          name: "",
+          message: "a bare string",
+          stack: "",
+          type: "",
+          testPath: "",
+          testName: "",
+          afterTeardown: false,
+        },
+      ],
+    });
+    // No errors is still a file: the reporter ran and vitest caught nothing.
+    reporter.onTestRunEnd([], []);
+    assert.deepEqual(JSON.parse(readFileSync(target, "utf8")), { errors: [] });
+  });
+});
+
+test("the reporter never throws into vitest, and writes nothing kragg did not ask for", () => {
+  const root = project({});
+  withReporterTarget(undefined, () => {
+    new UnhandledErrorReporter().onTestRunEnd([], [SERIALIZED_ERROR]);
+  });
+  assert.deepEqual(readdirSync(root), []);
+  // A target it cannot write is swallowed: a reporter that throws becomes one
+  // more error in the run it is describing.
+  withReporterTarget(join(root, "missing", "unhandled-errors.json"), () => {
+    assert.doesNotThrow(() => new UnhandledErrorReporter().onTestRunEnd([], [SERIALIZED_ERROR]));
+  });
+  assert.deepEqual(readdirSync(root), []);
+});
+
+test("the spawned runner is told where this run's unhandled errors go", async () => {
+  const root = vitestProject(
+    [
+      `printf "%s" "$${UNHANDLED_ERRORS_ENV}" > reporter-target.txt`,
+      writeReport(GREEN),
+      writeCoverage(FULL_COVERAGE),
+      "exit 0",
+    ].join("\n"),
+  );
+  const outcome = await run(root);
+  assert.ok(outcome.ok, outcome.ok ? "" : outcome.message);
+  const target = readFileSync(join(root, "reporter-target.txt"), "utf8");
+  assert.match(target, /\/\.kragg\/runs\/test-[^/]+\/unhandled-errors\.json$/u);
+  assert.ok(target.startsWith(root), "inside this project's own run directory");
+  assertPreserved(root);
 });

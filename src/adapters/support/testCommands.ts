@@ -11,12 +11,15 @@
 import { copyFileSync, mkdirSync, mkdtempSync, renameSync, rmSync } from "node:fs";
 import { dirname, isAbsolute, join, resolve } from "node:path";
 
+import type { RunCommandOptions } from "../../engine/runner.ts";
 import { missingToolMessage, resolveBin } from "../../environment/project.ts";
 import type { ProjectEnvironment } from "../../environment/project.ts";
 import { testRunnerPatterns } from "../../util/testPaths.ts";
 import type { TestRunnerName } from "./detect.ts";
 import { crashed, missingTool } from "./outcome.ts";
 import type { Unavailable } from "./outcome.ts";
+import { runOptions } from "./run.ts";
+import { REPORTER_PATH, UNHANDLED_ERRORS_ENV } from "./vitestReporter.ts";
 
 /** Default location of the istanbul report — vitest's own default path. */
 export const DEFAULT_COVERAGE_REPORT = "coverage/coverage-final.json";
@@ -46,6 +49,8 @@ export interface Artifacts {
   readonly runDir: string;
   /** vitest's `--outputFile` target. */
   readonly reportFile: string;
+  /** vitest's unhandled errors, written by kragg's own reporter (`vitestReporter.ts`). */
+  readonly unhandledErrorsFile: string;
   /** Directory the runner is told to write coverage into. */
   readonly coverageDir: string;
   /** istanbul `coverage-final.json`, written by vitest. */
@@ -81,6 +86,7 @@ export function artifacts(
     root,
     runDir,
     reportFile: join(runDir, "test-report.json"),
+    unhandledErrorsFile: join(runDir, "unhandled-errors.json"),
     coverageDir,
     istanbulFile: join(coverageDir, "coverage-final.json"),
     lcovFile: join(coverageDir, "lcov.info"),
@@ -159,6 +165,20 @@ export function publishCoverage(layout: Artifacts, runner: TestRunnerName): stri
   } catch (error: unknown) {
     return `could not publish ${from} to ${to}: ${describeError(error)}`;
   }
+}
+
+/**
+ * How the runner is spawned: the gate's timeout, and where kragg's vitest
+ * reporter writes this run's unhandled errors.
+ *
+ * The variable is set whatever the runner: `node` and `bun` never read it,
+ * so one set of options serves all three.
+ */
+export function testRunOptions(
+  layout: Artifacts,
+  timeoutMs: number | undefined,
+): RunCommandOptions {
+  return { ...runOptions(timeoutMs), env: { [UNHANDLED_ERRORS_ENV]: layout.unhandledErrorsFile } };
 }
 
 /** Remove the run directory. kragg created it; nothing else lives in it. */
@@ -309,6 +329,12 @@ function withoutSubcommand(
  * vitest force-enables it for the UI and html reporters but NOT for json, so
  * without this flag every failure loses its definition-site line number.
  *
+ * The second `--reporter` is kragg's own (`vitestReporter.ts`), by absolute
+ * path. The json report has no field for an error vitest caught outside any
+ * test, and replacing the console reporters is what kept vitest from printing
+ * one: without it, a run that failed on an unhandled error comes back as an
+ * exit code over a report that says every test passed.
+ *
  * `--coverage.reportOnFailure` matters more than it looks: it defaults to
  * false, and `reportCoverage()` returns early when any test failed. Without
  * it, the run that most needs a coverage number produces none.
@@ -336,6 +362,7 @@ function vitestCommand(
     "run",
     ...args,
     "--reporter=json",
+    `--reporter=${REPORTER_PATH}`,
     `--outputFile=${layout.reportFile}`,
     "--includeTaskLocation",
   ];
