@@ -102,7 +102,7 @@ failed task, not a judgement call.
 
 ## Project Map
 
-193 modules under `src/`, listed top-down in the order `kragg.json`'s
+196 modules under `src/`, listed top-down in the order `kragg.json`'s
 `layers` declares — a module may import its own layer or a lower one, never a
 higher one, and the `boundaries` gate enforces that on this repo.
 
@@ -181,8 +181,11 @@ higher one, and the `boundaries` gate enforces that on this repo.
   `Unavailable` outcome kinds, the `runCommand` helpers, the per-invocation
   artifact directory under `.kragg/runs/` (`testCommands.ts`), WHICH command
   runs the suite and where it came from (`testInvocation.ts` — `test_command`
-  or detection, and the provenance sentence that says which) and the messages
-  for evidence the test gate refuses (`testEvidence.ts`).
+  or detection, and the provenance sentence that says which), the messages
+  for evidence the test gate refuses (`testEvidence.ts`), and the reporter
+  kragg adds to every vitest run (`vitestReporter.ts` — vitest loads it, by
+  path, to record the errors it catches outside any test) with the reader
+  that turns those into `runner-unhandled-error` (`vitestResults.ts`).
 - `src/scaffold/` — `kragg new` / `init` / `gen module`: `project.ts` (the
   engine), `initPlan.ts` (what `init` would change, decided before anything is
   written, so `--dry-run` and the real run cannot disagree), `kinds.ts`,

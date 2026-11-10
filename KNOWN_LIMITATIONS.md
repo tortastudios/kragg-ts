@@ -478,6 +478,29 @@ Every external tool adapter (`lint`, `tsc`, `test-coverage`, `audit`,
   **advisory** — `continue-on-error`, never a required check — because a break
   there is caused by software this repository does not control. The unit
   suite's recorded fixtures remain the only check that runs on every commit.
+- **kragg's vitest reporter depends on vitest's reporter API, not only its
+  output.** vitest's json report has no field for an error caught outside any
+  test, so kragg loads a reporter of its own into every vitest run
+  (`src/adapters/support/vitestReporter.ts`). It reads the list from
+  `onTestRunEnd` (vitest 3.0 and later) and `onFinished` (which vitest 3
+  still calls). Verified against vitest 3.0.0, 3.0.9, 3.1.0, 3.1.4, 3.2.0,
+  3.2.4, 4.1.12, 5.0.0 and 5.0.3, and exercised weekly by the vitest rows of
+  the `tools` lane. A vitest that stopped calling both hooks would leave the
+  list empty. With coverage on, `runner-reported-failure` would still fail the
+  run on its exit code; with `coverage_fail_under: 0`, an unhandled error
+  would read as a pass again, as it did in 0.2.0.
+- **vitest 3.0 and 3.1 load that reporter only from `node_modules`.** For a
+  reporter outside the project, they refuse any path that is not under
+  `node_modules`. An installed kragg always is. A kragg run from a source
+  checkout, or linked into the project (`pnpm link`, a `workspace:`
+  dependency), makes those two minors stop at startup with "Failed to load
+  custom Reporter". `test-coverage` reports that as a crash (exit 3), never a
+  pass. vitest 3.2 and later load it from anywhere.
+- **Only vitest's unhandled errors are captured.** `node --test` and bun
+  reach kragg through their own output, as before. bun's verdict already
+  includes its exit code, and for `node --test` kragg reads only the TAP
+  stream. No Windows row runs vitest, so loading the reporter by a Windows
+  path is not exercised anywhere.
 - **What no live row covers.** `tsc`'s *diagnostic* parser: the compatibility
   rows run a real `tsc` that succeeds, so the clean path is exercised and the
   error path is not. `audit`: only the **pnpm** parser is exercised live (by
