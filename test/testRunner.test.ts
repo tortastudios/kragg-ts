@@ -31,12 +31,13 @@ import { tmpdir } from "node:os";
 import { isAbsolute, join } from "node:path";
 import { after, test } from "node:test";
 
-import { runTests, TEST_GATE } from "../src/adapters/testRunner.ts";
+import { EMPTY_SUMMARY, runTests, TEST_GATE } from "../src/adapters/testRunner.ts";
 import type { TestRunOutcome } from "../src/adapters/testRunner.ts";
 import { detectTestRunner } from "../src/adapters/support/detect.ts";
 import { parseBunTest } from "../src/adapters/support/bunTestReport.ts";
 import { parseNodeTap } from "../src/adapters/support/nodeTestReport.ts";
 import { parseVitestJson } from "../src/adapters/support/vitestReport.ts";
+import { runnerReportedFailure } from "../src/adapters/support/testEvidence.ts";
 import {
   artifacts,
   buildCommand,
@@ -886,7 +887,39 @@ test("a runner that prints no threshold line is still reported, honestly", async
   assert.match(message, /vitest exited 1 with all 1 tests passing/u);
   assert.match(message, /failed by the runner itself/u);
   assert.doesNotMatch(message, /reported:/u);
+  // BOTH usual causes, not a threshold alone: an unhandled error fails the run
+  // the same way, and naming only a threshold sent a reader after one that did
+  // not exist (TOR-1902).
+  assert.match(message, /The two usual causes are a coverage threshold in the runner's own configuration/u);
+  assert.match(message, /and an unhandled error: an exception or rejection the runner caught outside any test/u);
+  assert.match(message, /a timer that fires after its test has finished/u);
+  // And the hint does not send the reader to re-run an argv that prints nothing.
+  const fixHint = outcome.violations[0]?.fixHint ?? "";
+  assert.match(fixHint, /look for a threshold line or an unhandled-errors section/u);
+  assert.match(fixHint, /replaces vitest's console reporters, so it prints neither: \S*vitest run /u);
   assertPreserved(root);
+});
+
+test("for a runner whose own output kragg leaves visible, the hint names the gate's argv as-is", () => {
+  const violation = runnerReportedFailure(
+    "node",
+    {
+      name: TEST_GATE,
+      command: ["/usr/bin/node", "--test", "--test-reporter=tap"],
+      cwd: "/repo",
+      returncode: 1,
+      stdout: "",
+      stderr: "",
+    },
+    { summary: { ...EMPTY_SUMMARY, total: 2, passed: 2 }, violations: [], success: true },
+    true,
+  );
+  assert.equal(violation?.code, "runner-reported-failure");
+  assert.match(violation?.message ?? "", /and an unhandled error/u);
+  assert.match(
+    violation?.fixHint ?? "",
+    /unhandled-errors section \(this gate's command: \/usr\/bin\/node --test --test-reporter=tap\)$/u,
+  );
 });
 
 test("kragg's floor and the runner's threshold are two violations, never one", async () => {
