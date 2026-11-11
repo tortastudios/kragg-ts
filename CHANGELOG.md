@@ -18,6 +18,8 @@ a previously green run red — see [Gate additions](#gate-additions) below.
 
 ## [Unreleased]
 
+## [0.3.0] — 2026-11-11
+
 ### Fixed
 
 - **TOR-1902** — an error vitest catches outside any test is now reported as
